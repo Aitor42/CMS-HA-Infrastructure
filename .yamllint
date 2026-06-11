@@ -1,0 +1,11 @@
+extends: default
+
+rules:
+  line-length: disable
+  indentation: disable
+  truthy: disable
+  colons:
+    max-spaces-before: -1
+    max-spaces-after: -1
+  document-start: disable
+  comments: disable

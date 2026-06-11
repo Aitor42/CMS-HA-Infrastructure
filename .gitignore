@@ -1,0 +1,31 @@
+# Credentials and sensitive files
+token.txt
+*.cookie
+
+# Test files
+prueba
+
+# Binary files (per assignment requirement: avoid ISOs and binaries)
+*.pdf
+*.iso
+*.qcow2
+*.img
+
+# OS and editor files
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# VM storage
+/vm_storage/
+*.pdf
+
+# Terraform / OpenTofu state and providers
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
