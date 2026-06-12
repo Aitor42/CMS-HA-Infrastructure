@@ -15,7 +15,7 @@
 export VM_DIR="${VM_DIR:-$HOME/vm_storage}"
 
 # SSH private key used to manage the cluster
-export HOST_KEY_FILE="${HOST_KEY_FILE:-$HOME/.ssh/id_rsa}"
+export HOST_KEY_FILE="${HOST_KEY_FILE:-$HOME/.ssh/id_ed25519_gar}"
 
 # Common SSH parameters for non-interactive connections to VMs
 export SSH_OPTS="-i ${HOST_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes"
