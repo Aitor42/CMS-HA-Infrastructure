@@ -283,7 +283,7 @@ if [[ $JUMPSTART_ONLY -eq 1 ]]; then
 
     if ! $SUDO_CMD virsh net-info internal &>/dev/null; then
         $SUDO_CMD virsh net-define "$VM_DIR/internal-net.xml"
-        # $SUDO_CMD virsh net-start internal
+        $SUDO_CMD virsh net-start internal
         $SUDO_CMD virsh net-autostart internal
         echo "  [OK] Red 'internal' creada y levantada"
     else
@@ -308,7 +308,7 @@ if [[ $JUMPSTART_ONLY -eq 1 ]]; then
 
     if ! $SUDO_CMD virsh net-info main &>/dev/null; then
         $SUDO_CMD virsh net-define "$VM_DIR/main-net.xml"
-        # $SUDO_CMD virsh net-start main
+        $SUDO_CMD virsh net-start main
         $SUDO_CMD virsh net-autostart main
         echo "  [OK] Red 'main' creada y levantada"
     else
