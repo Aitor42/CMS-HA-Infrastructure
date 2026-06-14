@@ -1,0 +1,5 @@
+<network>
+  <name>internal</name>
+  <bridge name='virbr-int' stp='on' delay='0'/>
+  <domain name='internal.local'/>
+</network>

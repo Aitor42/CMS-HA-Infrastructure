@@ -1,0 +1,46 @@
+ddns-update-style interim;
+allow booting;
+allow bootp;
+
+option domain-name "internal.local";
+option domain-name-servers 192.168.10.10;
+default-lease-time 21600;
+max-lease-time 43200;
+
+# Dynamic range and PXE parameters for the internal network (192.168.10.0/24)
+subnet 192.168.10.0 netmask 255.255.255.0 {
+    option routers 192.168.10.1;
+    option subnet-mask 255.255.255.0;
+    range dynamic-bootp 192.168.10.50 192.168.10.99;
+    option domain-name "internal.local";
+    option domain-name-servers 192.168.10.10;
+    filename "/pxelinux.0";
+    next-server 192.168.10.10;
+}
+
+# Dynamic range and PXE parameters for the main network (192.168.20.0/24)
+subnet 192.168.20.0 netmask 255.255.255.0 {
+    option routers 192.168.20.1;
+    option subnet-mask 255.255.255.0;
+    range dynamic-bootp 192.168.20.50 192.168.20.99;
+    option domain-name "main.local";
+    option domain-name-servers 192.168.20.10;
+    filename "/pxelinux.0";
+    next-server 192.168.20.10;
+}
+
+# Static IP mappings generated dynamically by Cobbler
+#for dhcp_tag in $dhcp_tags.keys():
+    #for mac in $dhcp_tags[$dhcp_tag].keys():
+        #set iface = $dhcp_tags[$dhcp_tag][$mac]
+        host $iface.name {
+            hardware ethernet $mac;
+            #if $iface.ip_address:
+            fixed-address $iface.ip_address;
+            #end if
+            #if $iface.hostname:
+            option host-name "$iface.hostname";
+            #end if
+        }
+    #end for
+#end for
