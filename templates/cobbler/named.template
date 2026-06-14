@@ -1,0 +1,36 @@
+options {
+    listen-on port 53 { any; };
+    directory       "@@bind_zonefiles@@";
+    dump-file       "@@bind_zonefiles@@/data/cache_dump.db";
+    statistics-file "@@bind_zonefiles@@/data/named_stats.txt";
+    memstatistics-file "@@bind_zonefiles@@/data/named_mem_stats.txt";
+    allow-query     { any; };
+    recursion yes;
+    dnssec-validation no;
+    forward only;
+    forwarders {
+        172.20.32.3;
+        8.8.8.8;
+    };
+};
+
+logging {
+    channel default_debug {
+        file "data/named.run";
+        severity dynamic;
+    };
+};
+
+#for $zone in $forward_zones
+zone "${zone}." {
+    type master;
+    file "$zone";
+};
+#end for
+
+#for $zone, $arpa in $reverse_zones
+zone "${arpa}." {
+    type master;
+    file "$zone";
+};
+#end for

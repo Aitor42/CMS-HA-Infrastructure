@@ -1,0 +1,59 @@
+#cloud-config
+autoinstall:
+  version: 1
+  updates: security
+  shutdown: reboot
+  locale: es_ES.UTF-8
+  keyboard:
+    layout: es
+  identity:
+    hostname: $hostname
+    username: admin
+    password: "$6$LOCKED$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
+  users:
+    - name: admin
+      shell: /bin/bash
+      sudo: ALL=(ALL) NOPASSWD:ALL
+      lock_passwd: true
+  ssh:
+    install-server: true
+    allow-pw: false
+  network:
+    version: 2
+    ethernets:
+      all-en:
+        match:
+          name: "en*"
+        dhcp4: true
+  apt:
+    primary:
+      - arches: [default]
+        uri: http://archive.ubuntu.com/ubuntu
+    disable_suites: [security]
+  storage:
+    layout:
+      name: direct
+  late-commands:
+    # Create SSH key directories
+    - mkdir -p /target/root/.ssh /target/home/admin/.ssh
+    # Fetch authorised public keys from the Jumpstart Cobbler pub endpoint
+    - >-
+      sh -c 'curl -fsS http://192.168.10.10/cblr/pub/authorized_keys
+      || curl -fsS http://192.168.20.10/cblr/pub/authorized_keys'
+      >> /target/root/.ssh/authorized_keys
+    - >-
+      sh -c 'curl -fsS http://192.168.10.10/cblr/pub/authorized_keys
+      || curl -fsS http://192.168.20.10/cblr/pub/authorized_keys'
+      >> /target/home/admin/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/admin/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/admin/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R admin:admin /home/admin/.ssh
+    # Harden SSH daemon on provisioned node
+    - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
+    - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+    - curtin in-target --target=/target -- systemctl enable ssh
+    # Signal Cobbler that installation is complete to prevent re-PXE on next boot
+    - >-
+      sh -c 'curl -fsS "http://192.168.10.10/cblr/svc/op/nopxe/system/$hostname"
+      || curl -fsS "http://192.168.20.10/cblr/svc/op/nopxe/system/$hostname"
+      || true' > /target/root/nopxe_status
