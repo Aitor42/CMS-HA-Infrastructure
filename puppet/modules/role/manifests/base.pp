@@ -63,7 +63,7 @@ class role::base {
       127.0.1.1       ${facts['networking']['fqdn']} ${facts['networking']['hostname']}
 
       # Jumpstart / Puppet Server
-      192.168.10.10   jumpstart.internal.local jumpstart puppet-wrong-alias
+      192.168.10.10   jumpstart.internal.local jumpstart puppet
 
       # Internal network (192.168.10.0/24)
       192.168.10.20   internal-monitor.internal.local internal-monitor
