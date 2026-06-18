@@ -74,12 +74,12 @@ done
 # 2. WAIT FOR THE NODE PAIR TO ESTABLISH REPLICATION LINK
 # ==============================================================================
 echo '[+] Waiting for DRBD replication sync and link establishment...'
-for i in $(seq 1 5); do
+for i in $(seq 1 30); do
   if ssh $SSH_OPTS root@"$NODE1_IP" "drbdadm status cms_data 2>/dev/null" | grep -q 'peer-disk:UpToDate\|peer-disk:Inconsistent\|role:Secondary'; then
     echo '  ✔ DRBD nodes linked successfully'
     break
   fi
-  if [ $i -eq 5 ]; then
+  if [ $i -eq 30 ]; then
     echo '  ⚠ Link timeout exceeded, continuing...'
   fi
   sleep 5
