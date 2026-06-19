@@ -1,0 +1,9 @@
+# namespace.yaml
+# Namespace para aislar todos los recursos del CMS
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cms
+  labels:
+    app: wordpress-cms
+    project: gar-trabajo-final

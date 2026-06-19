@@ -1,0 +1,42 @@
+# mariadb-backup-pv.yaml
+# PersistentVolume and PersistentVolumeClaim for automated MariaDB backups.
+#
+# Provides 2 GiB of local storage on the DRBD-replicated master node at
+# /mnt/data/mariadb-backups. Because the hostPath resides on the same DRBD
+# device as the MariaDB data directory, backups are automatically replicated
+# to the standby master.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mariadb-backup-pv
+  labels:
+    app: mariadb
+    purpose: backup
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 2Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /mnt/data/mariadb-backups
+    type: DirectoryOrCreate
+
+---
+# PVC consumed by the mariadb-backup CronJob
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-backup-pvc
+  namespace: cms
+  labels:
+    app: mariadb
+    purpose: backup
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

@@ -1,0 +1,19 @@
+# mariadb-pv.yaml
+# Volumen persistente para almacenar los datos de MariaDB
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mariadb-pv
+  labels:
+    app: mariadb
+    type: local
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /mnt/data/mariadb
+    type: DirectoryOrCreate
