@@ -49,7 +49,7 @@ spec:
               echo "[+] Esperando a que MariaDB esté disponible..."
               READY=false
               for i in $(seq 1 30); do
-                if mysql-admin ping -h mariadb.cms.svc.cluster.local -u root -p"${MYSQL_ROOT_PASSWORD}" --silent 2>/dev/null; then
+                if mysqladmin ping -h mariadb.cms.svc.cluster.local -u root -p"${MYSQL_ROOT_PASSWORD}" --silent 2>/dev/null; then
                   echo "[+] MariaDB está listo."
                   READY=true
                   break
