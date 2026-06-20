@@ -1,0 +1,72 @@
+# init-db-job.yaml
+# Job para inicializar la base de datos de WordPress en MariaDB
+# Crea la base de datos 'wordpress' y el usuario 'wp_user' con los permisos necesarios
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-wordpress-db
+  namespace: cms
+  labels:
+    app: db-init
+    component: db-init
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        app: db-init
+        component: db-init
+    spec:
+      restartPolicy: OnFailure
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: init-db
+          image: mariadb:10.11
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_WP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MYSQL_WP_PASSWORD
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "[+] Esperando a que MariaDB esté disponible..."
+              READY=false
+              for i in $(seq 1 30); do
+                if mysql-admin ping -h mariadb.cms.svc.cluster.local -u root -p"${MYSQL_ROOT_PASSWORD}" --silent 2>/dev/null; then
+                  echo "[+] MariaDB está listo."
+                  READY=true
+                  break
+                fi
+                echo "[*] Intento $i/30 - Esperando 5 segundos..."
+                sleep 5
+              done
+              if [ "$READY" = "false" ]; then
+                echo "[!] MariaDB no respondió tras 150 segundos. Abortando."
+                exit 1
+              fi
+
+              echo "[+] Creando base de datos y usuario para WordPress..."
+              mysql -h mariadb.cms.svc.cluster.local -u root -p"${MYSQL_ROOT_PASSWORD}" <<SQL
+              CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+              CREATE USER IF NOT EXISTS 'wp_user'@'%' IDENTIFIED BY '${MYSQL_WP_PASSWORD}';
+              GRANT ALL PRIVILEGES ON wordpress.* TO 'wp_user'@'%';
+              FLUSH PRIVILEGES;
+              SQL
+              echo "[+] Base de datos y usuario creados correctamente."

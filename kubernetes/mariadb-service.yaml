@@ -1,0 +1,39 @@
+# mariadb-service.yaml
+# Servicios de red para MariaDB:
+#   - ClusterIP: acceso interno dentro del clúster K3s
+#   - NodePort (30306): acceso externo desde los frontales WordPress en la red main
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  namespace: cms
+  labels:
+    app: mariadb
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3306
+      targetPort: 3306
+      protocol: TCP
+      name: mysql
+  selector:
+    app: mariadb
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-nodeport
+  namespace: cms
+  labels:
+    app: mariadb
+spec:
+  type: NodePort
+  ports:
+    - port: 3306
+      targetPort: 3306
+      nodePort: 30306
+      protocol: TCP
+      name: mysql
+  selector:
+    app: mariadb
