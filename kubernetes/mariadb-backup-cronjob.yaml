@@ -1,0 +1,106 @@
+# mariadb-backup-cronjob.yaml
+# Kubernetes CronJob that performs automated daily backups of the WordPress
+# MariaDB database using mysqldump.
+#
+# Schedule: every day at 02:00 UTC
+# Retention: last 7 days (older dumps are automatically deleted)
+# Storage: writes compressed .sql.gz files to the mariadb-backup-pvc volume
+#
+# The job connects to the MariaDB ClusterIP service within the cms namespace
+# and uses the root password from the existing mariadb-secret.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mariadb-backup
+  namespace: cms
+  labels:
+    app: mariadb
+    purpose: backup
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: mariadb
+            purpose: backup
+        spec:
+          restartPolicy: OnFailure
+          # Allow scheduling on master nodes (same tolerations as MariaDB StatefulSet)
+          tolerations:
+            - key: "node-role.kubernetes.io/master"
+              operator: "Exists"
+              effect: "NoSchedule"
+            - key: "node-role.kubernetes.io/control-plane"
+              operator: "Exists"
+              effect: "NoSchedule"
+          containers:
+            - name: mysqldump
+              image: mariadb:10.11
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: MYSQL_ROOT_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: mariadb-secret
+                      key: MYSQL_ROOT_PASSWORD
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+                  BACKUP_FILE="/backups/wordpress-${TIMESTAMP}.sql.gz"
+
+                  echo "[$(date)] Starting MariaDB backup..."
+
+                  # Dump the wordpress database, compress, and write to the backup volume
+                  mysqldump \
+                    --host=mariadb.cms.svc.cluster.local \
+                    --port=3306 \
+                    --user=root \
+                    --password="${MYSQL_ROOT_PASSWORD}" \
+                    --single-transaction \
+                    --routines \
+                    --triggers \
+                    --databases wordpress \
+                    | gzip > "${BACKUP_FILE}"
+
+                  # Verify the backup is not empty
+                  BACKUP_SIZE=$(stat -c%s "${BACKUP_FILE}" 2>/dev/null || echo 0)
+                  if [ "${BACKUP_SIZE}" -lt 100 ]; then
+                    echo "[ERROR] Backup file is suspiciously small (${BACKUP_SIZE} bytes)"
+                    rm -f "${BACKUP_FILE}"
+                    exit 1
+                  fi
+
+                  echo "[OK] Backup written: ${BACKUP_FILE} (${BACKUP_SIZE} bytes)"
+
+                  # Rotate old backups: keep only the last 7 days
+                  echo "[+] Rotating backups older than 7 days..."
+                  DELETED=$(find /backups -name "wordpress-*.sql.gz" -mtime +7 -delete -print | wc -l)
+                  echo "[OK] Deleted ${DELETED} old backup(s)"
+
+                  # List current backups
+                  echo ""
+                  echo "=== Current backups ==="
+                  ls -lh /backups/wordpress-*.sql.gz 2>/dev/null || echo "(none)"
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "250m"
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: mariadb-backup-pvc

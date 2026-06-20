@@ -1,0 +1,16 @@
+# mariadb-pvc.yaml
+# Solicitud de volumen persistente para MariaDB
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-pvc
+  namespace: cms
+  labels:
+    app: mariadb
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
