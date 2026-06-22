@@ -90,4 +90,16 @@ class role::router {
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9100.*Monitor.*Main"',
     require => Exec['ufw-enable'],
   }
+
+  exec { 'ufw-route-monitor-scrape-nginx':
+    command => '/usr/sbin/ufw route allow proto tcp from 192.168.10.20 to 192.168.20.100 port 9113 comment "Monitor -> Nginx exporter"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9113.*Monitor.*Nginx"',
+    require => Exec['ufw-enable'],
+  }
+
+  exec { 'ufw-route-monitor-scrape-apache':
+    command => '/usr/sbin/ufw route allow proto tcp from 192.168.10.20 to 192.168.20.0/24 port 9117 comment "Monitor -> Apache exporter"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9117.*Monitor.*Apache"',
+    require => Exec['ufw-enable'],
+  }
 }
