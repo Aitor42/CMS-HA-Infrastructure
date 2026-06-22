@@ -42,7 +42,7 @@ groups:
       - alert: DiskSpaceWarning
         expr: >-
           (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
-           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 50
+           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 20
         for: 5m
         labels:
           severity: warning
