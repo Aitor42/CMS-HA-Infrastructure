@@ -1,0 +1,71 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  scrape_timeout:      10s
+
+# ── Alertmanager connection ────────────────────────────────────────────────
+# Forward firing alerts to the local Alertmanager instance for notification
+# routing (webhooks, email, Slack, etc.).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'localhost:9093'
+
+# ── Alert rule files ──────────────────────────────────────────────────────
+# Evaluated every evaluation_interval (15 s). Contains infrastructure and
+# service health alerts (node down, disk, memory, MariaDB, Nginx, etc.).
+rule_files:
+  - '/etc/prometheus/alert-rules.yml'
+
+scrape_configs:
+
+  # ── Node resource metrics (node_exporter on every node) ────────────────────
+  - job_name: 'node_exporter'
+    static_configs:
+      - targets:
+          - '192.168.10.10:9100'   # jumpstart
+          - '192.168.10.11:9100'   # internal-master1
+          - '192.168.10.12:9100'   # internal-master2
+          - '192.168.10.13:9100'   # internal-worker1
+          - '192.168.10.14:9100'   # internal-worker2
+          - '192.168.10.15:9100'   # internal-storage
+          - '192.168.10.20:9100'   # internal-monitor (self)
+          - '192.168.20.100:9100'  # main-lb
+          - '192.168.20.101:9100'  # main-cms1
+          - '192.168.20.102:9100'  # main-cms2
+
+  # ── Nginx load balancer metrics ────────────────────────────────────────────
+  - job_name: 'nginx'
+    static_configs:
+      - targets:
+          - '192.168.20.100:9113'  # nginx_exporter on main-lb
+
+  # ── Apache CMS frontend metrics ────────────────────────────────────────────
+  - job_name: 'apache'
+    static_configs:
+      - targets:
+          - '192.168.20.101:9117'  # apache_exporter on main-cms1
+          - '192.168.20.102:9117'  # apache_exporter on main-cms2
+
+  # ── MariaDB metrics ────────────────────────────────────────────────────────
+  - job_name: 'mysql'
+    static_configs:
+      - targets:
+          - '192.168.10.11:9104'  # mysqld_exporter on internal-master1
+
+  # ── K3s / Kubernetes API metrics ───────────────────────────────────────────
+  # Uses the node_exporter port on masters (K3s exposes metrics via kubelet)
+  # No bearer token file needed — kubelet metrics on 10250 are accessible
+  # from the internal network with --authentication-token-webhook=false (K3s default)
+  - job_name: 'k3s_kubelet'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+    static_configs:
+      - targets:
+          - '192.168.10.11:10250'  # internal-master1 kubelet
+          - '192.168.10.12:10250'  # internal-master2 kubelet
+          - '192.168.10.13:10250'  # internal-worker1 kubelet
+          - '192.168.10.14:10250'  # internal-worker2 kubelet
+    metrics_path: /metrics

@@ -1,0 +1,12 @@
+[Unit]
+Description=MySQL/MariaDB Prometheus Exporter
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mysqld_exporter --config.my-cnf=/etc/mysqld_exporter/.my.cnf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Apache Prometheus Exporter
+After=network.target apache2.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/apache_exporter --scrape_uri="http://127.0.0.1/server-status?auto"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

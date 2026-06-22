@@ -1,0 +1,156 @@
+# alert-rules.yml
+# Prometheus alerting rules for the CMS HA infrastructure.
+# Covers node availability, disk/memory pressure, service health
+# (MariaDB, Nginx, Apache, K3s), HTTP error rates, and generic
+# target-down detection.
+
+groups:
+  # ── Infrastructure health ──────────────────────────────────────────────────
+  - name: infrastructure
+    rules:
+
+      # Fires when a node_exporter target is unreachable for over 2 minutes,
+      # which usually indicates the host is down or the exporter crashed.
+      - alert: NodeDown
+        expr: up{job="node_exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node {{ $labels.instance }} is down"
+          description: >-
+            The node_exporter target {{ $labels.instance }} has been
+            unreachable for more than 2 minutes.
+
+      # Fires when any mounted filesystem exceeds 90 % usage.
+      # At this level, services may start failing due to lack of disk space.
+      - alert: DiskSpaceCritical
+        expr: >-
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 10
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk space critical on {{ $labels.instance }}"
+          description: >-
+            Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }}
+            has less than 10 % free space (current value: {{ $value | printf "%.1f" }}%).
+
+      # Early warning when filesystem usage crosses the 80 % threshold,
+      # giving operators time to act before reaching the critical level.
+      - alert: DiskSpaceWarning
+        expr: >-
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+           / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 20
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk space warning on {{ $labels.instance }}"
+          description: >-
+            Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }}
+            has less than 20 % free space (current value: {{ $value | printf "%.1f" }}%).
+
+      # Sustained high memory usage may lead to OOM kills; this alert
+      # gives a 5-minute grace period to avoid false positives from spikes.
+      - alert: HighMemoryUsage
+        expr: >-
+          (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: >-
+            Memory usage on {{ $labels.instance }} has been above 85 %
+            for more than 5 minutes (current value: {{ $value | printf "%.1f" }}%).
+
+  # ── Service health ─────────────────────────────────────────────────────────
+  - name: services
+    rules:
+
+      # MariaDB is the single backend database; losing it is an immediate
+      # data-path failure, so we alert after just 1 minute.
+      - alert: MariaDBDown
+        expr: up{job="mysql"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MariaDB exporter {{ $labels.instance }} is down"
+          description: >-
+            The mysqld_exporter target {{ $labels.instance }} has been
+            unreachable for more than 1 minute. Check the MariaDB service
+            and the exporter process.
+
+      # Nginx is the single entry point for all external traffic; if it
+      # goes down the site is fully unavailable.
+      - alert: NginxDown
+        expr: up{job="nginx"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nginx exporter {{ $labels.instance }} is down"
+          description: >-
+            The nginx_exporter target {{ $labels.instance }} has been
+            unreachable for more than 1 minute. Check the Nginx service
+            and the exporter process on the load balancer.
+
+      # Apache backends are behind the load balancer and can tolerate
+      # short outages (the LB will route to the healthy backend), so we
+      # use a longer 2-minute window and warning severity.
+      - alert: ApacheDown
+        expr: up{job="apache"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Apache exporter {{ $labels.instance }} is down"
+          description: >-
+            The apache_exporter target {{ $labels.instance }} has been
+            unreachable for more than 2 minutes. The CMS backend on this
+            node may be offline.
+
+      # A kubelet being unreachable for 3 minutes usually means the K3s
+      # node has left the cluster or the kubelet process crashed.
+      - alert: K3sNodeNotReady
+        expr: up{job="k3s_kubelet"} == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "K3s node {{ $labels.instance }} is not ready"
+          description: >-
+            The kubelet on {{ $labels.instance }} has been unreachable for
+            more than 3 minutes. The node may have left the K3s cluster.
+
+      # A sustained rate of 5xx responses above 5 % signals a backend
+      # problem that is affecting real user traffic.
+      - alert: HighHTTP5xxRate
+        expr: >-
+          (rate(nginx_http_requests_total{status=~"5.."}[5m])
+           / rate(nginx_http_requests_total[5m])) * 100 > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP 5xx error rate on {{ $labels.instance }}"
+          description: >-
+            More than 5 % of HTTP responses from Nginx on
+            {{ $labels.instance }} returned a 5xx status code over the
+            last 5 minutes (current rate: {{ $value | printf "%.1f" }}%).
+
+      # Generic catch-all: any Prometheus scrape target that stays down
+      # for 5 minutes. Useful for exporters we might add in the future.
+      - alert: PrometheusTargetMissing
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus target {{ $labels.instance }} is down"
+          description: >-
+            The scrape target {{ $labels.instance }} (job {{ $labels.job }})
+            has been unreachable for more than 5 minutes.
