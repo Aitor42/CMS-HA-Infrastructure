@@ -238,7 +238,7 @@ mkdir -p /usr/local/share/ca-certificates/internal
 cat > /usr/local/share/ca-certificates/internal/cms-ha-root-ca.crt <<'CERT'
 ${ROOT_CA_CERT}
 CERT
-# update-ca-certificates --fresh 2>/dev/null || update-ca-certificates 2>/dev/null || true
+update-ca-certificates --fresh 2>/dev/null || update-ca-certificates 2>/dev/null || true
 TRUST_EOF
 
     echo "  [OK] Root CA trusted on $NODE_IP"
