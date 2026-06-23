@@ -1,0 +1,20 @@
+network:
+  version: 2
+  ethernets:
+    ${INT_NAME}:
+      match:
+        macaddress: "52:54:00:10:01:02"
+      set-name: ${INT_NAME}
+      addresses:
+        - 192.168.10.1/24
+    ${MAIN_NAME}:
+      match:
+        macaddress: "52:54:00:10:02:02"
+      set-name: ${MAIN_NAME}
+      addresses:
+        - 192.168.20.1/24
+    ${WAN_NAME}:
+      match:
+        macaddress: "52:54:00:10:00:02"
+      set-name: ${WAN_NAME}
+      dhcp4: true

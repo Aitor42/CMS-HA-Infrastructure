@@ -1,0 +1,36 @@
+{
+  "dnsNames": ["jumpstart.internal.local", "ca.internal.local"],
+  "db": {
+    "type": "badgerv2",
+    "dataSource": "/etc/step-ca/db"
+  },
+  "authority": {
+    "provisioners": [
+      {
+        "type": "ACME",
+        "name": "acme",
+        "forceCN": true
+      },
+      {
+        "type": "JWK",
+        "name": "admin",
+        "encryptedKey": "PLACEHOLDER_ENCRYPTED_KEY"
+      }
+    ],
+    "claims": {
+      "maxTLSCertDuration": "8760h",
+      "defaultTLSCertDuration": "720h",
+      "minTLSCertDuration": "1h"
+    }
+  },
+  "tls": {
+    "cipherSuites": [
+      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+      "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+    ],
+    "minVersion": 1.2,
+    "maxVersion": 1.3
+  }
+}
