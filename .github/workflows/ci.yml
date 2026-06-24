@@ -1,0 +1,217 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint-shell:
+    name: Lint Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ShellCheck — static analysis
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: warning
+          scandir: .
+          ignore_names: "*.res"
+        env:
+          SHELLCHECK_OPTS: "-e SC2029 -e SC2087"
+
+      - name: Bash syntax check (bash -n)
+        run: |
+          echo "Checking bash syntax for all .sh files..."
+          ERRORS=0
+          while IFS= read -r script; do
+            if ! bash -n "$script" 2>&1; then
+              echo "  ✗ SYNTAX ERROR: $script"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done < <(find . -name "*.sh" -not -path "./.git/*")
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::$ERRORS script(s) have syntax errors"
+            exit 1
+          fi
+          echo "✔ All shell scripts pass syntax check"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. YAML Manifest Validation
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint-yaml:
+    name: Lint YAML Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install yamllint
+        run: pip install yamllint
+
+      - name: Yamllint — YAML syntax and style
+        run: |
+          yamllint -c .yamllint \
+            kubernetes/ \
+            templates/monitoring/ \
+            templates/cobbler/ubuntu-24.04-autoinstall.yaml \
+            .github/workflows/
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. Kubernetes Manifest Validation (kubeconform)
+  # ─────────────────────────────────────────────────────────────────────────────
+  validate-k8s:
+    name: Validate Kubernetes Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          KUBECONFORM_VERSION="v0.6.7"
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: Validate Kubernetes manifests
+        run: |
+          echo "Validating Kubernetes manifests in kubernetes/..."
+          kubeconform \
+            -strict \
+            -summary \
+            -output json \
+            -kubernetes-version 1.29.0 \
+            kubernetes/*.yaml
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4. Puppet Manifest Validation
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint-puppet:
+    name: Validate Puppet Manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install puppet-lint
+        run: gem install puppet-lint
+
+      - name: Lint Puppet manifests
+        run: |
+          find puppet/ -name "*.pp" -exec puppet-lint \
+            --no-class_inherits_from_params_class-check \
+            --no-documentation-check \
+            --no-autoloader_layout-check \
+            {} +
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 5. Python Script Linting (flake8)
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint-python:
+    name: Lint Python Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Flake8 — syntax errors (blocking)
+        run: |
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Flake8 — style warnings (non-blocking)
+        run: |
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 6. Terraform / OpenTofu Validation
+  # ─────────────────────────────────────────────────────────────────────────────
+  validate-terraform:
+    name: Validate Terraform Configuration
+    runs-on: ubuntu-latest
+    if: hashFiles('terraform/*.tf') != ''
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.9'
+
+      - name: Terraform fmt — check formatting
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init — download providers
+        run: terraform init -backend=false
+
+      - name: Terraform validate — check syntax
+        run: terraform validate
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 7. Summary Gate — all checks must pass for merge
+  # ─────────────────────────────────────────────────────────────────────────────
+  ci-pass:
+    name: CI Summary
+    if: always()
+    needs:
+      - lint-shell
+      - lint-yaml
+      - validate-k8s
+      - lint-puppet
+      - lint-python
+      - validate-terraform
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          echo "=== CI Pipeline Results ==="
+          echo "lint-shell:         ${{ needs.lint-shell.result }}"
+          echo "lint-yaml:          ${{ needs.lint-yaml.result }}"
+          echo "validate-k8s:      ${{ needs.validate-k8s.result }}"
+          echo "lint-puppet:        ${{ needs.lint-puppet.result }}"
+          echo "lint-python:        ${{ needs.lint-python.result }}"
+          echo "validate-terraform: ${{ needs.validate-terraform.result }}"
+
+          # Fail if any required job failed (skip is OK for conditional jobs)
+          for result in \
+            "${{ needs.lint-shell.result }}" \
+            "${{ needs.lint-yaml.result }}" \
+            "${{ needs.validate-k8s.result }}" \
+            "${{ needs.lint-puppet.result }}" \
+            "${{ needs.lint-python.result }}"; do
+            if [ "$result" = "failure" ]; then
+              echo "::error::One or more CI checks failed"
+              exit 1
+            fi
+          done
+
+          # Terraform validation is optional (only runs if .tf files exist)
+          if [ "${{ needs.validate-terraform.result }}" = "failure" ]; then
+            echo "::error::Terraform validation failed"
+            exit 1
+          fi
+
+          echo "✔ All CI checks passed!"
