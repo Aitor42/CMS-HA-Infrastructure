@@ -60,7 +60,7 @@ jobs:
         run: |
           yamllint -c .yamllint \
             kubernetes/ \
-            templates/monitoring-invalid/ \
+            templates/monitoring/ \
             templates/cobbler/ubuntu-24.04-autoinstall.yaml \
             .github/workflows/
 
