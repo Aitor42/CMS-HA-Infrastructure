@@ -155,6 +155,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Libvirt development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-dev
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
