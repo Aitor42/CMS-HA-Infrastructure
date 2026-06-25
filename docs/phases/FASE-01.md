@@ -38,7 +38,7 @@
 
 A continuación se muestra una captura del proceso de instalación automática por red (PXE) gestionado por Cobbler:
 
-![Instalación por PXE](../../imagen%20instalacion%20PXE.png)
+![Instalación por PXE](../pxe-installation.png)
 
 
 ### Scripts Asociados
