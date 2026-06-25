@@ -90,7 +90,7 @@ graph TB
     LB --> CMS2
 ```
 
-> For detailed topology, service, and deployment sequence diagrams see [`docs/RED_DIAGRAMA.md`](docs/RED_DIAGRAMA.md).
+> For detailed topology, service, and deployment sequence diagrams see [`docs/NETWORK_DIAGRAM.md`](docs/NETWORK_DIAGRAM.md).
 
 ---
 
@@ -130,8 +130,8 @@ CMS-HA-Infrastructure/
 │   ├── PLAN.md                      # Architecture plan and node inventory
 │   ├── MANUAL.md                    # Operations manual — deployment, recovery, scaling
 │   ├── SOFTWARE_BASELINE.md         # Software inventory with versions and URLs
-│   ├── RED_DIAGRAMA.md              # Network diagrams (Mermaid)
-│   └── phases/                      # Per-phase technical documentation (FASE-00..11)
+│   ├── NETWORK_DIAGRAM.md           # Network diagrams (Mermaid)
+│   └── phases/                      # Per-phase technical documentation (PHASE-00..11)
 │
 ├── scripts/
 │   ├── config.sh                    # Central configuration (IPs, credentials, SSH)
@@ -275,7 +275,7 @@ bash scripts/utils/test_failover.sh
 | [PLAN.md](docs/PLAN.md) | Architecture plan, node inventory, and design decisions |
 | [MANUAL.md](docs/MANUAL.md) | Operations manual — deployment, scaling, failover, troubleshooting |
 | [SOFTWARE_BASELINE.md](docs/SOFTWARE_BASELINE.md) | Complete software inventory with versions and URLs |
-| [RED_DIAGRAMA.md](docs/RED_DIAGRAMA.md) | Network topology and service architecture diagrams |
+| [NETWORK_DIAGRAM.md](docs/NETWORK_DIAGRAM.md) | Network topology and service architecture diagrams |
 | [phases/](docs/phases/) | Per-phase technical documentation |
 
 ---

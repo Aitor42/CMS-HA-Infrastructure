@@ -171,46 +171,46 @@ Diagram showing the execution order of deployment scripts when running the solut
 graph TD
     START(["▶ Start Deployment"])
 
-    FASE00A["Phase 00a: Create networks and launch Jumpstart VM<br/>(00_init_vms.sh --jumpstart-only)"]
+    PHASE00A["Phase 00a: Create networks and launch Jumpstart VM<br/>(00_init_vms.sh --jumpstart-only)"]
     WAIT_JS["⏳ Wait for Jumpstart SSH connectivity"]
-    FASE01["Phase 01: Install and configure Cobbler on Jumpstart<br/>(00_setup_cobbler.sh)"]
-    FASE015["Phase 01.5: Register all nodes in Cobbler<br/>(add_cobbler_nodes.sh)"]
-    FASE00B["Phase 00b: Batch client node installation and RAM adjustment<br/>(scripts/utils/install_by_batches.sh)"]
+    PHASE01["Phase 01: Install and configure Cobbler on Jumpstart<br/>(00_setup_cobbler.sh)"]
+    PHASE015["Phase 01.5: Register all nodes in Cobbler<br/>(add_cobbler_nodes.sh)"]
+    PHASE00B["Phase 00b: Batch client node installation and RAM adjustment<br/>(install_by_batches.sh)"]
     WAIT_NODES["⏳ Wait for all VMs to respond via SSH"]
-    FASE018["Phase 01.8: Repair SSH and Puppet CA<br/>(08_repair_ssh_puppet.sh)"]
-    FASE02["Phase 02: Deploy Puppet Server and agents<br/>(01_setup_puppet.sh)"]
-    FASE07["Phase 03: Configure DRBD HA storage replication<br/>(06_setup_drbd.sh)"]
-    FASE04["Phase 04: Deploy K3s HA cluster and MariaDB StatefulSet<br/>(03_setup_kubernetes.sh)"]
-    FASE03["Phase 05: Configure Nginx LB and Apache WordPress frontends<br/>(02_setup_nginx.sh)"]
-    FASE05["Phase 06: Install Prometheus + Grafana + Alertmanager<br/>(04_setup_monitoring.sh)"]
-    FASE06["Phase 07: Apply UFW perimeter and per-node firewall policies<br/>(05_setup_ufw.sh)"]
-    FASE08["Phase 08: Deploy internal CA with step-ca<br/>(09_setup_internal_ca.sh)"]
+    PHASE018["Phase 01.8: Repair SSH and Puppet CA<br/>(08_repair_ssh_puppet.sh)"]
+    PHASE02["Phase 02: Deploy Puppet Server and agents<br/>(01_setup_puppet.sh)"]
+    PHASE07["Phase 03: Configure DRBD HA storage replication<br/>(06_setup_drbd.sh)"]
+    PHASE04["Phase 04: Deploy K3s HA cluster and MariaDB StatefulSet<br/>(03_setup_kubernetes.sh)"]
+    PHASE03["Phase 05: Configure Nginx LB and Apache WordPress frontends<br/>(02_setup_nginx.sh)"]
+    PHASE05["Phase 06: Install Prometheus + Grafana + Alertmanager<br/>(04_setup_monitoring.sh)"]
+    PHASE06["Phase 07: Apply UFW perimeter and per-node firewall policies<br/>(05_setup_ufw.sh)"]
+    PHASE08["Phase 08: Deploy internal CA with step-ca<br/>(09_setup_internal_ca.sh)"]
 
     TRAFFIC["Phase 10: Traffic mix and load testing (optional)<br/>(07_traffic_mix.sh)"]
 
     END(["✅ Deployment Complete"])
 
-    START --> FASE00A
-    FASE00A --> WAIT_JS
-    WAIT_JS --> FASE01
-    FASE01 --> FASE015
-    FASE015 --> FASE00B
-    FASE00B --> WAIT_NODES
-    WAIT_NODES --> FASE018
-    FASE018 --> FASE02
-    FASE02 --> FASE07
-    FASE07 --> FASE04
-    FASE04 --> FASE03
-    FASE03 --> FASE05
-    FASE05 --> FASE06
-    FASE06 --> FASE08
-    FASE08 --> END
+    START --> PHASE00A
+    PHASE00A --> WAIT_JS
+    WAIT_JS --> PHASE01
+    PHASE01 --> PHASE015
+    PHASE015 --> PHASE00B
+    PHASE00B --> WAIT_NODES
+    WAIT_NODES --> PHASE018
+    PHASE018 --> PHASE02
+    PHASE02 --> PHASE07
+    PHASE07 --> PHASE04
+    PHASE04 --> PHASE03
+    PHASE03 --> PHASE05
+    PHASE05 --> PHASE06
+    PHASE06 --> PHASE08
+    PHASE08 --> END
     END -.->|"optional"| TRAFFIC
 ```
 
 ### Deployment Sequence Notes
 
 - The initial deployment requires launching the **Jumpstart node (Phase 00a)** first, as it serves as the provisioning server for all other clients.
-- **Phase 00b** is performed **sequentially in batches** (`scripts/utils/install_by_batches.sh`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
+- **Phase 00b** is performed **sequentially in batches** (`install_by_batches.sh`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
 - The `deploy_all.sh --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
 - Configuration phases (Puppet, DRBD, K3s, Nginx, UFW, Monitoring, and Internal CA) are **strictly sequential** due to mutual service dependencies.

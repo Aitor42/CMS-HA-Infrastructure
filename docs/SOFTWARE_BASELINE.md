@@ -47,10 +47,6 @@ In a virtualised environment, device firmware selection is critical for compatib
 | **Prometheus** | 2.45.3 | Time-series metrics collection engine | Static Go binaries | [Prometheus](https://prometheus.io/) | `internal-monitor` |
 | **Grafana** | 10.4.1 | Data visualisation and operational dashboards | prometheus-datasource | [Grafana Labs](https://grafana.com/) | `internal-monitor` |
 | **UFW** | 0.36.2 | Perimeter and per-node firewall management | `iptables`, `nftables`, `python3` | [Launchpad UFW](https://launchpad.net/ufw) | `ufw-router`, all nodes |
-| **step-ca** | 0.27.5 | Private Certificate Authority for internal PKI | step CLI, SQLite | [Smallstep CA](https://github.com/smallstep/certificates) | `jumpstart` |
-| **step** | 0.27.5 | Command-line tool for interacting with step-ca | libc6 | [Smallstep CLI](https://github.com/smallstep/cli) | All nodes |
-| **Terraform** | 1.9.x | Declarative VM/network infrastructure provisioning | `libvirt` daemon, KVM support | [HashiCorp Terraform](https://www.terraform.io/) | Hypervisor Host (alternative) |
-| **terraform-provider-libvirt** | 0.8.0 | Libvirt/KVM integration provider for Terraform | `libvirt-dev` library, Go runtime | [dmacvicar/libvirt](https://github.com/dmacvicar/terraform-provider-libvirt) | Hypervisor Host (alternative) |
 
 ---
 
