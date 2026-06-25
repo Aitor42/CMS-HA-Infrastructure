@@ -187,8 +187,8 @@ CMS-HA-Infrastructure/
 ### Deployment
 
 ```bash
-git clone https://github.com/Aitor42/CMS-GAR.git
-cd CMS-GAR
+git clone https://github.com/Aitor42/CMS-HA-Infrastructure.git
+cd CMS-HA-Infrastructure
 
 # Configure paths and credentials
 export VM_DIR="$HOME/vm_storage"
