@@ -29,16 +29,17 @@ This manual describes the procedures to deploy, administer, and maintain the Wor
 *   **Network**: At least 1 interface with internet access for NAT.
 
 ### 1.2 Required Software on the Hypervisor
-The physical host must have the KVM hypervisor and libvirt library installed:
+The physical host must have the KVM hypervisor, libvirt library, and development headers installed:
 ```bash
 sudo apt update
-sudo apt install -y qemu-kvm libvirt-daemon-system virtinst bridge-utils
+sudo apt install -y qemu-kvm libvirt-daemon-system libvirt-dev virtinst bridge-utils
 ```
 The user must belong to the `libvirt` group to manage VMs without direct root privileges:
 ```bash
 sudo usermod -aG libvirt $USER
 newgrp libvirt
 ```
+For the declarative deployment alternative, you must also install Terraform (>= 1.0) or OpenTofu (>= 1.6).
 
 ---
 
@@ -94,6 +95,29 @@ This script handles:
 6. Applying UFW firewall policies.
 7. Installing and starting the monitoring stack.
 8. Deploying the internal Certificate Authority (step-ca).
+
+### Step 4: Alternative: Declarative Provisioning via Terraform
+As a declarative alternative to the imperative VM creation scripts (`scripts/00_init_vms.sh` and `scripts/utils/install_by_batches.sh`), the virtual infrastructure (networks, storage pools, disk volumes, and stopped VM domains) can be provisioned via Terraform:
+
+1. **Navigate to the IaC directory**:
+   ```bash
+   cd terraform/
+   ```
+2. **Initialize the libvirt provider**:
+   ```bash
+   terraform init
+   ```
+3. **Apply the configuration**:
+   ```bash
+   terraform apply -var="vm_storage_path=$HOME/vm_storage"
+   ```
+   *This creates all network interfaces, storage pools, disk volumes, and VM configurations but leaves the VMs powered off (`running = false`).*
+4. **Boot and provision the software stack**:
+   Return to the project root and launch the orchestrator to boot the nodes and install the components:
+   ```bash
+   cd ..
+   ./deploy_all.sh --skip-vm-create
+   ```
 
 ---
 

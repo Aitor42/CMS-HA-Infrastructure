@@ -106,7 +106,7 @@ Phases are executed sequentially through the `deploy_all.sh` orchestrator. Each 
 
 | Phase | Script | Main Task | Documentation |
 |:-----:|:-------|:----------|:--------------|
-| **00** | `00_init_vms.sh` | VM and virtual network creation (libvirt) | [Phase 00](phases/FASE-00.md) |
+| **00** | `00_init_vms.sh` | VM and virtual network creation (or declaratively via `terraform/`) | [Phase 00](phases/FASE-00.md) |
 | **01** | `00_setup_cobbler.sh` | Zero-touch bare-metal provisioning with Cobbler (PXE) | [Phase 01](phases/FASE-01.md) |
 | **03** | `03_setup_kubernetes.sh` | K3s HA cluster + MariaDB StatefulSet + DRBD | [Phase 03](phases/FASE-03.md) |
 | **04** | `05_setup_ufw.sh` | UFW perimeter routing and firewall | [Phase 04](phases/FASE-04.md) |

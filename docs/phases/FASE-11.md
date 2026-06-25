@@ -83,7 +83,13 @@ TrabajoFinal/
 │   ├── namespace.yaml
 │   ├── mariadb-*.yaml
 │   └── init-db-job.yaml
-└── puppet/                      # Manifiestos Puppet
-    ├── manifests/site.pp
-    └── modules/role/manifests/
+├── puppet/                      # Manifiestos Puppet
+│   ├── manifests/site.pp
+│   └── modules/role/manifests/
+└── terraform/                   # Alternativa IaC declarativa (libvirt/KVM)
+    ├── main.tf                  # Definición de recursos (VMs, redes, pools)
+    ├── variables.tf             # Parámetros configurables (CPU, RAM, discos)
+    ├── outputs.tf               # Salidas generadas tras el despliegue
+    ├── versions.tf              # Restricciones de versión de proveedores
+    └── README.md                # Guía de uso rápido de Terraform
 ```
