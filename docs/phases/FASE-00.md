@@ -52,8 +52,8 @@
 ### Scripts Asociados
 
 - `scripts/00_init_vms.sh` — Crea las redes virtuales (bridges) y todas las VMs
-- `scripts/start_all_vms.sh` — Arranca VMs existentes (reanudación tras `shrink_vm_ram.sh`)
-- `scripts/shrink_vm_ram.sh` — Apaga VMs y ajusta RAM mínima de laboratorio en GAR
+- `scripts/start_all_vms.sh` — Arranca VMs existentes (reanudación tras `scripts/utils/shrink_vm_ram.sh`)
+- `scripts/utils/shrink_vm_ram.sh` — Apaga VMs y ajusta RAM mínima de laboratorio en GAR
 
 ### Verificación
 

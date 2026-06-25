@@ -175,7 +175,7 @@ graph TD
     WAIT_JS["⏳ Wait for Jumpstart SSH connectivity"]
     FASE01["Phase 01: Install and configure Cobbler on Jumpstart<br/>(00_setup_cobbler.sh)"]
     FASE015["Phase 01.5: Register all nodes in Cobbler<br/>(add_cobbler_nodes.sh)"]
-    FASE00B["Phase 00b: Batch client node installation and RAM adjustment<br/>(install_by_batches.sh)"]
+    FASE00B["Phase 00b: Batch client node installation and RAM adjustment<br/>(scripts/utils/install_by_batches.sh)"]
     WAIT_NODES["⏳ Wait for all VMs to respond via SSH"]
     FASE018["Phase 01.8: Repair SSH and Puppet CA<br/>(08_repair_ssh_puppet.sh)"]
     FASE02["Phase 02: Deploy Puppet Server and agents<br/>(01_setup_puppet.sh)"]
@@ -211,6 +211,6 @@ graph TD
 ### Deployment Sequence Notes
 
 - The initial deployment requires launching the **Jumpstart node (Phase 00a)** first, as it serves as the provisioning server for all other clients.
-- **Phase 00b** is performed **sequentially in batches** (`install_by_batches.sh`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
+- **Phase 00b** is performed **sequentially in batches** (`scripts/utils/install_by_batches.sh`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
 - The `deploy_all.sh --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
 - Configuration phases (Puppet, DRBD, K3s, Nginx, UFW, Monitoring, and Internal CA) are **strictly sequential** due to mutual service dependencies.

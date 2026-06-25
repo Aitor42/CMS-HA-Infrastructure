@@ -58,9 +58,10 @@ git push origin main --tags
 ### Estructura Final del Repositorio
 
 ```
-TrabajoFinal/
+CMS-HA-Infrastructure/
 ├── README.md                    # Descripción general del proyecto
 ├── deploy_all.sh                # Orquestador principal
+├── Makefile                     # Utilidades de automatización rápida (opcional)
 ├── .gitignore                   # Exclusiones del repositorio
 ├── docs/
 │   ├── PLAN.md                  # Plan de acción completo
@@ -78,7 +79,21 @@ TrabajoFinal/
 │   ├── 05_setup_ufw.sh          # UFW (firewall)
 │   ├── 06_setup_drbd.sh         # DRBD (HA)
 │   ├── 07_traffic_mix.sh        # Generador de tráfico
-│   └── add_cobbler_nodes.sh     # Registro de nodos en Cobbler
+│   ├── 08_repair_ssh_puppet.sh  # SSH key & Puppet CA repair utility
+│   ├── 09_setup_internal_ca.sh  # Step-CA PKI deployment
+│   ├── add_cobbler_nodes.sh     # Registro de nodos en Cobbler
+│   ├── config.sh                # Variables globales y de red
+│   ├── start_all_vms.sh         # Arranque rápido de VMs existentes
+│   └── utils/                   # Herramientas de utilidad
+│       ├── check_ssh_vms.py     # Comprobación de estado SSH
+│       ├── fix_existing_vms_boot_order.py # Corrector de orden de arranque
+│       ├── install_by_batches.sh # Instalador secuencial en lotes
+│       ├── recreate_failed.sh   # Recreador de VMs fallidas
+│       ├── repair_paused_kubernetes.sh # Reparador de nodos pausados
+│       ├── shrink_vm_ram.sh     # Reductor de RAM en GAR
+│       ├── sync_vm_clocks.sh    # Sincronizador de hora
+│       ├── test_failover.sh     # Simulador de caos y failover
+│       └── verify_all.sh        # Health check fase a fase
 ├── kubernetes/                  # Manifiestos K8s
 │   ├── namespace.yaml
 │   ├── mariadb-*.yaml
