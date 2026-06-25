@@ -150,7 +150,7 @@ class role::cms_frontend {
   # WORDPRESS CORE INSTALL — Runs only if WordPress is not yet installed in DB
   # ---------------------------------------------------------------------------
   exec { 'wordpress-core-install':
-    command  => '/usr/local/bin/wp core install \
+    command => '/usr/local/bin/wp core install \
       --url="https://cms.fake-enterprise.com" \
       --title="Fake Enterprise CMS" \
       --admin_user="admin" \
@@ -159,23 +159,23 @@ class role::cms_frontend {
       --skip-email \
       --allow-root \
       --path=/var/www/html',
-    unless   => '/usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
-    require  => [
+    unless  => '/usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
+    require => [
       Exec['wpcli-install'],
       Exec['wordpress-config-db-host'],
       Exec['wordpress-config-db-user'],
       Exec['wordpress-config-db-pass'],
       Exec['wordpress-config-db-name'],
     ],
-    user     => 'root',
-    timeout  => 120,
+    user    => 'root',
+    timeout => 120,
   }
 
   exec { 'wordpress-rewrite-structure':
-    command  => '/usr/local/bin/wp rewrite structure \'/%postname%/\' --hard --allow-root --path=/var/www/html',
-    unless   => '/usr/local/bin/wp rewrite list --allow-root --path=/var/www/html 2>/dev/null | grep -q "postname"',
-    require  => Exec['wordpress-core-install'],
-    user     => 'root',
+    command => '/usr/local/bin/wp rewrite structure \'/%postname%/\' --hard --allow-root --path=/var/www/html',
+    unless  => '/usr/local/bin/wp rewrite list --allow-root --path=/var/www/html 2>/dev/null | grep -q "postname"',
+    require => Exec['wordpress-core-install'],
+    user    => 'root',
   }
 
   # ---------------------------------------------------------------------------
