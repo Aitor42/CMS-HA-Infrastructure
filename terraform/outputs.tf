@@ -33,7 +33,7 @@ output "node_ip_map" {
     "internal-master2" = "192.168.10.12"
     "internal-worker1" = "192.168.10.13"
     "internal-worker2" = "192.168.10.14"
-    "internal-storage"  = "192.168.10.15"
+    "internal-storage" = "192.168.10.15"
     "internal-monitor" = "192.168.10.20"
     "main-lb"          = "192.168.20.100"
     "main-cms1"        = "192.168.20.101"

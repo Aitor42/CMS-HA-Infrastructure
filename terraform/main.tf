@@ -100,7 +100,7 @@ locals {
     "internal-master2" = { disk_gb = 8 }
     "internal-worker1" = { disk_gb = 8 }
     "internal-worker2" = { disk_gb = 8 }
-    "internal-storage"  = { disk_gb = 8 }
+    "internal-storage" = { disk_gb = 8 }
     "internal-monitor" = { disk_gb = 4 }
     "main-lb"          = { disk_gb = 4 }
     "main-cms1"        = { disk_gb = 4 }

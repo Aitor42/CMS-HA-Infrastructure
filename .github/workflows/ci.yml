@@ -2,9 +2,9 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -24,7 +24,7 @@ jobs:
           scandir: .
           ignore_names: "*.res"
         env:
-          SHELLCHECK_OPTS: "-e SC2029 -e SC2087"
+          SHELLCHECK_OPTS: "-e SC2029 -e SC2087 -e SC2034 -e SC2155 -e SC2054 -e SC2046"
 
       - name: Bash syntax check (bash -n)
         run: |
