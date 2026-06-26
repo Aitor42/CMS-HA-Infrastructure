@@ -14,34 +14,35 @@ graph TB
         CLOUD["External Clients"]
     end
 
-    subgraph FW["Router / Firewall — ufw-router"]
+    subgraph FW["🔒 Router / Firewall — ufw-router"]
         ETH0["eth0<br/>DHCP (WAN)"]
+        UFW_CORE["UFW + NAT + IP Forwarding<br/>DNAT :80/:443 → 192.168.20.100"]
         ETH1["eth1<br/>192.168.10.1"]
         ETH2["eth2<br/>192.168.20.1"]
-        UFW_CORE["UFW + NAT<br/>IP Forwarding"]
         ETH0 --- UFW_CORE
         UFW_CORE --- ETH1
         UFW_CORE --- ETH2
     end
 
-    subgraph INTERNAL["Internal Network — 192.168.10.0/24"]
+    subgraph INTERNAL["🟩 Internal Network — 192.168.10.0/24"]
         direction TB
-        JS["🖥 jumpstart<br/>192.168.10.10<br/>Cobbler + Puppet Server"]
+        JS["🖥 jumpstart<br/>192.168.10.10<br/>Cobbler · Puppet Server · step-ca"]
 
         subgraph K3S_CLUSTER["K3s HA Cluster"]
-            M1["🟢 internal-master1<br/>192.168.10.11<br/>K3s Server + DRBD"]
-            M2["🟢 internal-master2<br/>192.168.10.12<br/>K3s Server + DRBD"]
+            direction LR
+            M1["🟢 internal-master1<br/>192.168.10.11<br/>K3s Server · DRBD Primary"]
+            M2["🟢 internal-master2<br/>192.168.10.12<br/>K3s Server · DRBD Secondary"]
             W1["🔵 internal-worker1<br/>192.168.10.13<br/>K3s Agent"]
             W2["🔵 internal-worker2<br/>192.168.10.14<br/>K3s Agent"]
         end
 
         ST["💾 internal-storage<br/>192.168.10.15<br/>Centralised Storage"]
-        MON["📊 internal-monitor<br/>192.168.10.20<br/>Prometheus + Grafana"]
+        MON["📊 internal-monitor<br/>192.168.10.20<br/>Prometheus · Grafana · Alertmanager"]
     end
 
-    subgraph MAIN["Client Network — 192.168.20.0/24"]
+    subgraph MAIN["🟦 Client Network — 192.168.20.0/24"]
         direction TB
-        LB["⚖ main-lb<br/>192.168.20.100<br/>Nginx LB"]
+        LB["⚖ main-lb<br/>192.168.20.100<br/>Nginx Reverse Proxy"]
 
         subgraph CMS_POOL["CMS Frontends"]
             CMS1["🌐 main-cms1<br/>192.168.20.101<br/>WordPress + Apache"]
@@ -55,26 +56,44 @@ graph TB
         end
     end
 
-    CLOUD -->|"HTTP/S ports 80/443"| ETH0
+    %% --- WAN traffic ---
+    CLOUD -->|"HTTP/S :80/:443"| ETH0
     ETH1 --> INTERNAL
     ETH2 --> MAIN
 
+    %% --- Dual-homed jumpstart ---
     JS -.->|"192.168.20.10<br/>secondary interface"| MAIN
 
+    %% --- K3s cluster mesh ---
     M1 <-->|"DRBD sync<br/>tcp/7788"| M2
-    M1 --- W1
-    M1 --- W2
-    M2 --- W1
-    M2 --- W2
+    M1 ---|"K3s API :6443"| W1
+    M1 ---|"K3s API :6443"| W2
+    M2 ---|"K3s API :6443"| W1
+    M2 ---|"K3s API :6443"| W2
 
-    LB -->|"proxy_pass"| CMS1
-    LB -->|"proxy_pass"| CMS2
+    %% --- Storage ---
+    ST ---|"shared data"| M1
+    ST ---|"shared data"| M2
 
+    %% --- Load balancing ---
+    LB -->|"proxy_pass :80"| CMS1
+    LB -->|"proxy_pass :80"| CMS2
+
+    %% --- CMS to DB ---
+    CMS1 -->|"tcp/3306"| M1
+    CMS2 -->|"tcp/3306"| M1
+
+    %% --- Monitoring scrape targets (all nodes) ---
+    MON -.->|"scrape :9100"| JS
     MON -.->|"scrape :9100"| M1
     MON -.->|"scrape :9100"| M2
-    MON -.->|"scrape :9100"| LB
-    MON -.->|"scrape :9100"| CMS1
-    MON -.->|"scrape :9100"| CMS2
+    MON -.->|"scrape :9100"| W1
+    MON -.->|"scrape :9100"| W2
+    MON -.->|"scrape :9100"| ST
+    MON -.->|"scrape :9100/:9113/:9117"| LB
+    MON -.->|"scrape :9100/:9117"| CMS1
+    MON -.->|"scrape :9100/:9117"| CMS2
+    MON -.->|"scrape :9100"| ETH1
 ```
 
 ### Legend
@@ -82,12 +101,19 @@ graph TB
 | Symbol | Meaning |
 |:-------|:--------|
 | Solid line (`→`) | Data traffic / active connection |
-| Dashed line (`-.->`) | Management / monitoring traffic |
+| Dashed line (`-..->`) | Management / monitoring traffic |
+| `🔒` | Router / firewall |
+| `🖥` | Provisioning server (Cobbler · Puppet · step-ca) |
 | `⚖` | Load balancer |
-| `🟢` | Cluster master node |
-| `🔵` | Cluster worker node |
-| `📊` | Monitoring node |
+| `🟢` | K3s master node (DRBD) |
+| `🔵` | K3s worker node |
+| `💾` | Storage node |
+| `📊` | Monitoring node (Prometheus · Grafana · Alertmanager) |
+| `🌐` | CMS frontend (WordPress + Apache) |
 | `💻` | Hot-desk workstation |
+| `:9100` | node_exporter |
+| `:9113` | nginx_exporter |
+| `:9117` | apache_exporter |
 
 ---
 
@@ -97,54 +123,70 @@ Diagram showing the traffic flow from external client to database, including the
 
 ```mermaid
 graph LR
-    subgraph CLIENT["Client"]
-        USER["👤 User<br/>web browser"]
+    subgraph CLIENT["👤 Client"]
+        USER["Web Browser"]
     end
 
-    subgraph PERIMETER["Perimeter"]
-        ROUTER["🔒 ufw-router<br/>DNAT :80/:443 → LB"]
+    subgraph PERIMETER["🔒 Perimeter"]
+        ROUTER["ufw-router<br/>DNAT :80/:443 → LB<br/>NAT masquerade outbound"]
     end
 
-    subgraph LB_LAYER["Load Balancing Layer"]
-        NGINX["⚖ Nginx LB<br/>192.168.20.100<br/>Round-Robin"]
+    subgraph LB_LAYER["⚖ Load Balancing"]
+        NGINX["Nginx<br/>192.168.20.100<br/>Round-Robin upstream"]
     end
 
-    subgraph WEB_LAYER["Web Layer"]
-        APACHE1["🌐 Apache + WP<br/>192.168.20.101"]
-        APACHE2["🌐 Apache + WP<br/>192.168.20.102"]
+    subgraph WEB_LAYER["🌐 Web Layer"]
+        APACHE1["Apache + WordPress<br/>192.168.20.101"]
+        APACHE2["Apache + WordPress<br/>192.168.20.102"]
     end
 
-    subgraph DB_LAYER["Data Layer (K3s)"]
-        MARIA["🗄 MariaDB 10.11<br/>K3s StatefulSet"]
-        DRBD["💾 DRBD 9<br/>Synchronous Replication"]
+    subgraph DB_LAYER["🗄 Data Layer — K3s Cluster"]
+        MARIA["MariaDB 10.11<br/>K3s StatefulSet<br/>PV: /mnt/drbd"]
+        DRBD["DRBD 9<br/>Protocol C — Synchronous<br/>tcp/7788"]
     end
 
-    subgraph MONITOR["Observability"]
-        PROM["📊 Prometheus<br/>192.168.10.20:9090"]
-        GRAF["📈 Grafana<br/>192.168.10.20:3000"]
+    subgraph STORAGE_LAYER["💾 Storage"]
+        STORE["internal-storage<br/>192.168.10.15<br/>Centralised file storage"]
     end
 
-    subgraph PROVISION["Provisioning"]
-        COBBLER["🖥 Cobbler + Puppet<br/>192.168.10.10"]
+    subgraph MONITOR["📊 Observability"]
+        PROM["Prometheus<br/>192.168.10.20:9090"]
+        ALERT["Alertmanager<br/>192.168.10.20:9093"]
+        GRAF["Grafana<br/>192.168.10.20:3000"]
     end
 
+    subgraph PROVISION["🖥 Provisioning & PKI"]
+        COBBLER["Cobbler + Puppet<br/>192.168.10.10"]
+        STEPCA["step-ca<br/>Internal PKI<br/>:443 ACME"]
+    end
+
+    %% --- Request path ---
     USER -->|"HTTP/S"| ROUTER
     ROUTER -->|"DNAT"| NGINX
-    NGINX -->|"upstream"| APACHE1
-    NGINX -->|"upstream"| APACHE2
+    NGINX -->|"upstream :80"| APACHE1
+    NGINX -->|"upstream :80"| APACHE2
     APACHE1 -->|"tcp/3306"| MARIA
     APACHE2 -->|"tcp/3306"| MARIA
-    MARIA --- DRBD
+    MARIA ---|"block device"| DRBD
 
-    PROM -.->|"scrape"| NGINX
-    PROM -.->|"scrape"| APACHE1
-    PROM -.->|"scrape"| APACHE2
-    PROM -.->|"scrape"| MARIA
+    %% --- Storage ---
+    STORE ---|"shared data"| MARIA
+
+    %% --- Monitoring ---
+    PROM -.->|"scrape :9113"| NGINX
+    PROM -.->|"scrape :9117"| APACHE1
+    PROM -.->|"scrape :9117"| APACHE2
+    PROM -.->|"scrape :9104"| MARIA
+    PROM -->|"alerting rules"| ALERT
     GRAF -.->|"datasource"| PROM
 
+    %% --- Provisioning ---
+    COBBLER -.->|"PXE + Puppet"| NGINX
     COBBLER -.->|"PXE + Puppet"| APACHE1
     COBBLER -.->|"PXE + Puppet"| APACHE2
-    COBBLER -.->|"PXE + Puppet"| NGINX
+    STEPCA -.->|"TLS certs"| NGINX
+    STEPCA -.->|"TLS certs"| APACHE1
+    STEPCA -.->|"TLS certs"| APACHE2
 ```
 
 ### HTTP Traffic Flow
@@ -169,42 +211,55 @@ Diagram showing the execution order of deployment scripts when running the solut
 
 ```mermaid
 graph TD
-    START(["▶ Start Deployment"])
+    START(["▶ Start Deployment<br/>deploy_all.sh"])
 
-    PHASE00A["Phase 00a: Create networks and launch Jumpstart VM<br/>(00_init_vms.sh --jumpstart-only)"]
-    WAIT_JS["⏳ Wait for Jumpstart SSH connectivity"]
-    PHASE01["Phase 01: Install and configure Cobbler on Jumpstart<br/>(00_setup_cobbler.sh)"]
-    PHASE015["Phase 01.5: Register all nodes in Cobbler<br/>(add_cobbler_nodes.sh)"]
-    PHASE00B["Phase 00b: Batch client node installation and RAM adjustment<br/>(install_by_batches.sh)"]
-    WAIT_NODES["⏳ Wait for all VMs to respond via SSH"]
-    PHASE018["Phase 01.8: Repair SSH and Puppet CA<br/>(08_repair_ssh_puppet.sh)"]
-    PHASE02["Phase 02: Deploy Puppet Server and agents<br/>(01_setup_puppet.sh)"]
-    PHASE07["Phase 03: Configure DRBD HA storage replication<br/>(06_setup_drbd.sh)"]
-    PHASE04["Phase 04: Deploy K3s HA cluster and MariaDB StatefulSet<br/>(03_setup_kubernetes.sh)"]
-    PHASE03["Phase 05: Configure Nginx LB and Apache WordPress frontends<br/>(02_setup_nginx.sh)"]
-    PHASE05["Phase 06: Install Prometheus + Grafana + Alertmanager<br/>(04_setup_monitoring.sh)"]
-    PHASE06["Phase 07: Apply UFW perimeter and per-node firewall policies<br/>(05_setup_ufw.sh)"]
-    PHASE08["Phase 08: Deploy internal CA with step-ca<br/>(09_setup_internal_ca.sh)"]
+    subgraph VM_PROVISION["🖥 VM Provisioning"]
+        STEP00A["Step 00a · Create networks + Jumpstart VM<br/>00_init_vms.sh --jumpstart-only"]
+        WAIT_JS["⏳ Wait for Jumpstart SSH"]
+        STEP01["Step 01 · Install Cobbler on Jumpstart<br/>00_setup_cobbler.sh"]
+        STEP015["Step 01.5 · Register all nodes in Cobbler<br/>add_cobbler_nodes.sh"]
+        STEP00B["Step 00b · Batch PXE install all client VMs<br/>install_by_batches.sh"]
+        WAIT_NODES["⏳ Wait for all VMs SSH"]
+        STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>08_repair_ssh_puppet.sh"]
+    end
 
-    TRAFFIC["Phase 10: Traffic mix and load testing (optional)<br/>(07_traffic_mix.sh)"]
+    subgraph CONFIG_MGMT["⚙ Configuration Management"]
+        STEP02["Step 02 · Puppet Server + Agent convergence<br/>01_setup_puppet.sh<br/>(includes hot-desk provisioning)"]
+    end
 
+    subgraph HA_INFRA["🔧 HA Infrastructure"]
+        STEP03["Step 03 · DRBD HA block replication<br/>06_setup_drbd.sh"]
+        STEP04["Step 04 · K3s HA cluster + MariaDB StatefulSet<br/>03_setup_kubernetes.sh"]
+        STEP05["Step 05 · Nginx LB + Apache WordPress frontends<br/>02_setup_nginx.sh"]
+    end
+
+    subgraph OBSERVE["📊 Observability"]
+        STEP06["Step 06 · Prometheus + Grafana + Alertmanager<br/>04_setup_monitoring.sh"]
+    end
+
+    subgraph SECURITY["🔒 Security"]
+        STEP07["Step 07 · UFW perimeter + per-node firewall<br/>05_setup_ufw.sh"]
+        STEP08["Step 08 · Internal CA (step-ca) + TLS certs<br/>09_setup_internal_ca.sh"]
+    end
+
+    TRAFFIC["Step 09 · Traffic mix + load testing<br/>07_traffic_mix.sh"]
     END(["✅ Deployment Complete"])
 
-    START --> PHASE00A
-    PHASE00A --> WAIT_JS
-    WAIT_JS --> PHASE01
-    PHASE01 --> PHASE015
-    PHASE015 --> PHASE00B
-    PHASE00B --> WAIT_NODES
-    WAIT_NODES --> PHASE018
-    PHASE018 --> PHASE02
-    PHASE02 --> PHASE07
-    PHASE07 --> PHASE04
-    PHASE04 --> PHASE03
-    PHASE03 --> PHASE05
-    PHASE05 --> PHASE06
-    PHASE06 --> PHASE08
-    PHASE08 --> END
+    START --> STEP00A
+    STEP00A --> WAIT_JS
+    WAIT_JS --> STEP01
+    STEP01 --> STEP015
+    STEP015 --> STEP00B
+    STEP00B --> WAIT_NODES
+    WAIT_NODES --> STEP018
+    STEP018 --> STEP02
+    STEP02 --> STEP03
+    STEP03 --> STEP04
+    STEP04 --> STEP05
+    STEP05 --> STEP06
+    STEP06 --> STEP07
+    STEP07 --> STEP08
+    STEP08 --> END
     END -.->|"optional"| TRAFFIC
 ```
 

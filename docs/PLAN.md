@@ -150,37 +150,50 @@ graph TB
         INET["External Clients"]
     end
 
-    subgraph ROUTER["Router / Firewall — ufw-router"]
+    subgraph ROUTER["🔒 Router / Firewall — ufw-router"]
         R_ETH0["eth0 — DHCP (WAN)"]
+        R_FW["UFW + NAT<br/>DNAT :80/:443"]
         R_ETH1["eth1 — 192.168.10.1"]
         R_ETH2["eth2 — 192.168.20.1"]
+        R_ETH0 --- R_FW
+        R_FW --- R_ETH1
+        R_FW --- R_ETH2
     end
 
-    subgraph INTERNAL["Internal Network — 192.168.10.0/24"]
-        JS["jumpstart<br/>192.168.10.10<br/>Cobbler + Puppet"]
-        M1["internal-master1<br/>192.168.10.11<br/>K3s Server + DRBD"]
-        M2["internal-master2<br/>192.168.10.12<br/>K3s Server + DRBD"]
-        W1["internal-worker1<br/>192.168.10.13<br/>K3s Agent"]
-        W2["internal-worker2<br/>192.168.10.14<br/>K3s Agent"]
-        ST["internal-storage<br/>192.168.10.15"]
-        MON["internal-monitor<br/>192.168.10.20<br/>Prometheus + Grafana"]
+    subgraph INTERNAL["🟩 Internal Network — 192.168.10.0/24"]
+        JS["🖥 jumpstart<br/>192.168.10.10<br/>Cobbler · Puppet · step-ca"]
+
+        subgraph K3S["K3s HA Cluster"]
+            M1["🟢 master1<br/>.11 · DRBD Primary"]
+            M2["🟢 master2<br/>.12 · DRBD Secondary"]
+            W1["🔵 worker1 · .13"]
+            W2["🔵 worker2 · .14"]
+        end
+
+        ST["💾 storage · .15"]
+        MON["📊 monitor · .20<br/>Prometheus · Grafana"]
     end
 
-    subgraph MAIN["Client Network — 192.168.20.0/24"]
-        LB["main-lb<br/>192.168.20.100<br/>Nginx LB"]
-        CMS1["main-cms1<br/>192.168.20.101<br/>WordPress + Apache"]
-        CMS2["main-cms2<br/>192.168.20.102<br/>WordPress + Apache"]
-        HD["main-hotdesk1..8<br/>192.168.20.201-208"]
+    subgraph MAIN["🟦 Client Network — 192.168.20.0/24"]
+        LB["⚖ main-lb · .100<br/>Nginx LB"]
+        CMS1["🌐 cms1 · .101<br/>WordPress"]
+        CMS2["🌐 cms2 · .102<br/>WordPress"]
+        HD["💻 hotdesk1..8<br/>.201-.208"]
     end
 
-    INET --- R_ETH0
-    R_ETH1 --- INTERNAL
-    R_ETH2 --- MAIN
-    JS -.- |"192.168.20.10"| MAIN
+    INET -->|"HTTP/S"| R_ETH0
+    R_ETH1 --> INTERNAL
+    R_ETH2 -->|"DNAT → .100"| MAIN
+    JS -.->|".20.10"| MAIN
 
-    M1 <--> |"DRBD sync<br/>port 7788"| M2
+    M1 <-->|"DRBD sync<br/>tcp/7788"| M2
+    ST ---|"shared data"| M1
     LB --> CMS1
     LB --> CMS2
+    CMS1 -->|"tcp/3306"| M1
+    CMS2 -->|"tcp/3306"| M1
+    MON -.->|"scrape :9100"| M1
+    MON -.->|"scrape :9100"| LB
 ```
 
 > For detailed topology, service architecture, and deployment sequence diagrams see [`NETWORK_DIAGRAM.md`](NETWORK_DIAGRAM.md).
