@@ -1,5 +1,5 @@
 #!/bin/bash
-# 01_setup_puppet.sh
+# 04_setup_puppet.sh
 #
 # Installs and configures Puppet Server 8.x on the Jumpstart node (Puppet Master)
 # and installs Puppet agents on all infrastructure nodes.

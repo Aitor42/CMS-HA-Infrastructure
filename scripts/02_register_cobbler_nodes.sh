@@ -1,5 +1,5 @@
 #!/bin/bash
-# add_cobbler_nodes.sh
+# 02_register_cobbler_nodes.sh
 #
 #
 # Descripción:

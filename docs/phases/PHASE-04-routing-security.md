@@ -59,7 +59,7 @@ COMMIT
 
 ### Associated Scripts
 
-- `scripts/05_setup_ufw.sh` — Configuration of perimeter and nodal firewalls
+- `scripts/09_setup_ufw.sh` — Configuration of perimeter and nodal firewalls
 
 ### Verification
 

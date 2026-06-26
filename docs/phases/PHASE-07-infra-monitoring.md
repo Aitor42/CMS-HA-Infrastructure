@@ -61,7 +61,7 @@ scrape_configs:
 
 ### Associated Scripts
 
-- `scripts/04_setup_monitoring.sh` — Installation of node_exporter, Prometheus, and Grafana
+- `scripts/08_setup_monitoring.sh` — Installation of node_exporter, Prometheus, and Grafana
 
 ### Verification
 

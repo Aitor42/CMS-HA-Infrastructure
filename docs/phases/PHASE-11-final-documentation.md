@@ -15,7 +15,7 @@
 
 Documented in:
 - [`docs/PLAN.md`](../PLAN.md) — Unified node inventory table containing IP, MAC, role, RAM, and disk size.
-- [`docs/phases/PHASE-00.md`](PHASE-00.md) — Network design and subnet allocation.
+- [`docs/phases/PHASE-00-network-design.md`](PHASE-00-network-design.md) — Network design and subnet allocation.
 
 ### Operations Manual
 
@@ -67,15 +67,15 @@ TrabajoFinal/
 │   └── phases/PHASE-00..11.md   # Technical phase documentation
 ├── scripts/
 │   ├── 00_init_vms.sh           # VM and network bridge initialization
-│   ├── 00_setup_cobbler.sh      # Cobbler installation and setup
-│   ├── 01_setup_puppet.sh       # Puppet server/agent setup
-│   ├── 02_setup_nginx.sh        # Load balancer & frontends setup
-│   ├── 03_setup_kubernetes.sh   # K3s cluster and MariaDB setup
-│   ├── 04_setup_monitoring.sh   # Prometheus + Grafana setup
-│   ├── 05_setup_ufw.sh          # Perimeter and nodal firewalls
-│   ├── 06_setup_drbd.sh         # DRBD replication setup
-│   ├── 07_traffic_mix.sh        # Traffic generator utility
-│   └── add_cobbler_nodes.sh     # Registers all nodes in Cobbler
+│   ├── 01_setup_cobbler.sh      # Cobbler installation and setup
+│   ├── 04_setup_puppet.sh       # Puppet server/agent setup
+│   ├── 07_setup_nginx_wordpress.sh        # Load balancer & frontends setup
+│   ├── 06_setup_kubernetes.sh   # K3s cluster and MariaDB setup
+│   ├── 08_setup_monitoring.sh   # Prometheus + Grafana setup
+│   ├── 09_setup_ufw.sh          # Perimeter and nodal firewalls
+│   ├── 05_setup_drbd.sh         # DRBD replication setup
+│   ├── 11_traffic_mix.sh        # Traffic generator utility
+│   └── 02_register_cobbler_nodes.sh     # Registers all nodes in Cobbler
 ├── kubernetes/                  # Kubernetes configuration manifests
 │   ├── namespace.yaml
 │   ├── mariadb-*.yaml

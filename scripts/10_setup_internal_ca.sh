@@ -1,5 +1,5 @@
 #!/bin/bash
-# 09_setup_internal_ca.sh
+# 10_setup_internal_ca.sh
 #
 # Phase 08: Internal Certificate Authority (PKI) with step-ca
 #
@@ -15,7 +15,7 @@
 # Prerequisites:
 #   - Jumpstart node must be reachable via SSH
 #   - All target nodes must be reachable via SSH
-#   - 01_setup_puppet.sh should have completed (for SSH key distribution)
+#   - 04_setup_puppet.sh should have completed (for SSH key distribution)
 
 set -euo pipefail
 

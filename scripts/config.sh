@@ -5,7 +5,7 @@
 # and utility functions for the CMS high-availability infrastructure.
 #
 # All variables can be overridden via external environment variables.
-# Example: DB_PASS="AnotherPassword" bash scripts/02_setup_nginx.sh
+# Example: DB_PASS="AnotherPassword" bash scripts/07_setup_nginx_wordpress.sh
 #
 # This file is source-safe: it only defines and exports variables and
 # functions without performing any direct execution.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 05_setup_ufw.sh
+# 09_setup_ufw.sh
 #
 # Triggers a Puppet agent run on all nodes (including the router).
 # Puppet manages the full desired state for network security:
@@ -11,7 +11,7 @@
 # cannot be expressed as pure declarative Puppet state.
 #
 # Pre-requisites:
-#   - 01_setup_puppet.sh must have completed (agents registered and certs signed).
+#   - 04_setup_puppet.sh must have completed (agents registered and certs signed).
 
 set -euo pipefail
 

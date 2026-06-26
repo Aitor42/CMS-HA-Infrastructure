@@ -1,7 +1,7 @@
 # role::k3s_master — K3s control-plane node (internal-master1, internal-master2).
 #
 # Manages: base dependencies and all UFW rules required by a K3s master.
-# The K3s binary installation and cluster bootstrap remain in 03_setup_kubernetes.sh
+# The K3s binary installation and cluster bootstrap remain in 06_setup_kubernetes.sh
 # because they require ordered token exchange between masters (not declarative state).
 
 class role::k3s_master {

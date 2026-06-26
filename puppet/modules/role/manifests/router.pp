@@ -2,7 +2,7 @@
 #
 # Manages: IP forwarding (sysctl), UFW default perimeter policies,
 # inter-zone forwarding rules, and SSH access.
-# NAT/DNAT rules (iptables) remain in 05_setup_ufw.sh because they require
+# NAT/DNAT rules (iptables) remain in 09_setup_ufw.sh because they require
 # knowledge of the actual WAN interface name, which is detected at runtime.
 
 class role::router {

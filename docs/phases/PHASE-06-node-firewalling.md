@@ -31,7 +31,7 @@ Each node has UFW configured with:
 
 ### Associated Scripts
 
-- `scripts/05_setup_ufw.sh` — Nodal firewalling section (second part of the script)
+- `scripts/09_setup_ufw.sh` — Nodal firewalling section (second part of the script)
 
 ### Verification
 

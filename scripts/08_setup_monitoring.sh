@@ -1,5 +1,5 @@
 #!/bin/bash
-# 04_setup_monitoring.sh
+# 08_setup_monitoring.sh
 #
 # Triggers a Puppet agent run on internal-monitor and all cluster nodes.
 # Puppet manages the full desired state for monitoring:
@@ -7,7 +7,7 @@
 #   - All other nodes:  prometheus-node-exporter (via role::base)
 #
 # Pre-requisites:
-#   - 01_setup_puppet.sh must have completed (agents registered and certs signed).
+#   - 04_setup_puppet.sh must have completed (agents registered and certs signed).
 
 set -euo pipefail
 

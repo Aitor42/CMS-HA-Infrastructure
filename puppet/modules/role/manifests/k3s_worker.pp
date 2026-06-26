@@ -1,7 +1,7 @@
 # role::k3s_worker — K3s worker node (internal-worker1, internal-worker2).
 #
 # Manages: base dependencies and UFW rules for K3s worker nodes.
-# K3s agent join token logic stays in 03_setup_kubernetes.sh.
+# K3s agent join token logic stays in 06_setup_kubernetes.sh.
 
 class role::k3s_worker {
 

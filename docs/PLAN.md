@@ -102,24 +102,24 @@ The entire deployment is executed from a **single entry point**: `deploy_all.sh`
 
 ## Project Phases & Deployment Mapping
 
-The project structure is split between the **Project Milestones** (which correspond to the design phases documented in `docs/phases/PHASE-XX.md`) and the **Technical Execution Sequence** implemented by the `deploy_all.sh` orchestrator script.
+The project structure is split between the **Project Milestones** (which correspond to the design phases documented in `docs/phases/PHASE-XX-descriptive-name.md`) and the **Technical Execution Sequence** implemented by the `deploy_all.sh` orchestrator script.
 
 ### 1. Project Milestones (Design Phases)
 
 | Phase | Project Milestone | Key Task | Documentation |
 |:---:|:---|:---|:---|
-| **00** | Network Design and Addressing | IP & MAC planning, VM specifications | [Phase 00](phases/PHASE-00.md) |
-| **01** | Jumpstart Node / Cobbler | Cobbler PXE server setup & autoinstall profiles | [Phase 01](phases/PHASE-01.md) |
-| **02** | Network Redundancy | L2 Loop prevention with Spanning Tree (STP) | [Phase 02](phases/PHASE-02.md) |
-| **03** | HA Cluster and Database | DRBD block replication & K3s cluster database | [Phase 03](phases/PHASE-03.md) |
-| **04** | Routing and L3 Hardening | Perimeter routing (UFW router) & NAT policies | [Phase 04](phases/PHASE-04.md) |
-| **05** | CMS Frontends and Load Balancer | Nginx Load Balancer & Apache CMS frontends | [Phase 05](phases/PHASE-05.md) |
-| **06** | Nodal Firewalling (End-point Security) | Local firewall rules per node via UFW | [Phase 06](phases/PHASE-06.md) |
-| **07** | Infrastructure Monitoring | Prometheus & node_exporter metrics scraping | [Phase 07](phases/PHASE-07.md) |
-| **08** | Service Monitoring | Nginx, Apache, MariaDB exporters & Grafana | [Phase 08](phases/PHASE-08.md) |
-| **09** | Hot-desk Workstations | Automated workstation VM provisioning | [Phase 09](phases/PHASE-09.md) |
-| **10** | TrafficMix and End-to-End Tests | Automated load testing & verification checks | [Phase 10](phases/PHASE-10.md) |
-| **11** | Final Documentation | Project manuals, baseline & diagram validation | [Phase 11](phases/PHASE-11.md) |
+| **00** | Network Design and Addressing | IP & MAC planning, VM specifications | [Phase 00](phases/PHASE-00-network-design.md) |
+| **01** | Jumpstart Node / Cobbler | Cobbler PXE server setup & autoinstall profiles | [Phase 01](phases/PHASE-01-cobbler-provisioning.md) |
+| **02** | Network Redundancy | L2 Loop prevention with Spanning Tree (STP) | [Phase 02](phases/PHASE-02-network-redundancy.md) |
+| **03** | HA Cluster and Database | DRBD block replication & K3s cluster database | [Phase 03](phases/PHASE-03-ha-cluster-database.md) |
+| **04** | Routing and L3 Hardening | Perimeter routing (UFW router) & NAT policies | [Phase 04](phases/PHASE-04-routing-security.md) |
+| **05** | CMS Frontends and Load Balancer | Nginx Load Balancer & Apache CMS frontends | [Phase 05](phases/PHASE-05-cms-loadbalancer.md) |
+| **06** | Nodal Firewalling (End-point Security) | Local firewall rules per node via UFW | [Phase 06](phases/PHASE-06-node-firewalling.md) |
+| **07** | Infrastructure Monitoring | Prometheus & node_exporter metrics scraping | [Phase 07](phases/PHASE-07-infra-monitoring.md) |
+| **08** | Service Monitoring | Nginx, Apache, MariaDB exporters & Grafana | [Phase 08](phases/PHASE-08-service-monitoring.md) |
+| **09** | Hot-desk Workstations | Automated workstation VM provisioning | [Phase 09](phases/PHASE-09-hotdesk-workstations.md) |
+| **10** | TrafficMix and End-to-End Tests | Automated load testing & verification checks | [Phase 10](phases/PHASE-10-traffic-testing.md) |
+| **11** | Final Documentation | Project manuals, baseline & diagram validation | [Phase 11](phases/PHASE-11-final-documentation.md) |
 
 ### 2. Technical Execution Sequence (`deploy_all.sh`)
 
@@ -128,17 +128,17 @@ When launching `./deploy_all.sh`, the orchestrator executes the automation scrip
 | Step | Script | Description | Milestone Mapping |
 |:---:|:---|:---|:---:|
 | **00a** | `00_init_vms.sh --jumpstart-only` | Virtual networks creation and Jumpstart node provisioning | Phase 00 |
-| **01** | `00_setup_cobbler.sh` | Cobbler configuration (PXE, DHCP, TFTP, DNS) on Jumpstart | Phase 01 |
-| **01.5**| `add_cobbler_nodes.sh` | Registration of all target nodes and MAC bindings in Cobbler | Phase 01 |
+| **01** | `01_setup_cobbler.sh` | Cobbler configuration (PXE, DHCP, TFTP, DNS) on Jumpstart | Phase 01 |
+| **01.5**| `02_register_cobbler_nodes.sh` | Registration of all target nodes and MAC bindings in Cobbler | Phase 01 |
 | **00b** | `00_init_vms.sh --nodes-only` | Unattended PXE installation of all client nodes (e.g. via `scripts/utils/install_by_batches.sh`) | Phase 00 |
-| **01.8**| `08_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
-| **02** | `01_setup_puppet.sh` | Puppet Server deployment and Agent convergence | Phase 01, Phase 09 |
-| **03** | `06_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
-| **04** | `03_setup_kubernetes.sh` | K3s HA clustering & MariaDB deployment on DRBD storage | Phase 03 |
-| **05** | `02_setup_nginx.sh` | Nginx Load Balancer and WordPress frontends configuration | Phase 05 |
-| **06** | `04_setup_monitoring.sh` | Prometheus monitoring, exporters, Grafana & alerts | Phase 07, Phase 08 |
-| **07** | `05_setup_ufw.sh` | Perimeter routing (router) & per-node firewall policies | Phase 04, Phase 06 |
-| **08** | `09_setup_internal_ca.sh` | Step-CA PKI deployment, TLS cert issuance and trust sync | Phase 04 |
+| **01.8**| `03_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
+| **02** | `04_setup_puppet.sh` | Puppet Server deployment and Agent convergence | Phase 01, Phase 09 |
+| **03** | `05_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
+| **04** | `06_setup_kubernetes.sh` | K3s HA clustering & MariaDB deployment on DRBD storage | Phase 03 |
+| **05** | `07_setup_nginx_wordpress.sh` | Nginx Load Balancer and WordPress frontends configuration | Phase 05 |
+| **06** | `08_setup_monitoring.sh` | Prometheus monitoring, exporters, Grafana & alerts | Phase 07, Phase 08 |
+| **07** | `09_setup_ufw.sh` | Perimeter routing (router) & per-node firewall policies | Phase 04, Phase 06 |
+| **08** | `10_setup_internal_ca.sh` | Step-CA PKI deployment, TLS cert issuance and trust sync | Phase 04 |
 
 ---
 

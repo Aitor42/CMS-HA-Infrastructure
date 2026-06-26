@@ -216,33 +216,33 @@ graph TD
     subgraph VM_PROVISION["🖥 VM Provisioning"]
         STEP00A["Step 00a · Create networks + Jumpstart VM<br/>00_init_vms.sh --jumpstart-only"]
         WAIT_JS["⏳ Wait for Jumpstart SSH"]
-        STEP01["Step 01 · Install Cobbler on Jumpstart<br/>00_setup_cobbler.sh"]
-        STEP015["Step 01.5 · Register all nodes in Cobbler<br/>add_cobbler_nodes.sh"]
+        STEP01["Step 01 · Install Cobbler on Jumpstart<br/>01_setup_cobbler.sh"]
+        STEP015["Step 01.5 · Register all nodes in Cobbler<br/>02_register_cobbler_nodes.sh"]
         STEP00B["Step 00b · Batch PXE install all client VMs<br/>install_by_batches.sh"]
         WAIT_NODES["⏳ Wait for all VMs SSH"]
-        STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>08_repair_ssh_puppet.sh"]
+        STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>03_repair_ssh_puppet.sh"]
     end
 
     subgraph CONFIG_MGMT["⚙ Configuration Management"]
-        STEP02["Step 02 · Puppet Server + Agent convergence<br/>01_setup_puppet.sh<br/>(includes hot-desk provisioning)"]
+        STEP02["Step 02 · Puppet Server + Agent convergence<br/>04_setup_puppet.sh<br/>(includes hot-desk provisioning)"]
     end
 
     subgraph HA_INFRA["🔧 HA Infrastructure"]
-        STEP03["Step 03 · DRBD HA block replication<br/>06_setup_drbd.sh"]
-        STEP04["Step 04 · K3s HA cluster + MariaDB StatefulSet<br/>03_setup_kubernetes.sh"]
-        STEP05["Step 05 · Nginx LB + Apache WordPress frontends<br/>02_setup_nginx.sh"]
+        STEP03["Step 03 · DRBD HA block replication<br/>05_setup_drbd.sh"]
+        STEP04["Step 04 · K3s HA cluster + MariaDB StatefulSet<br/>06_setup_kubernetes.sh"]
+        STEP05["Step 05 · Nginx LB + Apache WordPress frontends<br/>07_setup_nginx_wordpress.sh"]
     end
 
     subgraph OBSERVE["📊 Observability"]
-        STEP06["Step 06 · Prometheus + Grafana + Alertmanager<br/>04_setup_monitoring.sh"]
+        STEP06["Step 06 · Prometheus + Grafana + Alertmanager<br/>08_setup_monitoring.sh"]
     end
 
     subgraph SECURITY["🔒 Security"]
-        STEP07["Step 07 · UFW perimeter + per-node firewall<br/>05_setup_ufw.sh"]
-        STEP08["Step 08 · Internal CA (step-ca) + TLS certs<br/>09_setup_internal_ca.sh"]
+        STEP07["Step 07 · UFW perimeter + per-node firewall<br/>09_setup_ufw.sh"]
+        STEP08["Step 08 · Internal CA (step-ca) + TLS certs<br/>10_setup_internal_ca.sh"]
     end
 
-    TRAFFIC["Step 09 · Traffic mix + load testing<br/>07_traffic_mix.sh"]
+    TRAFFIC["Step 09 · Traffic mix + load testing<br/>11_traffic_mix.sh"]
     END(["✅ Deployment Complete"])
 
     START --> STEP00A

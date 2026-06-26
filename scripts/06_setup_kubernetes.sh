@@ -1,5 +1,5 @@
 #!/bin/bash
-# 03_setup_kubernetes.sh
+# 06_setup_kubernetes.sh
 #
 #
 # Descripción:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# 02_setup_nginx.sh
+# 07_setup_nginx_wordpress.sh
 #
 # Triggers a Puppet agent run on the load balancer and CMS frontend nodes.
 # Puppet manages the full desired state for these nodes:
@@ -7,8 +7,8 @@
 #   - main-cms*:  Apache + PHP packages, WordPress vhost, WP-CLI core install, UFW rules
 #
 # Pre-requisites:
-#   - 01_setup_puppet.sh must have completed (agents registered and certs signed).
-#   - 03_setup_kubernetes.sh must have completed (MariaDB NodePort 30306 must be up).
+#   - 04_setup_puppet.sh must have completed (agents registered and certs signed).
+#   - 06_setup_kubernetes.sh must have completed (MariaDB NodePort 30306 must be up).
 
 set -euo pipefail
 

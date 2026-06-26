@@ -45,7 +45,7 @@ libvirt_uri     = "qemu:///session"
 ## Important Notes
 
 - **VMs start in a stopped state** (`running = false`). The `deploy_all.sh` orchestrator controls the boot sequence to ensure correct PXE provisioning order.
-- **IP addresses are not assigned by Terraform**. They are assigned by the Cobbler DHCP server based on MAC address reservations (configured in `scripts/add_cobbler_nodes.sh`).
+- **IP addresses are not assigned by Terraform**. They are assigned by the Cobbler DHCP server based on MAC address reservations (configured in `scripts/02_register_cobbler_nodes.sh`).
 - **This does not replace the provisioning scripts**. Terraform only creates the virtual hardware; Cobbler, Puppet, and the deployment scripts handle the software stack.
 
 ## Tear Down

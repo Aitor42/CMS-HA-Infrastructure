@@ -33,7 +33,7 @@
   - Only the promoted primary master (`internal-master1` by default) mounts the DRBD volume.
 - **Dynamic Node Pinning (Kubernetes + DRBD):** 
   - To prevent MariaDB from running on nodes without the mounted DRBD storage, `nodeSelector: drbd-status: primary` is configured in `mariadb-statefulset.yaml`.
-  - The script `03_setup_kubernetes.sh` automatically labels `internal-master1` with `drbd-status=primary`.
+  - The script `06_setup_kubernetes.sh` automatically labels `internal-master1` with `drbd-status=primary`.
   - The local failover script (`/usr/local/bin/drbd-failover.sh`) dynamically reassigns this label during promotion and demotion, causing Kubernetes to automatically move the MariaDB pod to the active master node.
 - **Exposure:** ClusterIP (3306) + NodePort (30306) for access from the main network.
 - **Database:** `wordpress`
@@ -51,8 +51,8 @@ The manifests are located in `kubernetes/`:
 
 ### Associated Scripts
 
-- `scripts/03_setup_kubernetes.sh` — K3s installation, node labeling, and MariaDB deployment.
-- `scripts/06_setup_drbd.sh` — Configuration and installation of DRBD on the master nodes and generation of the `/usr/local/bin/drbd-failover.sh` script.
+- `scripts/06_setup_kubernetes.sh` — K3s installation, node labeling, and MariaDB deployment.
+- `scripts/05_setup_drbd.sh` — Configuration and installation of DRBD on the master nodes and generation of the `/usr/local/bin/drbd-failover.sh` script.
 
 ### Verification
 

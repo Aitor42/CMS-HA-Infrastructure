@@ -136,15 +136,17 @@ CMS-HA-Infrastructure/
 ├── scripts/
 │   ├── config.sh                    # Central configuration (IPs, credentials, SSH)
 │   ├── 00_init_vms.sh               # VM and virtual network creation (libvirt)
-│   ├── 00_setup_cobbler.sh          # Cobbler PXE/DHCP/DNS provisioning server
-│   ├── 01_setup_puppet.sh           # Puppet Server + Agent deployment
-│   ├── 02_setup_nginx.sh            # Nginx LB + WordPress/Apache frontends
-│   ├── 03_setup_kubernetes.sh       # K3s HA cluster + MariaDB StatefulSet
-│   ├── 04_setup_monitoring.sh       # Prometheus + Grafana + exporters
-│   ├── 05_setup_ufw.sh             # UFW perimeter and per-node firewall
-│   ├── 06_setup_drbd.sh            # DRBD block replication setup
-│   ├── 07_traffic_mix.sh           # Load generation and E2E testing
-│   ├── 09_setup_internal_ca.sh     # Internal CA (step-ca) deployment
+│   ├── 01_setup_cobbler.sh          # Cobbler PXE/DHCP/DNS provisioning server
+│   ├── 02_register_cobbler_nodes.sh # Register client nodes in Cobbler
+│   ├── 03_repair_ssh_puppet.sh      # SSH and Puppet CA repair
+│   ├── 04_setup_puppet.sh           # Puppet Server + Agent deployment
+│   ├── 05_setup_drbd.sh             # DRBD block replication setup
+│   ├── 06_setup_kubernetes.sh       # K3s HA cluster + MariaDB StatefulSet
+│   ├── 07_setup_nginx_wordpress.sh  # Nginx LB + WordPress/Apache frontends
+│   ├── 08_setup_monitoring.sh       # Prometheus + Grafana + exporters
+│   ├── 09_setup_ufw.sh              # UFW perimeter and per-node firewall
+│   ├── 10_setup_internal_ca.sh      # Internal CA (step-ca) deployment
+│   ├── 11_traffic_mix.sh            # Load generation and E2E testing
 │   └── utils/
 │       ├── test_failover.sh         # Automated chaos engineering tests
 │       ├── verify_all.sh            # Full infrastructure health check
@@ -218,14 +220,14 @@ cd .. && ./deploy_all.sh --skip-vm-create
 | Phase | Script | Description |
 |:-----:|:-------|:------------|
 | **00** | `00_init_vms.sh` | Virtual network and VM creation (libvirt/KVM) |
-| **01** | `00_setup_cobbler.sh` | Cobbler PXE server — zero-touch OS provisioning |
-| **02** | `01_setup_puppet.sh` | Puppet Server + Agent — idempotent configuration |
-| **03** | `06_setup_drbd.sh` | DRBD 9 — synchronous block replication |
-| **04** | `03_setup_kubernetes.sh` | K3s HA cluster + MariaDB StatefulSet |
-| **05** | `02_setup_nginx.sh` | Nginx load balancer + WordPress/Apache frontends |
-| **06** | `04_setup_monitoring.sh` | Prometheus + Grafana + Alertmanager |
-| **07** | `05_setup_ufw.sh` | UFW perimeter and per-node firewalling |
-| **08** | `09_setup_internal_ca.sh` | Internal PKI — TLS certificates with step-ca |
+| **01** | `01_setup_cobbler.sh` | Cobbler PXE server — zero-touch OS provisioning |
+| **02** | `04_setup_puppet.sh` | Puppet Server + Agent — idempotent configuration |
+| **03** | `05_setup_drbd.sh` | DRBD 9 — synchronous block replication |
+| **04** | `06_setup_kubernetes.sh` | K3s HA cluster + MariaDB StatefulSet |
+| **05** | `07_setup_nginx_wordpress.sh` | Nginx load balancer + WordPress/Apache frontends |
+| **06** | `08_setup_monitoring.sh` | Prometheus + Grafana + Alertmanager |
+| **07** | `09_setup_ufw.sh` | UFW perimeter and per-node firewalling |
+| **08** | `10_setup_internal_ca.sh` | Internal PKI — TLS certificates with step-ca |
 
 ---
 

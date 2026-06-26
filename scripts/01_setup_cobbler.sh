@@ -1,5 +1,5 @@
 #!/bin/bash
-# 00_setup_cobbler.sh
+# 01_setup_cobbler.sh
 #
 #
 # Descripción:
@@ -365,5 +365,5 @@ REMOTE_EOF
 
 echo ""
 echo ">>> Finalizado despliegue de Cobbler <<<"
-echo "[SIGUIENTE] Ejecute: bash scripts/add_cobbler_nodes.sh"
+echo "[SIGUIENTE] Ejecute: bash scripts/02_register_cobbler_nodes.sh"
 echo "            Luego encienda los nodos vacíos para iniciar instalación PXE."

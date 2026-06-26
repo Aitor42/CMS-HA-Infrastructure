@@ -1,5 +1,5 @@
 #!/bin/bash
-# 06_setup_drbd.sh
+# 05_setup_drbd.sh
 #
 # Configures synchronous block-level replication (Protocol C) between the
 # secondary disks (/dev/vdb) of internal-master1 and internal-master2.

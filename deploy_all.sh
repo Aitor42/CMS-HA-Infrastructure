@@ -328,8 +328,8 @@ else
     fi
 
     # --- Phase 01: Cobbler Provisioning Server (Baremetal) ---
-    timed_phase "Phase 01: Cobbler (PXE/DHCP/DNS Services)" "00_setup_cobbler.sh"
-    timed_phase "Phase 01.5: Registering Client Nodes in Cobbler" "add_cobbler_nodes.sh"
+    timed_phase "Phase 01: Cobbler (PXE/DHCP/DNS Services)" "01_setup_cobbler.sh"
+    timed_phase "Phase 01.5: Registering Client Nodes in Cobbler" "02_register_cobbler_nodes.sh"
 
     # --- Phase 00b: Client Nodes Creation (Unattended PXE Installation) ---
     timed_phase "Phase 00b: Client Nodes Creation (Unattended PXE Installation)" "00_init_vms.sh" --nodes-only "${INIT_EXTRA[@]}"
@@ -347,8 +347,8 @@ if [[ "$SKIP_VM_CREATE" -eq 1 ]] && [[ "$DRY_RUN" -ne 1 ]]; then
 fi
 
 # --- SSH key and CA certificate repair if applicable ---
-if [[ -f "$SCRIPTS_DIR/08_repair_ssh_puppet.sh" ]]; then
-    timed_phase "Phase 01.8: SSH and Puppet CA Repair" "08_repair_ssh_puppet.sh"
+if [[ -f "$SCRIPTS_DIR/03_repair_ssh_puppet.sh" ]]; then
+    timed_phase "Phase 01.8: SSH and Puppet CA Repair" "03_repair_ssh_puppet.sh"
 fi
 
 # ==============================================================================
@@ -357,38 +357,38 @@ fi
 
 # --- Phase 02: Puppet (Configuration Management) ---
 # Install agents and link certificates against the central Puppet Master
-timed_phase "Phase 02: Puppet (Configuration Management)" "01_setup_puppet.sh"
+timed_phase "Phase 02: Puppet (Configuration Management)" "04_setup_puppet.sh"
 
 # --- Phase 03: DRBD (HA Block Storage) ---
 # Must be configured BEFORE Kubernetes and MariaDB so the data directory (/mnt/data/mariadb)
 # is already mounted on the replicated device. This way, MariaDB initializes its database directly
 # on high-availability storage, avoiding K3s downtime and backup/restore operations.
-timed_phase "Phase 03: DRBD (High Availability Storage)" "06_setup_drbd.sh"
+timed_phase "Phase 03: DRBD (High Availability Storage)" "05_setup_drbd.sh"
 
 # --- Phase 04: Kubernetes (HA Clustering & Database) ---
 # Configura K3s e inicializa el clúster. Levanta MariaDB en StatefulSet usando el PV del volumen DRBD.
-timed_phase "Phase 04: Kubernetes (HA Clustering and Database)" "03_setup_kubernetes.sh"
+timed_phase "Phase 04: Kubernetes (HA Clustering and Database)" "06_setup_kubernetes.sh"
 
 # --- Phase 05: Nginx and WordPress (Load Balancer and Frontends) ---
 # Levanta el balanceador de carga Nginx e instala Apache/WordPress. Se ejecuta tras Kubernetes,
 # asegurando que los frontales de WordPress puedan conectar y autenticar contra MariaDB ya operativa.
-timed_phase "Phase 05: Nginx (Load Balancing) and WordPress (CMS)" "02_setup_nginx.sh"
+timed_phase "Phase 05: Nginx (Load Balancing) and WordPress (CMS)" "07_setup_nginx_wordpress.sh"
 
 # --- Phase 06: Prometheus + Grafana (Comprehensive Monitoring) ---
 # Configura el scraping de métricas en Prometheus e dashboards de Grafana para todos los servicios
 # ya levantados en las fases anteriores (LB, CMS, MariaDB, nodos).
-timed_phase "Phase 06: Prometheus + Grafana (Monitoring)" "04_setup_monitoring.sh"
+timed_phase "Phase 06: Prometheus + Grafana (Monitoring)" "08_setup_monitoring.sh"
 
 # --- Phase 07: UFW (Security and Nodal Firewalling) ---
 # Se ejecuta al final de todo el aprovisionamiento. Aplica las reglas del cortafuegos nodal e interno,
 # cerrando puertos no utilizados una vez que el flujo de conexiones del clúster está totalmente asentado.
-timed_phase "Phase 07: UFW (Security and Nodal Firewalling)" "05_setup_ufw.sh"
+timed_phase "Phase 07: UFW (Security and Nodal Firewalling)" "09_setup_ufw.sh"
 
 # --- Phase 08: Internal CA (PKI with step-ca) ---
 # Deploys a private Certificate Authority on the Jumpstart node, issues TLS certificates
 # for Nginx LB, Grafana, and K3s API servers, and distributes the root CA to all nodes.
-if [[ -f "$SCRIPTS_DIR/09_setup_internal_ca.sh" ]]; then
-    timed_phase "Phase 08: Internal CA (TLS Certificate Authority)" "09_setup_internal_ca.sh"
+if [[ -f "$SCRIPTS_DIR/10_setup_internal_ca.sh" ]]; then
+    timed_phase "Phase 08: Internal CA (TLS Certificate Authority)" "10_setup_internal_ca.sh"
 fi
 
 # ==============================================================================

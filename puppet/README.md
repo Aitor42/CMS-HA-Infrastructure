@@ -65,30 +65,30 @@ always applied regardless of the node's specific role.
 | Script | Reason |
 |---|---|
 | `00_init_vms.sh` | Creates VMs on the KVM hypervisor — outside the VMs themselves |
-| `00_setup_cobbler.sh` | Bootstraps Cobbler before any agents exist |
-| `01_setup_puppet.sh` | Installs Puppet Server itself (chicken-and-egg) |
-| `03_setup_kubernetes.sh` | K3s requires ordered token exchange between masters |
-| `06_setup_drbd.sh` | DRBD needs cross-node promote/demote coordination |
-| NAT rules in `05_setup_ufw.sh` | WAN interface name is detected at runtime from MAC |
+| `01_setup_cobbler.sh` | Bootstraps Cobbler before any agents exist |
+| `04_setup_puppet.sh` | Installs Puppet Server itself (chicken-and-egg) |
+| `06_setup_kubernetes.sh` | K3s requires ordered token exchange between masters |
+| `05_setup_drbd.sh` | DRBD needs cross-node promote/demote coordination |
+| NAT rules in `09_setup_ufw.sh` | WAN interface name is detected at runtime from MAC |
 
 ## Deployment Flow
 
 ```
 00_init_vms.sh          # Create VMs + networks
     ↓
-00_setup_cobbler.sh     # PXE provision OS on all nodes
+01_setup_cobbler.sh     # PXE provision OS on all nodes
     ↓
-01_setup_puppet.sh      # Install Puppet Server + agents
+04_setup_puppet.sh      # Install Puppet Server + agents
                         # Sync puppet/ code to jumpstart codedir  ← THIS DIRECTORY
                         # Initial `puppet agent -t` on all nodes  ← FULL DESIRED STATE APPLIED
     ↓
-03_setup_kubernetes.sh  # K3s cluster bootstrap (token exchange)
+06_setup_kubernetes.sh  # K3s cluster bootstrap (token exchange)
     ↓
-06_setup_drbd.sh        # DRBD block replication setup
+05_setup_drbd.sh        # DRBD block replication setup
     ↓
-02_setup_nginx.sh       # puppet agent -t (Nginx + WordPress convergence)
-04_setup_monitoring.sh  # puppet agent -t (Prometheus + Grafana convergence)
-05_setup_ufw.sh         # puppet agent -t + NAT rules injection
+07_setup_nginx_wordpress.sh  # puppet agent -t (Nginx + WordPress convergence)
+08_setup_monitoring.sh  # puppet agent -t (Prometheus + Grafana convergence)
+09_setup_ufw.sh         # puppet agent -t + NAT rules injection
 ```
 
 ## Manual Operations

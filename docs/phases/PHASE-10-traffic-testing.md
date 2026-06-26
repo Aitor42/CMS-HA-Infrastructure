@@ -12,16 +12,16 @@
 
 ### TrafficMix Script
 
-The script `scripts/07_traffic_mix.sh` generates simulated traffic against the CMS web infrastructure. It supports two modes:
+The script `scripts/11_traffic_mix.sh` generates simulated traffic against the CMS web infrastructure. It supports two modes:
 
 **External Mode** (simulates client traffic from the Internet):
 ```bash
-./scripts/07_traffic_mix.sh --external --target <ROUTER_WAN_IP> --duration 120
+./scripts/11_traffic_mix.sh --external --target <ROUTER_WAN_IP> --duration 120
 ```
 
 **Internal Mode** (runs locally from a hot-desk node):
 ```bash
-./scripts/07_traffic_mix.sh --internal --duration 60 --with-db
+./scripts/11_traffic_mix.sh --internal --duration 60 --with-db
 ```
 
 ### Types of Generated Traffic
@@ -49,7 +49,7 @@ ssh root@192.168.10.11 "kubectl get nodes"  # K3s cluster operational
 ssh root@192.168.10.11 "kubectl get pods -n cms"  # MariaDB running
 
 # 4. Generate post-shutdown traffic
-./scripts/07_traffic_mix.sh --internal --duration 30
+./scripts/11_traffic_mix.sh --internal --duration 30
 ```
 
 ### Expected Results
@@ -63,7 +63,7 @@ ssh root@192.168.10.11 "kubectl get pods -n cms"  # MariaDB running
 
 ```bash
 # View TrafficMix report
-./scripts/07_traffic_mix.sh --internal --duration 60
+./scripts/11_traffic_mix.sh --internal --duration 60
 
 # The script outputs:
 # - Total requests executed

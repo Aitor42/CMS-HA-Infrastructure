@@ -91,7 +91,7 @@ Requires the `mod_status` module enabled in Apache:
 
 ### Associated Scripts
 
-- `scripts/04_setup_monitoring.sh` — Installation and setup of service-specific exporters
+- `scripts/08_setup_monitoring.sh` — Installation and setup of service-specific exporters
 
 ### Verification
 

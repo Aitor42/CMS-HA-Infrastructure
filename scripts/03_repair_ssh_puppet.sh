@@ -1,5 +1,5 @@
 #!/bin/bash
-# 08_repair_ssh_puppet.sh
+# 03_repair_ssh_puppet.sh
 #
 #
 # Descripción:

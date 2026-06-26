@@ -1,5 +1,5 @@
 #!/bin/bash
-# 07_traffic_mix.sh
+# 11_traffic_mix.sh
 #
 #
 # Descripción:
@@ -31,7 +31,7 @@ PROTOCOL="https"                 # Protocolo por defecto
 # Muestra el panel de ayuda y comandos de ejemplo
 show_help() {
   cat <<'HELP'
-Uso: 07_traffic_mix.sh [OPCIONES]
+Uso: 11_traffic_mix.sh [OPCIONES]
 
 Simula patrones de navegación reales y carga sobre la infraestructura CMS.
 
@@ -47,10 +47,10 @@ OPCIONES:
 
 EJEMPLOS:
   # Ejecución interna desde un hotdesk por 2 minutos
-  ./07_traffic_mix.sh --internal --duration 120
+  ./11_traffic_mix.sh --internal --duration 120
 
   # Simulación externa con queries a la base de datos
-  ./07_traffic_mix.sh --external --target 10.0.0.1 --with-db
+  ./11_traffic_mix.sh --external --target 10.0.0.1 --with-db
 HELP
   exit 0
 }

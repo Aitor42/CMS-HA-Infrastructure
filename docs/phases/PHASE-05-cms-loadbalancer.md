@@ -56,7 +56,7 @@ server {
 
 ### Associated Scripts
 
-- `scripts/02_setup_nginx.sh` — Installs Nginx, generates SSL certificate, configures LB, and installs WordPress on both frontends
+- `scripts/07_setup_nginx_wordpress.sh` — Installs Nginx, generates SSL certificate, configures LB, and installs WordPress on both frontends
 
 ### Verification
 

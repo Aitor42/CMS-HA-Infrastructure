@@ -40,8 +40,8 @@ Below is a screenshot of the automated network installation process (PXE) manage
 
 ### Associated Scripts
 
-- `scripts/00_setup_cobbler.sh` — Installation and configuration of Cobbler on the jumpstart node
-- `scripts/add_cobbler_nodes.sh` — Registers all nodes in Cobbler
+- `scripts/01_setup_cobbler.sh` — Installation and configuration of Cobbler on the jumpstart node
+- `scripts/02_register_cobbler_nodes.sh` — Registers all nodes in Cobbler
 
 ### Verification
 

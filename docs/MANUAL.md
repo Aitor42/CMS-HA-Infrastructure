@@ -58,10 +58,10 @@ bash scripts/00_init_vms.sh --jumpstart-only
 Once Jumpstart is powered on and responds to ping/SSH, run the Cobbler and NFS setup script:
 ```bash
 # 3. Configure Cobbler server, DHCP, and NFS
-bash scripts/00_setup_cobbler.sh
+bash scripts/01_setup_cobbler.sh
 
 # 4. Register client node templates and profiles in Cobbler
-bash scripts/add_cobbler_nodes.sh
+bash scripts/02_register_cobbler_nodes.sh
 ```
 
 ### Step 2: Sequential Installation and RAM Adjustment (Batches)
