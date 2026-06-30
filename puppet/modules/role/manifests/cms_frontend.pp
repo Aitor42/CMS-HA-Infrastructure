@@ -120,8 +120,8 @@ class role::cms_frontend {
   }
 
   exec { 'wordpress-config-db-host':
-    command => "/bin/sed -i \"s/localhost/192.168.10.11:30306/\" /var/www/html/wp-config.php",
-    unless  => "/usr/bin/grep -q 'DB_HOST.*192.168.10.11:30306' /var/www/html/wp-config.php",
+    command => '/bin/sed -i "s/define( *\'DB_HOST\', *\'localhost\' *);/\$db_hosts = [\'192.168.10.11:30306\', \'192.168.10.12:30306\']; \$active_db_host = \$db_hosts[0]; foreach (\$db_hosts as \$h) { list(\$ip, \$port) = explode(\':\', \$h); \$fp = @fsockopen(\$ip, \$port, \$e, \$s, 1); if (\$fp) { fclose(\$fp); \$active_db_host = \$h; break; } } define(\'DB_HOST\', \$active_db_host);/" /var/www/html/wp-config.php',
+    unless  => '/usr/bin/grep -q "active_db_host" /var/www/html/wp-config.php',
     require => Exec['wordpress-config-create'],
   }
 
