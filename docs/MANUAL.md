@@ -287,7 +287,7 @@ tar -czf wp-files-backup.tar.gz /var/www/html/
 
 ### 7.1 Master 1 Failure (DRBD/K3s Primary)
 
-> **Note (June 2026 update):** The MariaDB data directory (`/mnt/data/mariadb`) resides on the **local filesystem of `internal-master1`**, not directly on the DRBD device. This decision was made to avoid incompatibilities between InnoDB and the DRBD+qcow2 virtual block backend under `io_uring`. The DRBD resource (`cms_data`) remains active as a replication layer, but the mount point is not required for MariaDB operation.
+> **Note (June 2026 update):** The MariaDB data directory (`/mnt/data/mariadb`) resides directly on the replicated DRBD device (`/dev/drbd0`). The initial incompatibility between InnoDB and the DRBD+qcow2 virtual block backend under `io_uring` was successfully resolved by applying a custom MariaDB ConfigMap that disables native AIO (`innodb_use_native_aio=0`) and forces `fsync` for page flushing. Therefore, the volume is mounted on the active Primary node at all times, ensuring synchronous replication.
 
 If `internal-master1` goes down completely, the MariaDB pod will enter `Unknown` state. Manual recovery steps:
 ```bash
