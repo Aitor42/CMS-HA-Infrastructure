@@ -46,6 +46,9 @@ export CMS2_IP="192.168.20.102"          # WordPress frontend 2 (Apache)
 export NUM_HOTDESKS="${NUM_HOTDESKS:-3}" # Default number of hot-desks to deploy
 export MAX_HOTDESKS=8                    # Maximum allowed by IP address range
 
+# ⚠ SEGURIDAD: Las credenciales siguientes tienen valores por defecto de laboratorio.
+# En producción, sobreescribirlas SIEMPRE mediante variables de entorno:
+#   export DB_PASS="MiPasswordSeguro" bash scripts/07_setup_nginx_wordpress.sh
 # ── CMS Database Credentials and Parameters ──────────────────────────────────
 export DB_PASS="${DB_PASS:-WpS3cur3P4ss!}" # WordPress password for MariaDB
 export DB_NAME="${DB_NAME:-wordpress}"     # Database schema name

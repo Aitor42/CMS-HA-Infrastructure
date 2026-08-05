@@ -1,6 +1,10 @@
 # Credentials and sensitive files
 token.txt
 *.cookie
+.env
+.env.*
+*-secret.yaml
+!kubernetes/mariadb-secret.yaml
 
 # Test files
 prueba
