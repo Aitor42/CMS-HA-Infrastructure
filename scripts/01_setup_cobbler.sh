@@ -96,7 +96,7 @@ if [ -z "$DNS_SERVERS" ]; then
     DNS_SERVERS=$(grep -E '^nameserver' /etc/resolv.conf \
         | awk '{print $2}' | grep -v '127\.0\.0\.') || true
 fi
-[ -z "$DNS_SERVERS" ] && DNS_SERVERS="172.20.32.3\n8.8.8.8"
+[ -z "$DNS_SERVERS" ] && DNS_SERVERS="172.20.32.3 8.8.8.8"
 
 RESOLV_CONF_CONTENT=""
 for dns in ${DNS_SERVERS}; do
