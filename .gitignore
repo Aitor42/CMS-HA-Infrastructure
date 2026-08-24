@@ -9,6 +9,14 @@ token.txt
 # Test files
 prueba
 
+# Go build output
+/cms-ha
+vendor/
+
+# Age encryption keys
+*.age-key
+age-key.txt
+
 # Binary files (per assignment requirement: avoid ISOs and binaries)
 *.pdf
 *.iso

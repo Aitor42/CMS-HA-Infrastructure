@@ -1,0 +1,160 @@
+# CMS-HA Infrastructure Configuration
+# Passwords can be encrypted with: cms-ha secrets encrypt
+
+vm:
+  storage_dir: "${HOME}/vm_storage"
+  libvirt_uri: "qemu:///system"
+
+ssh:
+  private_key: "${HOME}/.ssh/id_ed25519_gar"
+  connect_timeout: 10s
+  batch_mode: true
+
+network:
+  internal:
+    cidr: "192.168.10.0/24"
+    gateway: "192.168.10.1"
+    domain: "internal.local"
+    bridge: "virbr-int"
+  main:
+    cidr: "192.168.20.0/24"
+    gateway: "192.168.20.1"
+    domain: "main.local"
+    bridge: "virbr-main"
+
+nodes:
+  router:
+    name: "ufw-router"
+    ip: "192.168.10.1"
+    fqdn: "ufw-router.internal.local"
+    mac_internal: "52:54:00:10:01:02"
+    mac_main: "52:54:00:10:02:02"
+    mac_wan: "52:54:00:10:00:02"
+    ram_install_mb: 3072
+    ram_final_mb: 768
+    vcpus: 1
+    disk_gb: 5
+  jumpstart:
+    name: "jumpstart"
+    ip: "192.168.10.10"
+    ip_main: "192.168.20.10"
+    fqdn: "jumpstart.internal.local"
+    mac_internal: "52:54:00:10:00:01"
+    mac_main: "52:54:00:10:02:0a"
+    mac_wan: "52:54:00:10:00:09"
+    ram_install_mb: 3072
+    ram_final_mb: 2048
+    vcpus: 2
+    disk_gb: 30
+  masters:
+    - name: "internal-master1"
+      ip: "192.168.10.11"
+      fqdn: "internal-master1.internal.local"
+      mac: "52:54:00:10:01:11"
+      ram_install_mb: 4096
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+      drbd_disk_gb: 3
+    - name: "internal-master2"
+      ip: "192.168.10.12"
+      fqdn: "internal-master2.internal.local"
+      mac: "52:54:00:10:01:12"
+      ram_install_mb: 4096
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+      drbd_disk_gb: 3
+  workers:
+    - name: "internal-worker1"
+      ip: "192.168.10.13"
+      fqdn: "internal-worker1.internal.local"
+      mac: "52:54:00:10:01:13"
+      ram_install_mb: 4096
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+    - name: "internal-worker2"
+      ip: "192.168.10.14"
+      fqdn: "internal-worker2.internal.local"
+      mac: "52:54:00:10:01:14"
+      ram_install_mb: 4096
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+  storage:
+    name: "internal-storage"
+    ip: "192.168.10.15"
+    fqdn: "internal-storage.internal.local"
+    mac: "52:54:00:10:01:15"
+    ram_install_mb: 3072
+    ram_final_mb: 1024
+    vcpus: 1
+    disk_gb: 8
+  monitor:
+    name: "internal-monitor"
+    ip: "192.168.10.20"
+    fqdn: "internal-monitor.internal.local"
+    mac: "52:54:00:10:01:10"
+    ram_install_mb: 3072
+    ram_final_mb: 1024
+    vcpus: 1
+    disk_gb: 4
+  lb:
+    name: "main-lb"
+    ip: "192.168.20.100"
+    fqdn: "main-lb.main.local"
+    mac: "52:54:00:10:02:64"
+    ram_install_mb: 3072
+    ram_final_mb: 768
+    vcpus: 1
+    disk_gb: 4
+  cms_frontends:
+    - name: "main-cms1"
+      ip: "192.168.20.101"
+      fqdn: "main-cms1.main.local"
+      mac: "52:54:00:10:02:65"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 4
+    - name: "main-cms2"
+      ip: "192.168.20.102"
+      fqdn: "main-cms2.main.local"
+      mac: "52:54:00:10:02:66"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 4
+  hotdesks:
+    count: 3
+    max: 8
+    ram_install_mb: 3072
+    ram_final_mb: 768
+    vcpus: 1
+    disk_gb: 3
+    base_ip_octet: 201
+
+database:
+  name: "wordpress"
+  user: "wp_user"
+  password: "WpS3cur3P4ss!"
+  root_password: "mysqlrootpass"
+  port: 30306
+
+monitoring:
+  exporters:
+    nginx_version: "1.4.1"
+    apache_version: "1.0.9"
+    mysqld_version: "0.16.0"
+
+pki:
+  ca_port: 8443
+  provisioner_password: "StepCA-Pr0v1s10ner!"
+  step_version: "0.27.5"
+  step_ca_version: "0.27.5"
+  domain: "ca.internal.local"
+
+deploy:
+  ssh_timeout: 600s
+  stagger_delay: 5s
