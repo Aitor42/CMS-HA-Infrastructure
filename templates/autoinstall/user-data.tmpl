@@ -1,0 +1,54 @@
+#cloud-config
+autoinstall:
+  version: 1
+  shutdown: poweroff
+  locale: es_ES.UTF-8
+  keyboard:
+    layout: es
+  identity:
+    hostname: {{ .Hostname }}
+    username: admin
+    password: "{{ .PasswordHash }}"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - {{ .PubKey }}
+  network:
+    version: 2
+    ethernets:
+      net0:
+        match:
+          macaddress: "{{ .MACInternal }}"
+        addresses:
+          - {{ .IPInternal }}/24
+        nameservers:
+          addresses:
+            - {{ .IPInternal }}
+        routes:
+          - to: default
+            via: {{ .GatewayInternal }}
+            metric: 200
+      net1:
+        match:
+          macaddress: "{{ .MACMain }}"
+        addresses:
+          - {{ .IPMain }}/24
+{{ if .WANIfaceConfig }}{{ .WANIfaceConfig }}{{ end }}
+  storage:
+    layout:
+      name: direct
+  late-commands:
+    - echo 'admin ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/admin
+    - chmod 440 /target/etc/sudoers.d/admin
+    - curtin in-target --target=/target -- passwd -l admin
+    - curtin in-target --target=/target -- passwd -l root
+    - mkdir -p /target/root/.ssh /target/home/admin/.ssh
+    - echo "{{ .PubKey }}" >> /target/root/.ssh/authorized_keys
+    - echo "{{ .PubKey }}" >> /target/home/admin/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/admin/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/admin/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R admin:admin /home/admin/.ssh
+    - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+    - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
+    - curtin in-target --target=/target -- systemctl enable ssh
