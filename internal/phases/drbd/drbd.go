@@ -60,7 +60,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Deploying DRBD configuration...")
-	tmplContent, err := cms.TemplatesFS.ReadFile("templates/cms-data.res.tmpl")
+	tmplContent, err := cms.TemplatesFS.ReadFile("templates/drbd/cms-data.res")
 	if err != nil {
 		return fmt.Errorf("failed to read template: %w", err)
 	}
@@ -133,7 +133,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Deploying DRBD failover script...")
-	scriptContent, err := cms.TemplatesFS.ReadFile("templates/drbd-failover.sh")
+	scriptContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
 	if err != nil {
 		return fmt.Errorf("failed to read drbd-failover.sh template: %w", err)
 	}

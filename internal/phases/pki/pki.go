@@ -47,15 +47,27 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Initializing step-ca...")
-	// Dummy initialization for sake of implementation, this might need real details
+	caPort := p.cfg.PKI.CAPort
+	if caPort == 0 {
+		caPort = 8443
+	}
+	caPass := p.cfg.PKI.ProvisionerPassword
+	if caPass == "" {
+		caPass = "StepCA-Pr0v1s10ner!"
+	}
+	caDomain := p.cfg.PKI.Domain
+	if caDomain == "" {
+		caDomain = "ca.internal.local"
+	}
+
 	initCmd := fmt.Sprintf(`export STEPPATH=/root/.step && \
-step ca init --name="CMS Local CA" --dns="ca.cms.local,%s" \
---address=":8443" --provisioner="admin" --password-file=<(echo "%s") --with-ca-url="https://%s:8443"`, 
-	jumpIP, "SuperSecretPassword123", jumpIP)
-	
-	// Ignore errors if already initialized
+step ca init --name="CMS Local CA" --dns="%s,%s" \
+--address=":%d" --provisioner="admin" --password-file=<(echo "%s") --with-ca-url="https://%s:%d"`,
+		caDomain, jumpIP, caPort, caPass, jumpIP, caPort)
+
+	// Run initialization (ignore if already initialized)
 	p.pool.RunCommand(ctx, jumpIP, initCmd)
-	
+
 	logging.Info("Starting step-ca service...")
 	serviceCmd := `cat << 'EOF' > /etc/systemd/system/step-ca.service
 [Unit]
@@ -73,12 +85,12 @@ EOF
 systemctl daemon-reload && systemctl enable --now step-ca`
 
 	// Provide password file
-	p.pool.RunCommand(ctx, jumpIP, "echo 'SuperSecretPassword123' > /root/.step/password.txt")
+	p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("echo '%s' > /root/.step/password.txt", caPass))
 	p.pool.RunCommand(ctx, jumpIP, serviceCmd)
 
 	logging.Info("Waiting for CA health endpoint...")
 	err := retry.Do(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func() error {
-		_, err := p.pool.RunScript(ctx, jumpIP, "curl -kf https://localhost:8443/health")
+		_, err := p.pool.RunScript(ctx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
 		return err
 	})
 	if err != nil {

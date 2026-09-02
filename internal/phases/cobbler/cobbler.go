@@ -65,9 +65,12 @@ func (p *Phase) Run(ctx context.Context) error {
 func (p *Phase) elevateRootSSH(ctx context.Context, jumpIP string) error {
 	script := `
 mkdir -p /root/.ssh
-if [ -f /home/aitorrm/.ssh/authorized_keys ]; then
-	cat /home/aitorrm/.ssh/authorized_keys >> /root/.ssh/authorized_keys
-fi
+for f in /home/*/.ssh/authorized_keys; do
+	if [ -f "$f" ]; then
+		cat "$f" >> /root/.ssh/authorized_keys
+	fi
+done
+sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/null || true
 chmod 700 /root/.ssh
 chmod 600 /root/.ssh/authorized_keys
 `

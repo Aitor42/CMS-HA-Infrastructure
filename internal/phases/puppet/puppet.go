@@ -134,6 +134,17 @@ func (p *Phase) installAgents(ctx context.Context, agentIPs []string) error {
 		apt-get update
 		apt-get install -y puppet-agent
 		
+		ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
+		grep -q "jumpstart.internal.local" /etc/hosts || echo "192.168.10.10 jumpstart.internal.local jumpstart puppet" >> /etc/hosts
+		
+		mkdir -p /etc/puppetlabs/puppet
+		cat << 'EOF_PUPPET' > /etc/puppetlabs/puppet/puppet.conf
+[main]
+server = jumpstart.internal.local
+environment = production
+runinterval = 30m
+EOF_PUPPET
+
 		/opt/puppetlabs/bin/puppet resource service puppet ensure=running enable=true
 	`
 	results := p.pool.RunParallel(ctx, agentIPs, cmd)

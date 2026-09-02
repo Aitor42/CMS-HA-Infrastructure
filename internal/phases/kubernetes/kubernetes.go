@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -117,12 +118,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	manifestFiles := []string{
-		"01-namespace.yaml",
-		"02-secret.yaml",
-		"03-pv-pvc.yaml",
-		"04-mariadb-service.yaml",
-		"05-mariadb-statefulset.yaml",
-		"06-init-db-job.yaml",
+		"namespace.yaml",
+		"mariadb-secret.yaml",
+		"mariadb-pv.yaml",
+		"mariadb-pvc.yaml",
+		"mariadb-service.yaml",
+		"mariadb-statefulset.yaml",
+		"init-db-job.yaml",
 	}
 
 	for _, mFile := range manifestFiles {
@@ -130,12 +132,17 @@ func (p *Phase) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to read manifest %s: %w", mFile, err)
 		}
-		// If it's a template, we would execute it here. But assume they might be standard yaml, 
-		// except maybe secret. We'll do a simple string replace for secrets if needed, or use envsubst.
-		// For simplicity, directly copying them:
+
 		cfgContent := string(content)
-		if mFile == "02-secret.yaml" {
-			cfgContent = strings.ReplaceAll(cfgContent, "${DB_PASSWORD_B64}", p.cfg.Database.Password) // Or base64
+		if mFile == "mariadb-secret.yaml" {
+			if p.cfg.Database.Password != "" {
+				b64Pass := base64.StdEncoding.EncodeToString([]byte(p.cfg.Database.Password))
+				cfgContent = strings.ReplaceAll(cfgContent, "V3BTM2N1cjNQNHNzIQ==", b64Pass)
+			}
+			if p.cfg.Database.RootPassword != "" {
+				b64Root := base64.StdEncoding.EncodeToString([]byte(p.cfg.Database.RootPassword))
+				cfgContent = strings.ReplaceAll(cfgContent, "bXlzcWxyb290cGFzcw==", b64Root)
+			}
 		}
 		
 		if err := p.pool.CopyContent(ctx, master1.IP, []byte(cfgContent), fmt.Sprintf("%s/%s", manifestsDir, mFile), 0644); err != nil {
@@ -143,8 +150,8 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 	}
 	
-	// Apply in order
-	for i := 0; i < len(manifestFiles)-1; i++ { // apply all except job
+	// Apply in order (all except init-db-job)
+	for i := 0; i < len(manifestFiles)-1; i++ {
 		mFile := manifestFiles[i]
 		logging.Info("Applying %s...", mFile)
 		err = retry.Do(ctx, retry.Config{MaxAttempts: 6, Interval: 10 * time.Second, Timeout: 60 * time.Second}, func() error {
@@ -169,7 +176,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Applying init-db-job...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl apply -f %s/%s", manifestsDir, "06-init-db-job.yaml"))
+	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl apply -f %s/%s", manifestsDir, "init-db-job.yaml"))
 	if err != nil {
 		return fmt.Errorf("failed to apply init-db-job: %w", err)
 	}
@@ -177,7 +184,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	logging.Info("Waiting for init-db-job completion...")
 	time.Sleep(10 * time.Second) // allow job to be created
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _ := p.pool.RunScript(ctx, master1.IP, "kubectl get job init-mariadb-db -n cms -o jsonpath='{.status.succeeded}'")
+		out, _ := p.pool.RunScript(ctx, master1.IP, "kubectl get job init-wordpress-db -n cms -o jsonpath='{.status.succeeded}'")
 		if strings.TrimSpace(out) != "1" {
 			return fmt.Errorf("job not completed")
 		}

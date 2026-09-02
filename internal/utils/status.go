@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -52,7 +51,7 @@ func CheckSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, l *libvirt.C
 	}
 
 	if !allHealthy {
-		os.Exit(1)
+		return fmt.Errorf("one or more VMs are not healthy or unreachable via SSH")
 	}
 
 	return nil

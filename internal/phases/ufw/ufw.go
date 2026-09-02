@@ -1,10 +1,9 @@
 package ufw
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"text/template"
+	"strings"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -54,30 +53,20 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Uploading and injecting NAT rules...")
-	tmplContent, err := cms.TemplatesFS.ReadFile("templates/router-nat.rules.tmpl")
+	tmplContent, err := cms.TemplatesFS.ReadFile("templates/ufw/nat-rules")
 	if err != nil {
 		return fmt.Errorf("failed to read NAT rules template: %w", err)
 	}
-	
-	tmpl, err := template.New("nat").Parse(string(tmplContent))
-	if err != nil {
-		return fmt.Errorf("failed to parse template: %w", err)
-	}
-	
-	var buf bytes.Buffer
-	data := map[string]string{
-		"WAN_IFACE": wanIface,
-	}
-	if err := tmpl.Execute(&buf, data); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
-	}
+
+	natRules := strings.ReplaceAll(string(tmplContent), "${WAN_IF}", wanIface)
+	natRules = strings.ReplaceAll(natRules, "${WAN_IFACE}", wanIface)
 	
 	// Inject block into before.rules using sed/awk or directly replace
 	injectCmd := fmt.Sprintf(`cat << 'EOF' > /tmp/nat.rules
 %s
 EOF
 grep -q "*nat" /etc/ufw/before.rules || sed -i -e '/\*filter/r /tmp/nat.rules' -e '1N' /etc/ufw/before.rules
-`, buf.String())
+`, natRules)
 
 	if _, _, _, err := p.pool.RunCommand(ctx, routerIP, injectCmd); err != nil {
 		return fmt.Errorf("failed to inject NAT rules: %w", err)
