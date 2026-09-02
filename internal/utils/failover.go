@@ -70,7 +70,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	}
 
 	// Verify HTTP 200
-	resp, err := http.Get(fmt.Sprintf("http://%s120", getPrefix(f.cfg.Network.Main.CIDR)))
+	resp, err := http.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
 	if err != nil || resp.StatusCode != 200 {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200")
@@ -97,7 +97,7 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	time.Sleep(15 * time.Second)
 
 	// Verify HTTP 200 (routes to cms2)
-	resp, err := http.Get(fmt.Sprintf("http://%s120", getPrefix(f.cfg.Network.Main.CIDR)))
+	resp, err := http.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
 	if err != nil || resp.StatusCode != 200 {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200 after cms1 shutdown")

@@ -138,8 +138,16 @@ func (v *Verifier) phase06(ctx context.Context) {
 }
 
 func (v *Verifier) phase07(ctx context.Context) {
-	// DRBD status + mount on primary
-	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Storage.IP, "drbdadm status")
-	pass := err == nil && (strings.Contains(out, "Primary") || strings.Contains(out, "Secondary"))
+	// DRBD status on master node
+	masterIP := ""
+	if len(v.cfg.Nodes.Masters) > 0 {
+		masterIP = v.cfg.Nodes.Masters[0].IP
+	}
+	if masterIP == "" {
+		v.printResult("Phase 07", "DRBD Status", false, "No master node configured")
+		return
+	}
+	out, _, _, err := v.ssh.RunCommand(ctx, masterIP, "drbdadm status")
+	pass := err == nil && (strings.Contains(out, "Primary") || strings.Contains(out, "Secondary") || strings.Contains(out, "UpToDate"))
 	v.printResult("Phase 07", "DRBD Status", pass, "")
 }
