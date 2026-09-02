@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/initvms"
@@ -48,7 +47,7 @@ func init() {
             }
             
             p := initvms.NewPhaseWithOpts(cfg, pool, lv, opts)
-            if err := p.Run(context.Background()); err != nil {
+            if err := p.Run(cmd.Context()); err != nil {
                 handleError(err)
             }
         },
@@ -79,7 +78,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := cobbler.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("register-nodes", func(cmd *cobra.Command) error {
@@ -89,7 +88,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := registernodes.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("repair-ssh", func(cmd *cobra.Command) error {
@@ -99,7 +98,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := repairssh.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-puppet", func(cmd *cobra.Command) error {
@@ -109,7 +108,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := puppet.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-drbd", func(cmd *cobra.Command) error {
@@ -119,7 +118,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := drbd.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-kubernetes", func(cmd *cobra.Command) error {
@@ -129,7 +128,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := kubernetes.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-nginx-wordpress", func(cmd *cobra.Command) error {
@@ -139,7 +138,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := nginx.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-monitoring", func(cmd *cobra.Command) error {
@@ -149,7 +148,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := monitoring.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-ufw", func(cmd *cobra.Command) error {
@@ -159,7 +158,7 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := ufw.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 
     addPhaseCmd("setup-ca", func(cmd *cobra.Command) error {
@@ -169,6 +168,6 @@ func init() {
         if err != nil { return err }
         defer pool.Close()
         p := pki.NewPhase(cfg, pool)
-        return p.Run(context.Background())
+        return p.Run(cmd.Context())
     })
 }

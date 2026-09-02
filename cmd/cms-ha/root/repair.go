@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
@@ -23,7 +22,7 @@ func init() {
             pool, err := newSSHPool(cfg)
             if err != nil { handleError(err); return }
             defer pool.Close()
-            if err := utils.RepairK8s(context.Background(), cfg, pool); err != nil { handleError(err) }
+            if err := utils.RepairK8s(cmd.Context(), cfg, pool); err != nil { handleError(err) }
         },
     }
     repairCmd.AddCommand(k8sCmd)
@@ -36,7 +35,7 @@ func init() {
             pool, err := newSSHPool(cfg)
             if err != nil { handleError(err); return }
             defer pool.Close()
-            if err := utils.SyncClocks(context.Background(), cfg, pool); err != nil { handleError(err) }
+            if err := utils.SyncClocks(cmd.Context(), cfg, pool); err != nil { handleError(err) }
         },
     }
     repairCmd.AddCommand(clocksCmd)

@@ -1,7 +1,6 @@
 package root
 
 import (
-	"context"
 
 	"github.com/spf13/cobra"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/lint"
@@ -33,7 +32,7 @@ var lintCmd = &cobra.Command{
 			K8s:       k8s,
 			Terraform: terraform,
 		}
-		if err := lint.RunLints(context.Background(), opts); err != nil {
+		if err := lint.RunLints(cmd.Context(), opts); err != nil {
 			handleError(err)
 		}
 	},

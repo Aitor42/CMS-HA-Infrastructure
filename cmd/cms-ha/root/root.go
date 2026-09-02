@@ -1,8 +1,11 @@
 package root
 
 import (
+    "context"
     "fmt"
     "os"
+    "os/signal"
+    "syscall"
     "time"
     
     "github.com/spf13/cobra"
@@ -27,8 +30,16 @@ var rootCmd = &cobra.Command{
     },
 }
 
+// ExecuteContext executes the root command with the given context.
+func ExecuteContext(ctx context.Context) error {
+    return rootCmd.ExecuteContext(ctx)
+}
+
+// Execute executes the root command with graceful signal handling.
 func Execute() error {
-    return rootCmd.Execute()
+    ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer cancel()
+    return ExecuteContext(ctx)
 }
 
 func init() {
@@ -37,8 +48,20 @@ func init() {
     rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "Enable dry-run mode")
 }
 
-// loadConfig loads and returns the configuration.
+// loadConfig loads and returns the configuration with fallback lookup.
 func loadConfig() (*config.Config, error) {
+    if _, err := os.Stat(configPath); os.IsNotExist(err) {
+        candidates := []string{
+            "config.yaml",
+            "../config.yaml",
+        }
+        for _, c := range candidates {
+            if _, err := os.Stat(c); err == nil {
+                configPath = c
+                break
+            }
+        }
+    }
     cfg, err := config.Load(configPath)
     if err != nil {
         return nil, fmt.Errorf("failed to load config: %w", err)

@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
     "time"
 
     "github.com/spf13/cobra"
@@ -22,7 +21,7 @@ func init() {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }
             lv := newLibvirtClient(cfg)
-            if err := utils.StartAllVMs(context.Background(), cfg, lv, 5*time.Second); err != nil { handleError(err) }
+            if err := utils.StartAllVMs(cmd.Context(), cfg, lv, 5*time.Second); err != nil { handleError(err) }
         },
     }
     vmCmd.AddCommand(startCmd)
@@ -33,7 +32,7 @@ func init() {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }
             lv := newLibvirtClient(cfg)
-            if err := utils.ShrinkVMRAM(context.Background(), cfg, lv); err != nil { handleError(err) }
+            if err := utils.ShrinkVMRAM(cmd.Context(), cfg, lv); err != nil { handleError(err) }
         },
     }
     vmCmd.AddCommand(shrinkCmd)
@@ -48,7 +47,7 @@ func init() {
             nodes := cfg.AllNodes()
             names := make([]string, len(nodes))
             for i, n := range nodes { names[i] = n.Name }
-            if err := utils.FixBootOrder(context.Background(), lv, names); err != nil { handleError(err) }
+            if err := utils.FixBootOrder(cmd.Context(), lv, names); err != nil { handleError(err) }
         },
     }
     vmCmd.AddCommand(fixBootCmd)
@@ -64,7 +63,7 @@ func init() {
             lv := newLibvirtClient(cfg)
             
             force, _ := cmd.Flags().GetBool("force")
-            if err := utils.InstallByBatches(context.Background(), cfg, lv, pool, force); err != nil { handleError(err) }
+            if err := utils.InstallByBatches(cmd.Context(), cfg, lv, pool, force); err != nil { handleError(err) }
         },
     }
     installBatchesCmd.Flags().Bool("force", false, "")
@@ -76,7 +75,7 @@ func init() {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }
             lv := newLibvirtClient(cfg)
-            if err := utils.RecreateFailedVMs(context.Background(), cfg, lv); err != nil { handleError(err) }
+            if err := utils.RecreateFailedVMs(cmd.Context(), cfg, lv); err != nil { handleError(err) }
         },
     }
     vmCmd.AddCommand(recreateCmd)

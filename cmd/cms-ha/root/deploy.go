@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/deploy"
@@ -34,7 +33,7 @@ var deployCmd = &cobra.Command{
             DryRun:       dryRun, // from root.go
         }
         
-        if err := orchestrator.Deploy(context.Background(), opts); err != nil {
+        if err := orchestrator.Deploy(cmd.Context(), opts); err != nil {
             handleError(err)
         }
     },

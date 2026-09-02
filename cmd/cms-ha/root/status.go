@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
@@ -24,7 +23,7 @@ func init() {
             if err != nil { handleError(err); return }
             defer pool.Close()
             lv := newLibvirtClient(cfg)
-            if err := utils.CheckSSH(context.Background(), cfg, pool, lv); err != nil { handleError(err) }
+            if err := utils.CheckSSH(cmd.Context(), cfg, pool, lv); err != nil { handleError(err) }
         },
     }
     statusCmd.AddCommand(sshCmd)

@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
     "fmt"
     "os"
     "time"
@@ -26,7 +25,7 @@ func init() {
             pool, err := newSSHPool(cfg)
             if err != nil { handleError(err); return }
             defer pool.Close()
-            ctx := context.Background()
+            ctx := cmd.Context()
             master1 := cfg.Nodes.Masters[0].IP
             backupCmdStr := fmt.Sprintf(`kubectl exec -n cms $(kubectl get pod -n cms -l app=mariadb -o jsonpath='{.items[0].metadata.name}') -- mysqldump -u%s -p'%s' %s`, cfg.Database.User, cfg.Database.Password, cfg.Database.Name)
             stdout, _, _, err := pool.RunCommand(ctx, master1, backupCmdStr)

@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/traffic"
@@ -24,7 +23,7 @@ var trafficCmd = &cobra.Command{
         if external { mode = "external" }
         opts := traffic.Options{Mode: mode, TargetIP: target, Duration: duration, Concurrency: concurrency, WithDB: withDB, Verbose: verbose}
         t := traffic.New(cfg, opts)
-        if err := t.Run(context.Background()); err != nil { handleError(err) }
+        if err := t.Run(cmd.Context()); err != nil { handleError(err) }
     },
 }
 

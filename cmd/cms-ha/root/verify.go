@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
@@ -20,7 +19,7 @@ var verifyCmd = &cobra.Command{
         lv := newLibvirtClient(cfg)
         
         v := utils.NewVerifier(cfg, pool, lv)
-        if err := v.VerifyAll(context.Background()); err != nil {
+        if err := v.VerifyAll(cmd.Context()); err != nil {
             handleError(err)
         }
     },

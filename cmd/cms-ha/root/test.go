@@ -1,7 +1,6 @@
 package root
 
 import (
-    "context"
 
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
@@ -29,7 +28,7 @@ func init() {
             skipRestore, _ := cmd.Flags().GetBool("skip-restore")
             opts := utils.FailoverOpts{SkipRestore: skipRestore}
             
-            if err := ft.Run(context.Background(), opts); err != nil {
+            if err := ft.Run(cmd.Context(), opts); err != nil {
                 handleError(err)
             }
         },
