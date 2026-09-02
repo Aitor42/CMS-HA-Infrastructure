@@ -30,6 +30,7 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
 # Capturar y reportar cualquier error inesperado indicando la línea exacta del fallo
 trap 'error "Fallo en la línea $LINENO del script $(basename "$0")"; exit 1' ERR
+trap 'echo -e "\n${YELLOW}[!] Despliegue cancelado por el usuario (Ctrl+C).${NC}"; exit 130' INT TERM
 
 # ==============================================================================
 # 3. DIRECCIONAMIENTO IP DE REFERENCIA DE LA RED
