@@ -105,6 +105,15 @@ func containsPort(host string) bool {
 	return false
 }
 
+func (p *Pool) invalidateClient(host string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if client, ok := p.clients[host]; ok {
+		client.Close()
+		delete(p.clients, host)
+	}
+}
+
 // RunCommand executes a command remotely and captures output.
 func (p *Pool) RunCommand(ctx context.Context, host, cmd string) (string, string, int, error) {
 	client, err := p.getClient(host)
@@ -114,7 +123,16 @@ func (p *Pool) RunCommand(ctx context.Context, host, cmd string) (string, string
 
 	session, err := client.NewSession()
 	if err != nil {
-		return "", "", -1, fmt.Errorf("failed to create session on %s: %w", host, err)
+		// Stale connection retry once
+		p.invalidateClient(host)
+		client, err = p.getClient(host)
+		if err != nil {
+			return "", "", -1, err
+		}
+		session, err = client.NewSession()
+		if err != nil {
+			return "", "", -1, fmt.Errorf("failed to create session on %s: %w", host, err)
+		}
 	}
 	defer session.Close()
 
@@ -191,7 +209,16 @@ func (p *Pool) CopyContent(ctx context.Context, host string, content []byte, rem
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
-		return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+		// Stale connection retry once
+		p.invalidateClient(host)
+		client, err = p.getClient(host)
+		if err != nil {
+			return err
+		}
+		sftpClient, err = sftp.NewClient(client)
+		if err != nil {
+			return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+		}
 	}
 	defer sftpClient.Close()
 
