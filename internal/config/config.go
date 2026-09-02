@@ -3,10 +3,30 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 )
+
+// ExpandPath expands environment variables and tilde (~) prefix in file paths.
+func ExpandPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	path = os.ExpandEnv(path)
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	} else if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = home
+		}
+	}
+	return filepath.Clean(path)
+}
 
 // Config represents the top-level configuration.
 type Config struct {
@@ -139,10 +159,10 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 	
-	c.VM.StorageDir = os.ExpandEnv(c.VM.StorageDir)
-	c.SSH.PrivateKey = os.ExpandEnv(c.SSH.PrivateKey)
+	c.VM.StorageDir = ExpandPath(c.VM.StorageDir)
+	c.SSH.PrivateKey = ExpandPath(c.SSH.PrivateKey)
 	
-	defaultKeyPath := os.ExpandEnv("${HOME}/.config/cms-ha/age.key")
+	defaultKeyPath := ExpandPath("${HOME}/.config/cms-ha/age.key")
 	if _, err := os.Stat(defaultKeyPath); err == nil {
 		var err error
 		if IsEncrypted(c.Database.Password) {
