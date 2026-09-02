@@ -333,6 +333,7 @@ func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duratio
 				slog.Info("ssh is available", "host", host)
 				return nil
 			}
+			p.invalidateClient(host)
 		}
 
 		select {
@@ -342,6 +343,43 @@ func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duratio
 			// Retry
 		}
 	}
+}
+
+// WaitForAptLock waits for unattended-upgrades, dpkg or cloud-init to release apt locks on the target host.
+func (p *Pool) WaitForAptLock(ctx context.Context, host string) error {
+	waitScript := `
+cloud-init status --wait 2>/dev/null || true
+for i in {1..60}; do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 2
+done
+`
+	_, err := p.RunScript(ctx, host, waitScript)
+	return err
+}
+
+// RunCommandWithRetry runs a command and retries upon non-zero exit code or network failure.
+func (p *Pool) RunCommandWithRetry(ctx context.Context, host, cmd string, maxRetries int, delay time.Duration) (string, string, int, error) {
+	var stdout, stderr string
+	var code int
+	var err error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		stdout, stderr, code, err = p.RunCommand(ctx, host, cmd)
+		if err == nil && code == 0 {
+			return stdout, stderr, code, nil
+		}
+		if attempt < maxRetries {
+			select {
+			case <-ctx.Done():
+				return stdout, stderr, code, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+	}
+	return stdout, stderr, code, err
 }
 
 // Close closes all connections in the pool.

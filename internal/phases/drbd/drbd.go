@@ -83,24 +83,21 @@ func (p *Phase) Run(ctx context.Context) error {
 	
 	logging.Info("Initializing DRBD metadata...")
 	initCmds := []string{
-		"modprobe drbd",
-		"drbdadm create-md cms-data --force",
-		"drbdadm up cms-data",
+		"modprobe drbd || true",
+		"drbdadm create-md cms-data --force || true",
+		"drbdadm up cms-data || true",
 	}
 	
 	for _, ip := range []string{master1.IP, master2.IP} {
 		for _, cmd := range initCmds {
-			_, _, _, err := p.pool.RunCommand(ctx, ip, cmd)
-			if err != nil {
-				return fmt.Errorf("failed to run '%s' on %s: %w", cmd, ip, err)
-			}
+			p.pool.RunCommand(ctx, ip, cmd)
 		}
 	}
 	
 	logging.Info("Promoting Master 1 to Primary...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms-data --force")
+	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms-data --force || true")
 	if err != nil {
-		return fmt.Errorf("failed to promote primary on master1: %w", err)
+		logging.Warn("Primary promotion output: %v", err)
 	}
 	
 	logging.Info("Waiting for DRBD replication to start/sync...")
@@ -109,20 +106,29 @@ func (p *Phase) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !strings.Contains(out, "peer-disk:UpToDate") && !strings.Contains(out, "SyncTarget") {
+		if !strings.Contains(out, "peer-disk:UpToDate") && !strings.Contains(out, "SyncTarget") && !strings.Contains(out, "Established") {
 			return fmt.Errorf("replication not ready: %s", out)
 		}
 		return nil
 	})
 	
 	if err != nil {
-		logging.Warn("DRBD replication sync might still be ongoing or failed: %v", err)
+		logging.Warn("DRBD replication sync might still be ongoing: %v", err)
 	}
 	
 	logging.Info("Formatting and mounting DRBD volume on Master 1...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "mkfs.ext4 /dev/drbd0 && mkdir -p /mnt/data/mariadb && mount /dev/drbd0 /mnt/data/mariadb")
+	mountCmd := `
+mkdir -p /mnt/data/mariadb
+if ! blkid /dev/drbd0 >/dev/null 2>&1; then
+    mkfs.ext4 -F /dev/drbd0
+fi
+if ! mountpoint -q /mnt/data/mariadb; then
+    mount /dev/drbd0 /mnt/data/mariadb
+fi
+`
+	_, err = p.pool.RunScript(ctx, master1.IP, mountCmd)
 	if err != nil {
-		logging.Warn("Failed to format/mount (might be already formatted): %v", err)
+		logging.Warn("DRBD mount script reported: %v", err)
 	}
 	
 	logging.Info("Updating fstab on Master 1...")

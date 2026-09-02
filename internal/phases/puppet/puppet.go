@@ -60,6 +60,7 @@ func (p *Phase) Run(ctx context.Context) error {
 }
 
 func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) error {
+	p.pool.WaitForAptLock(ctx, jumpstartIP)
 	cmd := `
 		export DEBIAN_FRONTEND=noninteractive
 		wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb

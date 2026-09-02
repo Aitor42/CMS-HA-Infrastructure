@@ -63,12 +63,19 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("k3s API server on master1 not ready: %w", err)
 	}
 	
-	logging.Info("Extracting K3s token...")
-	token, err := p.pool.RunScript(ctx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
+	logging.Info("Extracting K3s token from Master 1...")
+	var token string
+	err = retry.Do(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func() error {
+		tok, err := p.pool.RunScript(ctx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
+		if err != nil || strings.TrimSpace(tok) == "" {
+			return fmt.Errorf("node-token not ready yet")
+		}
+		token = strings.TrimSpace(tok)
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to get k3s token: %w", err)
 	}
-	token = strings.TrimSpace(token)
 	
 	logging.Info("Installing K3s on Master 2 (join)...")
 	joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token %s --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, token, master2.IP)
@@ -176,6 +183,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Applying init-db-job...")
+	p.pool.RunCommand(ctx, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true")
 	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl apply -f %s/%s", manifestsDir, "init-db-job.yaml"))
 	if err != nil {
 		return fmt.Errorf("failed to apply init-db-job: %w", err)

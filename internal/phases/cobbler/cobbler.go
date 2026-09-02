@@ -133,6 +133,11 @@ func (p *Phase) uploadTemplates(ctx context.Context, jumpIP string) error {
 }
 
 func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
+	logging.Info("Waiting for package manager lock to be released...")
+	if err := p.pool.WaitForAptLock(ctx, jumpIP); err != nil {
+		logging.Warn("Apt lock wait returned: %v (continuing)", err)
+	}
+
 	steps := []string{
 		`add-apt-repository -y universe 2>/dev/null || true && apt-get update -qq`,
 		
