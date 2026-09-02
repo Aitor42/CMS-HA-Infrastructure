@@ -2,13 +2,44 @@ name: CI Pipeline
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "feature/rewrite-in-go"]
   pull_request:
     branches: ["main"]
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # 1. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
+  # 1. Go Build & Test
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-go:
+    name: Build & Test Go CLI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Build check (all packages)
+        run: go build ./...
+
+      - name: Build CLI binary
+        run: |
+          make build
+          ./cms-ha --help
+          echo "✔ Binary built and verified"
+
+      - name: Run unit tests with race detection
+        run: make test
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
   # ─────────────────────────────────────────────────────────────────────────────
   lint-shell:
     name: Lint Shell Scripts
@@ -44,7 +75,7 @@ jobs:
           echo "✔ All shell scripts pass syntax check"
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 2. YAML Manifest Validation
+  # 3. YAML Manifest Validation
   # ─────────────────────────────────────────────────────────────────────────────
   lint-yaml:
     name: Lint YAML Manifests
@@ -65,7 +96,7 @@ jobs:
             .github/workflows/
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 3. Kubernetes Manifest Validation (kubeconform)
+  # 4. Kubernetes Manifest Validation (kubeconform)
   # ─────────────────────────────────────────────────────────────────────────────
   validate-k8s:
     name: Validate Kubernetes Manifests
@@ -91,7 +122,7 @@ jobs:
             kubernetes/*.yaml
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 4. Puppet Manifest Validation
+  # 5. Puppet Manifest Validation
   # ─────────────────────────────────────────────────────────────────────────────
   lint-puppet:
     name: Validate Puppet Manifests
@@ -115,32 +146,6 @@ jobs:
             --no-documentation-check \
             --no-autoloader_layout-check \
             {} +
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # 5. Python Script Linting (flake8)
-  # ─────────────────────────────────────────────────────────────────────────────
-  lint-python:
-    name: Lint Python Scripts
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install flake8
-        run: pip install flake8
-
-      - name: Flake8 — syntax errors (blocking)
-        run: |
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-
-      - name: Flake8 — style warnings (non-blocking)
-        run: |
-          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 6. Terraform / OpenTofu Validation
@@ -181,38 +186,38 @@ jobs:
     name: CI Summary
     if: always()
     needs:
+      - build-go
       - lint-shell
       - lint-yaml
       - validate-k8s
       - lint-puppet
-      - lint-python
       - validate-terraform
     runs-on: ubuntu-latest
     steps:
       - name: Check results
         run: |
           echo "=== CI Pipeline Results ==="
+          echo "build-go:           ${{ needs.build-go.result }}"
           echo "lint-shell:         ${{ needs.lint-shell.result }}"
           echo "lint-yaml:          ${{ needs.lint-yaml.result }}"
           echo "validate-k8s:      ${{ needs.validate-k8s.result }}"
           echo "lint-puppet:        ${{ needs.lint-puppet.result }}"
-          echo "lint-python:        ${{ needs.lint-python.result }}"
           echo "validate-terraform: ${{ needs.validate-terraform.result }}"
 
-          # Fail if any required job failed (skip is OK for conditional jobs)
+          # Fail if any required job failed
           for result in \
+            "${{ needs.build-go.result }}" \
             "${{ needs.lint-shell.result }}" \
             "${{ needs.lint-yaml.result }}" \
             "${{ needs.validate-k8s.result }}" \
-            "${{ needs.lint-puppet.result }}" \
-            "${{ needs.lint-python.result }}"; do
+            "${{ needs.lint-puppet.result }}"; do
             if [ "$result" = "failure" ]; then
               echo "::error::One or more CI checks failed"
               exit 1
             fi
           done
 
-          # Terraform validation is optional (only runs if .tf files exist)
+          # Terraform validation is optional
           if [ "${{ needs.validate-terraform.result }}" = "failure" ]; then
             echo "::error::Terraform validation failed"
             exit 1
