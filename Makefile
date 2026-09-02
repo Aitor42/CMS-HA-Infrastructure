@@ -1,11 +1,12 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Makefile — CMS High-Availability Infrastructure
+# Makefile — CMS High-Availability Infrastructure (Go CLI)
 # ──────────────────────────────────────────────────────────────────────────────
 #
-# Standardised targets for deploying, validating, and maintaining the
-# infrastructure. Run `make help` to see all available commands.
+# Standardised targets for building, deploying, validating, and maintaining
+# the infrastructure. Run `make help` to see all available commands.
 #
 # Prerequisites:
+#   - Go 1.22+ installed
 #   - KVM/QEMU + libvirt installed on the host
 #   - SSH key at ~/.ssh/id_ed25519_gar
 #   - Ubuntu 24.04 Server ISO (for initial deployment only)
@@ -13,86 +14,174 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-# ── Project paths ─────────────────────────────────────────────────────────────
+# ── Build variables ──────────────────────────────────────────────────────────
+BINARY      := cms-ha
+GO          := go
+GOFLAGS     := -trimpath
+LDFLAGS     := -s -w -X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GOOS        := linux
+GOARCH      := amd64
+BUILD_DIR   := .
+
+# ── Project paths ────────────────────────────────────────────────────────────
 PROJECT_DIR   := $(shell pwd)
-SCRIPTS_DIR   := $(PROJECT_DIR)/scripts
-UTILS_DIR     := $(SCRIPTS_DIR)/utils
 TERRAFORM_DIR := $(PROJECT_DIR)/terraform
 K8S_DIR       := $(PROJECT_DIR)/kubernetes
 
-# ── Configurable variables ────────────────────────────────────────────────────
-export VM_DIR              ?= $(HOME)/vm_storage
-export LIBVIRT_DEFAULT_URI ?= qemu:///system
+# ── Configurable variables ───────────────────────────────────────────────────
+CONFIG      ?= config.yaml
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BUILD
+# ══════════════════════════════════════════════════════════════════════════════
+
+.PHONY: build
+build: ## Build the cms-ha binary (linux/amd64)
+	@echo "▶ Building $(BINARY)..."
+	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/cms-ha/
+	@echo "✔ Built $(BUILD_DIR)/$(BINARY)"
+
+.PHONY: build-check
+build-check: ## Verify all packages compile
+	@echo "▶ Checking compilation..."
+	$(GO) build ./...
+	@echo "✔ All packages compile successfully"
+
+.PHONY: test
+test: ## Run Go unit tests
+	@echo "▶ Running tests..."
+	$(GO) test -v -race ./...
+
+.PHONY: clean
+clean: ## Remove build artifacts
+	@echo "▶ Cleaning..."
+	rm -f $(BUILD_DIR)/$(BINARY)
+	$(GO) clean -cache -testcache
+	@echo "✔ Clean"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DEPLOYMENT
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: deploy
-deploy: ## Full deployment (PXE provisioning + all phases)
+deploy: build ## Full deployment (PXE provisioning + all phases)
 	@echo "▶ Starting full infrastructure deployment..."
-	$(PROJECT_DIR)/deploy_all.sh
+	./$(BINARY) -c $(CONFIG) deploy
 
 .PHONY: deploy-resume
-deploy-resume: ## Resume deployment with pre-installed VMs (phases 01-08)
+deploy-resume: build ## Resume deployment with pre-installed VMs (phases 01-08)
 	@echo "▶ Resuming deployment (skipping VM creation)..."
-	$(PROJECT_DIR)/deploy_all.sh --skip-vm-create
+	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create
 
 .PHONY: deploy-dry-run
-deploy-dry-run: ## Dry-run deployment (no commands executed)
+deploy-dry-run: build ## Dry-run deployment (no commands executed)
 	@echo "▶ Dry-run deployment..."
-	DRY_RUN=1 $(PROJECT_DIR)/deploy_all.sh --skip-vm-create
+	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create --dry-run
 
 .PHONY: deploy-terraform
-deploy-terraform: ## Deploy VMs via Terraform, then run service phases
+deploy-terraform: build ## Deploy VMs via Terraform, then run service phases
 	@echo "▶ Deploying infrastructure with Terraform..."
-	cd $(TERRAFORM_DIR) && terraform init && terraform apply -auto-approve -var="vm_storage_path=$(VM_DIR)"
+	cd $(TERRAFORM_DIR) && terraform init && terraform apply -auto-approve
 	@echo "▶ Running service deployment phases..."
-	$(PROJECT_DIR)/deploy_all.sh --skip-vm-create
+	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASES (individual phase execution)
+# ══════════════════════════════════════════════════════════════════════════════
+
+.PHONY: phase-init
+phase-init: build ## Phase 00: Initialize VMs
+	./$(BINARY) -c $(CONFIG) phase init-vms
+
+.PHONY: phase-cobbler
+phase-cobbler: build ## Phase 01: Setup Cobbler
+	./$(BINARY) -c $(CONFIG) phase setup-cobbler
+
+.PHONY: phase-register
+phase-register: build ## Phase 02: Register nodes in Cobbler
+	./$(BINARY) -c $(CONFIG) phase register-nodes
+
+.PHONY: phase-ssh
+phase-ssh: build ## Phase 03: Repair SSH and Puppet
+	./$(BINARY) -c $(CONFIG) phase repair-ssh
+
+.PHONY: phase-puppet
+phase-puppet: build ## Phase 04: Setup Puppet
+	./$(BINARY) -c $(CONFIG) phase setup-puppet
+
+.PHONY: phase-drbd
+phase-drbd: build ## Phase 05: Setup DRBD
+	./$(BINARY) -c $(CONFIG) phase setup-drbd
+
+.PHONY: phase-k8s
+phase-k8s: build ## Phase 06: Setup Kubernetes
+	./$(BINARY) -c $(CONFIG) phase setup-kubernetes
+
+.PHONY: phase-nginx
+phase-nginx: build ## Phase 07: Setup Nginx + WordPress
+	./$(BINARY) -c $(CONFIG) phase setup-nginx-wordpress
+
+.PHONY: phase-monitoring
+phase-monitoring: build ## Phase 08: Setup Monitoring
+	./$(BINARY) -c $(CONFIG) phase setup-monitoring
+
+.PHONY: phase-ufw
+phase-ufw: build ## Phase 09: Setup UFW
+	./$(BINARY) -c $(CONFIG) phase setup-ufw
+
+.PHONY: phase-ca
+phase-ca: build ## Phase 10: Setup Internal CA
+	./$(BINARY) -c $(CONFIG) phase setup-ca
 
 # ══════════════════════════════════════════════════════════════════════════════
 # VERIFICATION & TESTING
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: verify
-verify: ## Run full infrastructure health check
+verify: build ## Run full infrastructure health check
 	@echo "▶ Running infrastructure verification..."
-	bash $(UTILS_DIR)/verify_all.sh
+	./$(BINARY) -c $(CONFIG) verify
 
 .PHONY: test-failover
-test-failover: ## Run automated chaos engineering / failover tests
+test-failover: build ## Run automated chaos engineering / failover tests
 	@echo "▶ Running failover tests..."
-	bash $(UTILS_DIR)/test_failover.sh
+	./$(BINARY) -c $(CONFIG) test failover
 
 .PHONY: test-failover-norestore
-test-failover-norestore: ## Run failover tests without restoring (for inspection)
+test-failover-norestore: build ## Run failover tests without restoring
 	@echo "▶ Running failover tests (skip-restore mode)..."
-	bash $(UTILS_DIR)/test_failover.sh --skip-restore
+	./$(BINARY) -c $(CONFIG) test failover --skip-restore
+
+.PHONY: traffic
+traffic: build ## Run traffic mix test
+	@echo "▶ Running traffic generation..."
+	./$(BINARY) -c $(CONFIG) traffic --internal
+
+.PHONY: traffic-external
+traffic-external: build ## Run external traffic test
+	./$(BINARY) -c $(CONFIG) traffic --external
 
 # ══════════════════════════════════════════════════════════════════════════════
-# LINTING & VALIDATION (CI-equivalent targets)
+# LINTING & VALIDATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: lint
-lint: lint-shell lint-yaml lint-puppet lint-python lint-k8s ## Run all linters
+lint: lint-go lint-shell lint-yaml lint-puppet lint-k8s ## Run all linters
+
+.PHONY: lint-go
+lint-go: ## Lint Go code (go vet + staticcheck)
+	@echo "▶ Checking Go code..."
+	$(GO) vet ./...
+	@command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || \
+		echo "  ℹ staticcheck not installed — skipping"
+	@echo "✔ Go code OK"
 
 .PHONY: lint-shell
 lint-shell: ## Lint shell scripts (ShellCheck + bash -n syntax)
 	@echo "▶ Checking shell scripts..."
-	@ERRORS=0; \
-	while IFS= read -r script; do \
-		if ! bash -n "$$script" 2>&1; then \
-			echo "  ✗ SYNTAX ERROR: $$script"; \
-			ERRORS=$$((ERRORS + 1)); \
-		fi; \
-	done < <(find . -name "*.sh" -not -path "./.git/*"); \
-	if [ "$$ERRORS" -gt 0 ]; then \
-		echo "✗ $$ERRORS script(s) have syntax errors"; exit 1; \
-	fi; \
-	echo "✔ All shell scripts pass syntax check"
 	@command -v shellcheck >/dev/null 2>&1 && \
 		find . -name "*.sh" -not -path "./.git/*" -exec shellcheck -S warning {} + || \
-		echo "  ℹ ShellCheck not installed — skipping static analysis"
+		echo "  ℹ ShellCheck not installed — skipping"
 
 .PHONY: lint-yaml
 lint-yaml: ## Lint YAML manifests (yamllint)
@@ -110,13 +199,6 @@ lint-puppet: ## Lint Puppet manifests (puppet-lint)
 			--no-documentation-check \
 			--no-autoloader_layout-check {} + || \
 		echo "  ℹ puppet-lint not installed — skipping"
-
-.PHONY: lint-python
-lint-python: ## Lint Python scripts (flake8)
-	@echo "▶ Checking Python scripts..."
-	@command -v flake8 >/dev/null 2>&1 && \
-		flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || \
-		echo "  ℹ flake8 not installed — skipping"
 
 .PHONY: lint-k8s
 lint-k8s: ## Validate Kubernetes manifests (kubeconform)
@@ -136,60 +218,72 @@ lint-terraform: ## Validate Terraform configuration
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: start
-start: ## Start all VMs (resume paused / boot stopped)
+start: build ## Start all VMs (resume paused / boot stopped)
 	@echo "▶ Starting all VMs..."
-	bash $(SCRIPTS_DIR)/start_all_vms.sh
+	./$(BINARY) -c $(CONFIG) vm start
 
 .PHONY: stop
 stop: ## Gracefully shut down all VMs
 	@echo "▶ Shutting down all VMs..."
-	@for vm in $$(virsh -c $(LIBVIRT_DEFAULT_URI) list --name 2>/dev/null); do \
+	@for vm in $$(virsh list --name 2>/dev/null); do \
 		echo "  Shutting down $$vm..."; \
-		virsh -c $(LIBVIRT_DEFAULT_URI) shutdown "$$vm" 2>/dev/null || true; \
+		virsh shutdown "$$vm" 2>/dev/null || true; \
 	done
 	@echo "✔ Shutdown signals sent to all running VMs"
 
+.PHONY: shrink
+shrink: build ## Resize all VMs to production RAM sizing
+	@echo "▶ Shrinking VM RAM..."
+	./$(BINARY) -c $(CONFIG) vm shrink
+
 .PHONY: repair
-repair: ## Repair K3s cluster after pause/shutdown
+repair: build ## Repair K3s cluster after pause/shutdown
 	@echo "▶ Repairing K3s cluster..."
-	bash $(UTILS_DIR)/repair_paused_kubernetes.sh
+	./$(BINARY) -c $(CONFIG) repair k8s
 
 .PHONY: sync-clocks
-sync-clocks: ## Synchronise clocks on all nodes
+sync-clocks: build ## Synchronise clocks on all nodes
 	@echo "▶ Synchronising clocks..."
-	bash $(UTILS_DIR)/sync_vm_clocks.sh
+	./$(BINARY) -c $(CONFIG) repair clocks
 
 .PHONY: backup-db
-backup-db: ## Trigger a manual MariaDB backup
+backup-db: build ## Trigger a manual MariaDB backup
 	@echo "▶ Triggering MariaDB backup..."
-	@source $(SCRIPTS_DIR)/config.sh && \
-	ssh $${SSH_OPTS} root@$${MASTER1_IP} \
-		'kubectl create job --from=cronjob/mariadb-backup manual-backup-$(shell date +%s) -n cms' && \
-	echo "✔ Backup job created. Check status: kubectl get jobs -n cms"
+	./$(BINARY) -c $(CONFIG) backup db
 
-.PHONY: status
-status: ## Show infrastructure status summary
-	@echo ""
-	@echo "═══════════════════════════════════════════════════════════"
-	@echo " CMS HA Infrastructure — Status"
-	@echo "═══════════════════════════════════════════════════════════"
-	@echo ""
-	@echo "VMs:"
-	@virsh -c $(LIBVIRT_DEFAULT_URI) list --all 2>/dev/null | tail -n +3 || echo "  (libvirt not available)"
-	@echo ""
-	@source $(SCRIPTS_DIR)/config.sh 2>/dev/null && \
-	echo "K3s Cluster:" && \
-	ssh $${SSH_OPTS} root@$${MASTER1_IP} 'kubectl get nodes 2>/dev/null' 2>/dev/null || echo "  (cluster not reachable)"
-	@echo ""
+.PHONY: status-ssh
+status-ssh: build ## Check SSH connectivity to all VMs
+	./$(BINARY) -c $(CONFIG) status ssh
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECRETS MANAGEMENT
+# ══════════════════════════════════════════════════════════════════════════════
+
+.PHONY: secrets-generate
+secrets-generate: build ## Generate a new age encryption key pair
+	./$(BINARY) -c $(CONFIG) secrets generate-key
+
+.PHONY: secrets-encrypt
+secrets-encrypt: build ## Encrypt sensitive fields in config.yaml
+	./$(BINARY) -c $(CONFIG) secrets encrypt
+
+.PHONY: secrets-decrypt
+secrets-decrypt: build ## Decrypt and display config
+	./$(BINARY) -c $(CONFIG) secrets decrypt
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CLEANUP
 # ══════════════════════════════════════════════════════════════════════════════
 
+.PHONY: destroy
+destroy: build ## Destroy all VMs and networks (cleanup)
+	@echo "⚠ Destroying all infrastructure..."
+	./$(BINARY) -c $(CONFIG) phase init-vms --cleanup
+
 .PHONY: destroy-terraform
 destroy-terraform: ## Destroy all Terraform-managed resources
 	@echo "⚠ Destroying all Terraform infrastructure..."
-	cd $(TERRAFORM_DIR) && terraform destroy -var="vm_storage_path=$(VM_DIR)"
+	cd $(TERRAFORM_DIR) && terraform destroy
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELP

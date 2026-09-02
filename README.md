@@ -4,12 +4,13 @@
 
 [![Stack](https://img.shields.io/badge/Stack-Cobbler_%7C_Puppet_%7C_K3s_%7C_DRBD_%7C_Prometheus-0078D4?style=for-the-badge)](docs/SOFTWARE_BASELINE.md)
 [![Nodes](https://img.shields.io/badge/Nodes-14+_VMs-green?style=for-the-badge)]()
-[![IaC](https://img.shields.io/badge/IaC-Terraform_%7C_Shell-blueviolet?style=for-the-badge)](terraform/)
+[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)](cmd/cms-ha/)
+[![IaC](https://img.shields.io/badge/IaC-Terraform_%7C_Go_CLI-blueviolet?style=for-the-badge)](terraform/)
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=for-the-badge)](.github/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)]()
 
 **Production-grade, zero-touch infrastructure for a high-availability Content Management System.**  
-*14+ VMs · 2 segmented networks · 11 deployment phases · fully idempotent*
+*14+ VMs · 2 segmented networks · 11 deployment phases · single Go binary · fully idempotent*
 
 </div>
 
@@ -19,7 +20,9 @@
 
 This project implements the **complete design, provisioning, and automation** of a high-availability IT infrastructure running a WordPress CMS — from bare-metal OS installation to full-stack observability.
 
-The entire environment is deployed with a **single command** (`./deploy_all.sh`), requiring zero manual intervention across 14+ virtual machines, 2 isolated network segments, and 11 orchestrated deployment phases.
+The entire environment is deployed with a **single command** (`cms-ha deploy`), requiring zero manual intervention across 14+ virtual machines, 2 isolated network segments, and 11 orchestrated deployment phases.
+
+> **v2 — Go CLI rewrite**: The infrastructure orchestration has been rewritten from Bash scripts into a single, statically compiled Go binary (`cms-ha`). This provides type-safe configuration, SSH connection pooling, parallel operations, `age`-based secret encryption, and structured logging. The original shell scripts (v1) are preserved in the [`v1.0.0`](https://github.com/Aitor42/CMS-HA-Infrastructure/tree/v1.0.0) tag.
 
 ### Key Technical Highlights
 
@@ -124,55 +127,54 @@ graph TB
 ```
 CMS-HA-Infrastructure/
 ├── README.md                        # This file
-├── deploy_all.sh                    # Main deployment orchestrator (single entry point)
+├── Makefile                         # Build, deploy, lint, and ops targets
+├── config.yaml                      # Centralised typed configuration (age-encrypted secrets)
+├── go.mod / go.sum                  # Go module definition
 │
-├── docs/
-│   ├── PLAN.md                      # Architecture plan and node inventory
-│   ├── MANUAL.md                    # Operations manual — deployment, recovery, scaling
-│   ├── SOFTWARE_BASELINE.md         # Software inventory with versions and URLs
-│   ├── NETWORK_DIAGRAM.md           # Network diagrams (Mermaid)
-│   └── phases/                      # Per-phase technical documentation (PHASE-00..11)
+├── cmd/cms-ha/                      # CLI entry point (Cobra)
+│   ├── main.go                      # Binary entry point
+│   └── root/                        # Command definitions
+│       ├── root.go                  # Root command + global flags (--config, --verbose, --dry-run)
+│       ├── phase.go                 # cms-ha phase <name>  (all 11 phases)
+│       ├── deploy.go                # cms-ha deploy        (full orchestration)
+│       ├── vm.go                    # cms-ha vm <action>   (start, shrink, fix-boot-order, ...)
+│       ├── verify.go                # cms-ha verify        (health check)
+│       ├── test.go                  # cms-ha test failover (chaos engineering)
+│       ├── traffic.go               # cms-ha traffic       (load testing)
+│       ├── repair.go                # cms-ha repair k8s|clocks
+│       ├── secrets.go               # cms-ha secrets encrypt|decrypt|generate-key
+│       └── ...                      # backup, status, lint
 │
-├── scripts/
-│   ├── config.sh                    # Central configuration (IPs, credentials, SSH)
-│   ├── 00_init_vms.sh               # VM and virtual network creation (libvirt)
-│   ├── 01_setup_cobbler.sh          # Cobbler PXE/DHCP/DNS provisioning server
-│   ├── 02_register_cobbler_nodes.sh # Register client nodes in Cobbler
-│   ├── 03_repair_ssh_puppet.sh      # SSH and Puppet CA repair
-│   ├── 04_setup_puppet.sh           # Puppet Server + Agent deployment
-│   ├── 05_setup_drbd.sh             # DRBD block replication setup
-│   ├── 06_setup_kubernetes.sh       # K3s HA cluster + MariaDB StatefulSet
-│   ├── 07_setup_nginx_wordpress.sh  # Nginx LB + WordPress/Apache frontends
-│   ├── 08_setup_monitoring.sh       # Prometheus + Grafana + exporters
-│   ├── 09_setup_ufw.sh              # UFW perimeter and per-node firewall
-│   ├── 10_setup_internal_ca.sh      # Internal CA (step-ca) deployment
-│   ├── 11_traffic_mix.sh            # Load generation and E2E testing
-│   └── utils/
-│       ├── test_failover.sh         # Automated chaos engineering tests
-│       ├── verify_all.sh            # Full infrastructure health check
-│       └── ...                      # Maintenance and repair utilities
+├── internal/                        # Core Go packages (not importable externally)
+│   ├── config/                      # Typed config loader (viper) + age encryption
+│   ├── ssh/                         # SSH connection pool + SFTP + parallel execution
+│   ├── libvirt/                     # virsh/virt-install/qemu-img wrapper
+│   ├── logging/                     # Coloured structured logging (slog + fatih/color)
+│   ├── retry/                       # Retry/poll primitives with context
+│   ├── templates/                   # Go template renderer with embed.FS
+│   ├── deploy/                      # Orchestrator — coordinates all phases
+│   ├── lint/                        # External linter runner (shellcheck, yamllint, ...)
+│   ├── utils/                       # VM ops, verify, failover, repair, status
+│   └── phases/                      # Phase implementations (one package per phase)
+│       ├── initvms/                 # 00 — VM creation (libvirt/cloud-init/PXE)
+│       ├── cobbler/                 # 01 — Cobbler PXE server setup
+│       ├── registernodes/           # 02 — Register nodes in Cobbler
+│       ├── repairssh/               # 03 — SSH + Puppet CA repair
+│       ├── puppet/                  # 04 — Puppet Server/Agent deployment
+│       ├── drbd/                    # 05 — DRBD block replication
+│       ├── kubernetes/              # 06 — K3s HA cluster + MariaDB
+│       ├── nginx/                   # 07 — Nginx LB + WordPress frontends
+│       ├── monitoring/              # 08 — Prometheus + Grafana
+│       ├── ufw/                     # 09 — UFW perimeter firewall
+│       ├── pki/                     # 10 — Internal CA (step-ca)
+│       └── traffic/                 # 11 — Load testing
 │
+├── scripts/                         # Legacy shell scripts (v1, kept for reference)
 ├── kubernetes/                      # K3s manifests (StatefulSet, CronJob, PV/PVC)
-│   ├── mariadb-statefulset.yaml     # MariaDB with DRBD-backed persistent storage
-│   ├── mariadb-backup-cronjob.yaml  # Automated daily backup with rotation
-│   └── ...
-│
 ├── puppet/                          # Puppet manifests and modules (role-based)
-│
-├── templates/                       # Configuration templates (envsubst-ready)
-│   ├── cobbler/                     # DHCP, DNS, autoinstall templates
-│   ├── drbd/                        # DRBD resource definition + failover script
-│   ├── monitoring/                  # Prometheus, Alertmanager, Grafana configs
-│   ├── nginx/                       # Upstream and SSL configuration
-│   ├── pki/                         # step-ca configuration template
-│   └── ...
-│
+├── templates/                       # Configuration templates (Go text/template)
 ├── terraform/                       # Declarative IaC alternative (dmacvicar/libvirt)
-│   ├── main.tf                      # Networks, volumes, and VM definitions
-│   ├── variables.tf                 # Configurable parameters
-│   └── README.md                    # Usage instructions
-│
-└── .github/workflows/ci.yml        # CI pipeline (ShellCheck, kubeconform, terraform)
+└── .github/workflows/ci.yml        # CI: Go build + ShellCheck + kubeconform + puppet-lint
 ```
 
 ---
@@ -181,53 +183,75 @@ CMS-HA-Infrastructure/
 
 ### Prerequisites
 
-- Linux host with **KVM/QEMU** and **libvirt** installed
+- Linux host (AMD64) with **KVM/QEMU** and **libvirt** installed
+- **Go 1.22+** (for building from source) or download the pre-built binary
 - At least **16 GB RAM** (27 GB recommended for full deployment)
 - Ubuntu 24.04 Server ISO
 - SSH key pair for cluster management
 
-### Deployment
+### Build
 
 ```bash
 git clone https://github.com/Aitor42/CMS-HA-Infrastructure.git
 cd CMS-HA-Infrastructure
 
-# Configure paths and credentials
-export VM_DIR="$HOME/vm_storage"
-export LIBVIRT_DEFAULT_URI=qemu:///system
+# Build the CLI binary
+make build
 
-# Full deployment (PXE provisioning + all phases)
-./deploy_all.sh
-
-# Or resume with pre-installed VMs (phases 01-08 only)
-./deploy_all.sh --skip-vm-create
+# Or directly with Go
+go build -o cms-ha ./cmd/cms-ha/
 ```
 
-The orchestrator executes all phases sequentially: Cobbler → Puppet → DRBD → K3s → WordPress → Nginx → Monitoring → UFW → Internal CA.
+### Deployment
+
+```bash
+# Edit config.yaml to match your environment
+vim config.yaml
+
+# (Optional) Encrypt secrets in config.yaml
+./cms-ha secrets generate-key
+./cms-ha secrets encrypt --key public.key
+
+# Full deployment (PXE provisioning + all phases)
+./cms-ha deploy
+
+# Or resume with pre-installed VMs
+./cms-ha deploy --skip-vm-create
+
+# Run a specific phase
+./cms-ha phase setup-drbd
+
+# Verbose output
+./cms-ha -v deploy
+```
+
+The orchestrator executes all phases sequentially: VM Init → Cobbler → Puppet → DRBD → K3s → WordPress → Nginx → Monitoring → UFW → Internal CA.
 
 ### Terraform Alternative
 
 ```bash
 cd terraform/
 terraform init && terraform apply -var="vm_storage_path=$HOME/vm_storage"
-cd .. && ./deploy_all.sh --skip-vm-create
+cd .. && ./cms-ha deploy --skip-vm-create
 ```
 
 ---
 
 ## Deployment Phases
 
-| Phase | Script | Description |
-|:-----:|:-------|:------------|
-| **00** | `00_init_vms.sh` | Virtual network and VM creation (libvirt/KVM) |
-| **01** | `01_setup_cobbler.sh` | Cobbler PXE server — zero-touch OS provisioning |
-| **02** | `04_setup_puppet.sh` | Puppet Server + Agent — idempotent configuration |
-| **03** | `05_setup_drbd.sh` | DRBD 9 — synchronous block replication |
-| **04** | `06_setup_kubernetes.sh` | K3s HA cluster + MariaDB StatefulSet |
-| **05** | `07_setup_nginx_wordpress.sh` | Nginx load balancer + WordPress/Apache frontends |
-| **06** | `08_setup_monitoring.sh` | Prometheus + Grafana + Alertmanager |
-| **07** | `09_setup_ufw.sh` | UFW perimeter and per-node firewalling |
-| **08** | `10_setup_internal_ca.sh` | Internal PKI — TLS certificates with step-ca |
+| Phase | CLI Command | Description |
+|:-----:|:------------|:------------|
+| **00** | `cms-ha phase init-vms` | Virtual network and VM creation (libvirt/KVM) |
+| **01** | `cms-ha phase setup-cobbler` | Cobbler PXE server — zero-touch OS provisioning |
+| **02** | `cms-ha phase register-nodes` | Register client nodes in Cobbler |
+| **03** | `cms-ha phase repair-ssh` | SSH and Puppet CA repair |
+| **04** | `cms-ha phase setup-puppet` | Puppet Server + Agent — idempotent configuration |
+| **05** | `cms-ha phase setup-drbd` | DRBD 9 — synchronous block replication |
+| **06** | `cms-ha phase setup-kubernetes` | K3s HA cluster + MariaDB StatefulSet |
+| **07** | `cms-ha phase setup-nginx-wordpress` | Nginx load balancer + WordPress/Apache frontends |
+| **08** | `cms-ha phase setup-monitoring` | Prometheus + Grafana + Alertmanager |
+| **09** | `cms-ha phase setup-ufw` | UFW perimeter and per-node firewalling |
+| **10** | `cms-ha phase setup-ca` | Internal PKI — TLS certificates with step-ca |
 
 ---
 
@@ -259,7 +283,10 @@ cd .. && ./deploy_all.sh --skip-vm-create
 Automated failover tests validate the HA design under real failure conditions:
 
 ```bash
-bash scripts/utils/test_failover.sh
+./cms-ha test failover
+
+# Inspect state without restoring
+./cms-ha test failover --skip-restore
 ```
 
 | Test | Simulated Failure | Validated Behaviour |
@@ -288,11 +315,11 @@ The GitHub Actions CI validates every push and pull request:
 
 | Job | Tool | Scope |
 |:----|:-----|:------|
+| **Go Build & Test** | `go build` + `go vet` + `go test` | CLI binary compilation + unit tests |
 | Shell Lint | ShellCheck + `bash -n` | All `.sh` scripts |
 | YAML Lint | yamllint | Kubernetes manifests, monitoring configs |
 | K8s Validation | kubeconform | Kubernetes manifests against v1.29 schemas |
 | Puppet Lint | puppet-lint | All `.pp` manifests |
-| Python Lint | flake8 | Python utility scripts |
 | Terraform Validate | `terraform fmt` + `validate` | IaC configuration |
 
 ---
