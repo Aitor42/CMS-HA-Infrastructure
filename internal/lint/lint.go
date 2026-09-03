@@ -33,13 +33,13 @@ type linterDef struct {
 // RunLints executes all enabled linters in parallel.
 func RunLints(ctx context.Context, opts Options) error {
 	// Resolve paths relative to the module root
-	root, err := findModuleRoot()
+	root, err := FindModuleRoot()
 	if err != nil {
 		root = "."
 	}
 
-	shellScripts := findFiles(root, "*.sh")
-	puppetFiles := findFiles(root, "*.pp")
+	shellScripts := FindFiles(root, "*.sh")
+	puppetFiles := FindFiles(root, "*.pp")
 	k8sDir := filepath.Join(root, "kubernetes")
 	monDir := filepath.Join(root, "templates", "monitoring")
 	tfDir := filepath.Join(root, "terraform")
@@ -129,8 +129,8 @@ func RunLints(ctx context.Context, opts Options) error {
 	return nil
 }
 
-// findModuleRoot finds the Go module root by walking up from cwd.
-func findModuleRoot() (string, error) {
+// FindModuleRoot finds the Go module root by walking up from cwd.
+func FindModuleRoot() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -147,8 +147,8 @@ func findModuleRoot() (string, error) {
 	}
 }
 
-// findFiles recursively finds all files matching the pattern.
-func findFiles(root, pattern string) []string {
+// FindFiles recursively finds all files matching the pattern.
+func FindFiles(root, pattern string) []string {
 	var files []string
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {

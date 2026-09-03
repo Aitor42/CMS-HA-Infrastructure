@@ -32,7 +32,8 @@ func SetVerbose(v bool) {
 	slog.SetDefault(logger)
 }
 
-func formatMsg(msg string, args ...any) string {
+// FormatMsg formats a message if format arguments are provided.
+func FormatMsg(msg string, args ...any) string {
 	if len(args) > 0 {
 		return fmt.Sprintf(msg, args...)
 	}
@@ -41,7 +42,7 @@ func formatMsg(msg string, args ...any) string {
 
 // Info prints an info message in cyan.
 func Info(msg string, args ...any) {
-	formatted := formatMsg(msg, args...)
+	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.CyanString("ℹ ") + formatted + "\n")
 	if verbose {
 		logger.Info(formatted)
@@ -50,7 +51,7 @@ func Info(msg string, args ...any) {
 
 // Success prints a success message in green.
 func Success(msg string, args ...any) {
-	formatted := formatMsg(msg, args...)
+	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.GreenString("✓ ") + formatted + "\n")
 	if verbose {
 		logger.Info(formatted)
@@ -59,7 +60,7 @@ func Success(msg string, args ...any) {
 
 // Warn prints a warning message in yellow.
 func Warn(msg string, args ...any) {
-	formatted := formatMsg(msg, args...)
+	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.YellowString("⚠ ") + formatted + "\n")
 	if verbose {
 		logger.Warn(formatted)
@@ -68,7 +69,7 @@ func Warn(msg string, args ...any) {
 
 // Error prints an error message in red.
 func Error(msg string, args ...any) {
-	formatted := formatMsg(msg, args...)
+	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.RedString("✗ ") + formatted + "\n")
 	if verbose {
 		logger.Error(formatted)

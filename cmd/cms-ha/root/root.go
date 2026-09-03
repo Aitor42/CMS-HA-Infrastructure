@@ -42,6 +42,11 @@ func Execute() error {
     return ExecuteContext(ctx)
 }
 
+// GetRootCmd returns the root cobra command for testing and introspection.
+func GetRootCmd() *cobra.Command {
+    return rootCmd
+}
+
 func init() {
     rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "config.yaml", "Path to config file")
     rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")

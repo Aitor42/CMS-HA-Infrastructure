@@ -1,18 +1,20 @@
-package templates
+package tests
 
 import (
 	"testing"
 	"testing/fstest"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/templates"
 )
 
-func TestRenderer(t *testing.T) {
+func TestTemplates_Renderer(t *testing.T) {
 	mockFS := fstest.MapFS{
 		"templates/test.txt": &fstest.MapFile{
 			Data: []byte("Hello {{ .Name }}! Value: {{ default \"none\" .Value }}"),
 		},
 	}
 
-	r := NewRenderer(mockFS)
+	r := templates.NewRenderer(mockFS)
 	data := map[string]string{
 		"Name": "CMS",
 	}

@@ -50,7 +50,7 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		}
 	}
 
-	phaseList := o.buildPhaseList(opts)
+	phaseList := o.BuildPhaseList(opts)
 	total := len(phaseList)
 
 	for i, phase := range phaseList {
@@ -75,8 +75,8 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 	return nil
 }
 
-// buildPhaseList constructs the ordered list of phases based on options.
-func (o *Orchestrator) buildPhaseList(opts DeployOpts) []phases.Phase {
+// BuildPhaseList constructs the ordered list of phases based on options.
+func (o *Orchestrator) BuildPhaseList(opts DeployOpts) []phases.Phase {
 	var list []phases.Phase
 
 	if !opts.SkipVMCreate {

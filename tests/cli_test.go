@@ -1,11 +1,14 @@
-package root
+package tests
 
 import (
 	"bytes"
 	"testing"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/cmd/cms-ha/root"
 )
 
-func TestRootCmdRegistration(t *testing.T) {
+func TestCLI_CommandRegistration(t *testing.T) {
+	rootCmd := root.GetRootCmd()
 	commands := []string{
 		"backup",
 		"deploy",
@@ -28,7 +31,8 @@ func TestRootCmdRegistration(t *testing.T) {
 	}
 }
 
-func TestPhaseSubcommands(t *testing.T) {
+func TestCLI_PhaseSubcommands(t *testing.T) {
+	rootCmd := root.GetRootCmd()
 	phaseSubcommands := []string{
 		"init-vms",
 		"setup-cobbler",
@@ -50,14 +54,15 @@ func TestPhaseSubcommands(t *testing.T) {
 		}
 	}
 
-	// Test alias
+	// Test alias setup-nginx -> setup-nginx-wordpress
 	cmd, _, err := rootCmd.Find([]string{"phase", "setup-nginx"})
 	if err != nil || cmd == nil || cmd.Name() != "setup-nginx-wordpress" {
 		t.Errorf("expected alias setup-nginx to resolve to setup-nginx-wordpress")
 	}
 }
 
-func TestVMSubcommands(t *testing.T) {
+func TestCLI_VMSubcommands(t *testing.T) {
+	rootCmd := root.GetRootCmd()
 	vmSubcommands := []string{
 		"start",
 		"shrink",
@@ -73,7 +78,6 @@ func TestVMSubcommands(t *testing.T) {
 		}
 	}
 
-	// Test aliases
 	aliases := map[string]string{
 		"start-all":       "start",
 		"shrink-ram":      "shrink",
@@ -88,7 +92,8 @@ func TestVMSubcommands(t *testing.T) {
 	}
 }
 
-func TestRootHelp(t *testing.T) {
+func TestCLI_HelpExecution(t *testing.T) {
+	rootCmd := root.GetRootCmd()
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)

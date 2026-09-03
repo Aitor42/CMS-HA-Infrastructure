@@ -1,20 +1,22 @@
-package ssh
+package tests
 
 import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-func TestNewPoolLazyInit(t *testing.T) {
+func TestSSH_NewPoolLazyInit(t *testing.T) {
 	// Creating a pool with a non-existent key should succeed without crashing (lazy key loading)
-	pool, err := NewPool("/tmp/non_existent_key_12345", 2*time.Second)
+	pool, err := ssh.NewPool("/tmp/non_existent_key_12345", 2*time.Second)
 	if err != nil {
 		t.Fatalf("expected NewPool to succeed in lazy mode, got: %v", err)
 	}
 	defer pool.Close()
 
-	// Calling a command with a non-existent key should fail with clear key error
+	// Calling a command with a non-existent key should fail gracefully
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -24,8 +26,8 @@ func TestNewPoolLazyInit(t *testing.T) {
 	}
 }
 
-func TestRunParallelAggregation(t *testing.T) {
-	pool, err := NewPool("/tmp/non_existent_key_12345", 1*time.Second)
+func TestSSH_RunParallelAggregation(t *testing.T) {
+	pool, err := ssh.NewPool("/tmp/non_existent_key_12345", 1*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected pool error: %v", err)
 	}

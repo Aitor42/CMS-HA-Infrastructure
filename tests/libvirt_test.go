@@ -1,12 +1,14 @@
-package libvirt
+package tests
 
 import (
 	"context"
 	"testing"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 )
 
-func TestNewClient(t *testing.T) {
-	c := NewClient("qemu:///system")
+func TestLibvirt_NewClient(t *testing.T) {
+	c := libvirt.NewClient("qemu:///system")
 	if c == nil {
 		t.Fatal("expected non-nil Client")
 	}
@@ -15,16 +17,16 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
-func TestVirtInstallOptsFormatting(t *testing.T) {
-	opts := VirtInstallOpts{
+func TestLibvirt_VirtInstallOptsFormatting(t *testing.T) {
+	opts := libvirt.VirtInstallOpts{
 		Name:      "test-vm",
 		RAM:       2048,
 		VCPUs:     2,
 		OSVariant: "ubuntu24.04",
-		Disks: []DiskOpt{
+		Disks: []libvirt.DiskOpt{
 			{Path: "/var/lib/libvirt/images/test.qcow2", SizeGB: 10},
 		},
-		Networks: []NetworkOpt{
+		Networks: []libvirt.NetworkOpt{
 			{Network: "internal", Mac: "52:54:00:10:01:02"},
 		},
 		BootOrder:    []string{"hd", "network"},
@@ -40,8 +42,8 @@ func TestVirtInstallOptsFormatting(t *testing.T) {
 	}
 }
 
-func TestMockDomainOperations(t *testing.T) {
-	c := &Client{
+func TestLibvirt_MockDomainOperations(t *testing.T) {
+	c := &libvirt.Client{
 		URI:     "test:///default",
 		UseSudo: false,
 	}

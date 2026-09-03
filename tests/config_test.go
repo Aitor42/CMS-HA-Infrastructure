@@ -1,19 +1,21 @@
-package config
+package tests
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 )
 
-func TestConfigLoadAndNodeSpecs(t *testing.T) {
+func TestConfig_LoadAndNodeSpecs(t *testing.T) {
 	yamlContent := `
 vm:
-  storage_dir: "/tmp/vm_storage"
+  storage_dir: "~/vm_storage"
   libvirt_uri: "qemu:///system"
 
 ssh:
-  private_key: "/tmp/id_ed25519"
+  private_key: "~/.ssh/id_ed25519"
   connect_timeout: 10s
   batch_mode: true
 
@@ -143,13 +145,18 @@ deploy:
 		t.Fatalf("failed to write temp config: %v", err)
 	}
 
-	cfg, err := Load(tmpFile)
+	cfg, err := config.Load(tmpFile)
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
 
 	if cfg.Database.Name != "wordpress" {
 		t.Errorf("expected DB name wordpress, got %s", cfg.Database.Name)
+	}
+
+	// Verify path expansion (no raw ~)
+	if cfg.VM.StorageDir == "~/vm_storage" {
+		t.Errorf("expected tilde expansion in StorageDir, got %s", cfg.VM.StorageDir)
 	}
 
 	internalNodes := cfg.InternalNodes()
@@ -173,8 +180,8 @@ deploy:
 	}
 }
 
-func TestSecretsEncryption(t *testing.T) {
-	pub, priv, err := GenerateKey()
+func TestConfig_SecretsEncryption(t *testing.T) {
+	pub, priv, err := config.GenerateKey()
 	if err != nil {
 		t.Fatalf("failed to generate key: %v", err)
 	}
@@ -183,12 +190,12 @@ func TestSecretsEncryption(t *testing.T) {
 	}
 
 	secret := "SuperSecretPassword123"
-	encrypted, err := EncryptValue(secret, pub)
+	encrypted, err := config.EncryptValue(secret, pub)
 	if err != nil {
 		t.Fatalf("failed to encrypt value: %v", err)
 	}
 
-	if !IsEncrypted(encrypted) {
+	if !config.IsEncrypted(encrypted) {
 		t.Fatalf("expected value to be marked as encrypted: %s", encrypted)
 	}
 
@@ -197,7 +204,7 @@ func TestSecretsEncryption(t *testing.T) {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 
-	decrypted, err := DecryptValue(encrypted, keyFile)
+	decrypted, err := config.DecryptValue(encrypted, keyFile)
 	if err != nil {
 		t.Fatalf("failed to decrypt value: %v", err)
 	}
