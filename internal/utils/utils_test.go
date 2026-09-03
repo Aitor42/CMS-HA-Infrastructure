@@ -36,3 +36,25 @@ func TestNewVerifier(t *testing.T) {
 		t.Fatalf("expected non-nil Verifier")
 	}
 }
+
+func TestFixBootOrderSkippingNonExistent(t *testing.T) {
+	l := libvirt.NewClient("test:///default")
+	err := FixBootOrder(t.Context(), l, []string{"nonexistent-vm-9999"})
+	if err != nil {
+		t.Errorf("expected FixBootOrder to safely skip nonexistent VMs, got: %v", err)
+	}
+}
+
+func TestRecreateFailedVMsSafe(t *testing.T) {
+	cfg := &config.Config{
+		VM: config.VMConfig{StorageDir: t.TempDir()},
+		Nodes: config.NodesConfig{
+			Jumpstart: config.NodeDetail{Name: "jumpstart"},
+		},
+	}
+	l := libvirt.NewClient("test:///default")
+	err := RecreateFailedVMs(t.Context(), cfg, l)
+	if err != nil {
+		t.Errorf("expected RecreateFailedVMs to succeed, got: %v", err)
+	}
+}

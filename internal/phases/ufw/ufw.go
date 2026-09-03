@@ -41,7 +41,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	routerIP := p.cfg.Nodes.Router.IP
 	
 	logging.Info("Running Puppet agent on Router node...")
-	_, _, exitCode, err := p.pool.RunCommand(ctx, routerIP, "puppet agent -t")
+	_, _, exitCode, err := p.pool.RunCommand(ctx, routerIP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	if exitCode != 0 && exitCode != 2 {
 		return fmt.Errorf("puppet agent failed on router node (exit code %d): %v", exitCode, err)
 	}

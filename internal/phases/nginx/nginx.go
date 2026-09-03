@@ -42,7 +42,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Running Puppet agent on LB and CMS nodes...")
-	res := p.pool.RunParallel(ctx, nodes, "puppet agent -t")
+	res := p.pool.RunParallel(ctx, nodes, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	for _, r := range res {
 		if r.ExitCode != 0 && r.ExitCode != 2 {
 			return fmt.Errorf("puppet agent failed on %s (exit code %d): %v", r.Host, r.ExitCode, r.Err)

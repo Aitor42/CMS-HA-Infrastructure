@@ -235,7 +235,7 @@ func RecreateFailedVMs(ctx context.Context, cfg *config.Config, l *libvirt.Clien
 	defer timer.End()
 
 	for _, node := range cfg.AllNodes() {
-		if node.Name == cfg.Nodes.Jumpstart.Name {
+		if node.Name == "" || node.Name == cfg.Nodes.Jumpstart.Name {
 			continue
 		}
 		state, err := l.DomainState(ctx, node.Name)

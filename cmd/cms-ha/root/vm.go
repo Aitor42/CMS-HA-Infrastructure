@@ -16,7 +16,8 @@ func init() {
     rootCmd.AddCommand(vmCmd)
     
     startCmd := &cobra.Command{
-        Use: "start",
+        Use:     "start",
+        Aliases: []string{"start-all"},
         Run: func(cmd *cobra.Command, args []string) {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }
@@ -27,7 +28,8 @@ func init() {
     vmCmd.AddCommand(startCmd)
 
     shrinkCmd := &cobra.Command{
-        Use: "shrink",
+        Use:     "shrink",
+        Aliases: []string{"shrink-ram"},
         Run: func(cmd *cobra.Command, args []string) {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }
@@ -38,7 +40,8 @@ func init() {
     vmCmd.AddCommand(shrinkCmd)
 
     fixBootCmd := &cobra.Command{
-        Use: "fix-boot-order",
+        Use:     "fix-boot-order",
+        Aliases: []string{"fix-boot"},
         Run: func(cmd *cobra.Command, args []string) {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }
@@ -70,7 +73,8 @@ func init() {
     vmCmd.AddCommand(installBatchesCmd)
 
     recreateCmd := &cobra.Command{
-        Use: "recreate",
+        Use:     "recreate",
+        Aliases: []string{"recreate-failed"},
         Run: func(cmd *cobra.Command, args []string) {
             cfg, err := loadConfig()
             if err != nil { handleError(err); return }

@@ -31,7 +31,10 @@ func init() {
             stdout, _, _, err := pool.RunCommand(ctx, master1, backupCmdStr)
             if err != nil { handleError(err); return }
             backupFile := fmt.Sprintf("backup_%s.sql", time.Now().Format("20060102_150405"))
-            os.WriteFile(backupFile, []byte(stdout), 0644)
+            if err := os.WriteFile(backupFile, []byte(stdout), 0644); err != nil {
+                handleError(fmt.Errorf("failed to write backup file: %w", err))
+                return
+            }
             logging.Success("Database backup saved to %s", backupFile)
         },
     }

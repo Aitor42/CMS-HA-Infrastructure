@@ -59,9 +59,10 @@ func init() {
     phaseCmd.AddCommand(initVMsCmd)
 
     // Helper for phases without libvirt
-    addPhaseCmd := func(use string, phaseFactory func(cmd *cobra.Command) error) {
+    addPhaseCmd := func(use string, phaseFactory func(cmd *cobra.Command) error, aliases ...string) {
         cmd := &cobra.Command{
-            Use: use,
+            Use:     use,
+            Aliases: aliases,
             Run: func(cmd *cobra.Command, args []string) {
                 if err := phaseFactory(cmd); err != nil {
                     handleError(err)
@@ -139,7 +140,7 @@ func init() {
         defer pool.Close()
         p := nginx.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "setup-nginx")
 
     addPhaseCmd("setup-monitoring", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()

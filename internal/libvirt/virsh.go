@@ -244,7 +244,7 @@ func (c *Client) NetExists(ctx context.Context, name string) bool {
 
 // VirtInstall builds and executes a virt-install command.
 func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
-	args := []string{"--name", opts.Name, "--memory", fmt.Sprintf("%d", opts.RAM), "--vcpus", fmt.Sprintf("%d", opts.VCPUs)}
+	args := []string{"--connect", c.URI, "--name", opts.Name, "--memory", fmt.Sprintf("%d", opts.RAM), "--vcpus", fmt.Sprintf("%d", opts.VCPUs)}
 	
 	if opts.OSVariant != "" {
 		args = append(args, "--os-variant", opts.OSVariant)
@@ -252,14 +252,14 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 
 	for _, d := range opts.Disks {
 		if d.SizeGB > 0 {
-			args = append(args, "--disk", fmt.Sprintf("path=%s,size=%d", d.Path, d.SizeGB))
+			args = append(args, "--disk", fmt.Sprintf("path=%s,size=%d,format=qcow2,bus=virtio", d.Path, d.SizeGB))
 		} else {
 			args = append(args, "--disk", fmt.Sprintf("path=%s", d.Path))
 		}
 	}
 	
 	for _, n := range opts.Networks {
-		netArg := fmt.Sprintf("network=%s", n.Network)
+		netArg := fmt.Sprintf("network=%s,model=virtio", n.Network)
 		if n.Mac != "" {
 			netArg += fmt.Sprintf(",mac=%s", n.Mac)
 		}
@@ -270,8 +270,8 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--pxe")
 	}
 	
-	for _, order := range opts.BootOrder {
-		args = append(args, "--boot", order)
+	if len(opts.BootOrder) > 0 {
+		args = append(args, "--boot", strings.Join(opts.BootOrder, ","))
 	}
 	
 	if opts.Location != "" {
