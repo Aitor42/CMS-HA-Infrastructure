@@ -42,6 +42,8 @@ The entire environment is deployed with a **single command** (`cms-ha deploy`), 
 | **CI/CD Pipeline** | GitHub Actions: ShellCheck, yamllint, kubeconform, puppet-lint, terraform validate |
 
 > **Verified deployment** — The full infrastructure was deployed and validated end-to-end on a remote bare-metal Linux server (27 GB RAM, KVM), confirming correct operation of all services: PXE provisioning, Puppet convergence, K3s HA cluster, WordPress reachability via HTTPS, DRBD replication, and Prometheus metrics collection.
+>
+> *Note on Go rewrite:* This Go rewrite has not yet been tested on the aforementioned bare-metal server (the verified deployment was performed with the original Bash implementation). Therefore, while it does not inherit that specific server's physical constraints, it does not yet have full end-to-end bare-metal verification.
 
 ---
 
