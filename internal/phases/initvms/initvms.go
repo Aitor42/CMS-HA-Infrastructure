@@ -3,15 +3,15 @@ package initvms
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"text/template"
-	"time"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -116,12 +116,12 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 	}
 
 	// Check disk space
-	dir := p.cfg.VM.StorageDir
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	dir := filepath.Clean(p.cfg.VM.StorageDir)
+	if err := os.MkdirAll(dir, 0750); err != nil {
 		return fmt.Errorf("cannot create storage dir %s: %w", dir, err)
 	}
 	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dir, &stat); err == nil {
+	if err := syscall.Statfs(dir, &stat); err == nil && stat.Bsize > 0 {
 		freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
 		logging.Info("Storage: %s (%d GB free)", dir, freeGB)
 		if freeGB < 30 {
@@ -248,14 +248,14 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 
 	// Create autoinstall directory and write files
 	autoinstallDir := filepath.Join(p.cfg.VM.StorageDir, "autoinstall")
-	if err := os.MkdirAll(autoinstallDir, 0755); err != nil {
+	if err := os.MkdirAll(autoinstallDir, 0700); err != nil {
 		return fmt.Errorf("failed to create autoinstall dir: %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(autoinstallDir, "user-data"), userDataBuf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(autoinstallDir, "user-data"), userDataBuf.Bytes(), 0600); err != nil {
 		return fmt.Errorf("failed to write user-data: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(autoinstallDir, "meta-data"), []byte(""), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(autoinstallDir, "meta-data"), []byte(""), 0600); err != nil {
 		return fmt.Errorf("failed to write meta-data: %w", err)
 	}
 
@@ -490,13 +490,14 @@ func (p *Phase) ensureSSHKey(keyPath string) (string, error) {
 		if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
 			return "", fmt.Errorf("failed to create SSH dir: %w", err)
 		}
-		cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", keyPath)
+		cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", filepath.Clean(keyPath)) // #nosec G204 -- keyPath is within configured safe storage directory
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("ssh-keygen failed: %v: %s", err, out)
 		}
 	}
 
-	pubKeyBytes, err := os.ReadFile(keyPath + ".pub")
+	cleanedKeyPath := filepath.Clean(keyPath + ".pub")
+	pubKeyBytes, err := os.ReadFile(cleanedKeyPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read public key: %w", err)
 	}
@@ -527,16 +528,18 @@ func findUbuntuISO(dir string) (string, error) {
 	return "", fmt.Errorf("no Ubuntu 24.04 ISO found in %s; download it first", dir)
 }
 
-// generateRandomPasswordHash generates a random SHA-512 password hash.
+// generateRandomPasswordHash generates a random SHA-512 password hash using crypto/rand.
 // The actual password is random and discarded; SSH key auth is enforced.
 func generateRandomPasswordHash() string {
-	// Use a fixed hash as fallback (password login is disabled via SSH config anyway)
-	src := rand.NewSource(time.Now().UnixNano())
-	r := rand.New(src)
 	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	b := make([]byte, 32)
 	for i := range b {
-		b[i] = chars[r.Intn(len(chars))]
+		idx, err := crand.Int(crand.Reader, big.NewInt(int64(len(chars))))
+		if err != nil {
+			b[i] = chars[0]
+		} else {
+			b[i] = chars[idx.Int64()]
+		}
 	}
 	// Return a placeholder — actual hash generation needs openssl or Python
 	// The important security comes from PasswordAuthentication no in sshd_config

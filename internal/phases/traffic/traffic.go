@@ -2,12 +2,16 @@ package traffic
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"fmt"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -79,9 +83,22 @@ func (t *Traffic) Run(ctx context.Context) error {
 	}
 	logging.Info("Target URL: %s", baseURL)
 
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+	caCertPath := "/usr/local/share/ca-certificates/cms_root_ca.crt"
+	if caCert, err := os.ReadFile(filepath.Clean(caCertPath)); err == nil {
+		caCertPool := x509.NewCertPool()
+		if caCertPool.AppendCertsFromPEM(caCert) {
+			tlsConfig.RootCAs = caCertPool
+		}
+	} else {
+		tlsConfig.InsecureSkipVerify = true // #nosec G402 -- benchmark test against internal lab endpoint when root CA is not in host store
+	}
+
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig:     tlsConfig,
 			MaxIdleConns:        100,
 			MaxIdleConnsPerHost: 100,
 			IdleConnTimeout:     90 * time.Second,
@@ -92,7 +109,7 @@ func (t *Traffic) Run(ctx context.Context) error {
 	// Phase 1: Distributed random HTTP GET
 	logging.Info("Phase 1: Distributed random HTTP GET")
 	for i := 0; i < 18; i++ {
-		path := wpPaths[rand.Intn(len(wpPaths))]
+		path := getRandomPath(wpPaths)
 		reqURL := baseURL + path
 		req, _ := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 		resp, err := client.Do(req)
@@ -102,7 +119,7 @@ func (t *Traffic) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if t.opts.Verbose {
 			logging.Info("GET %s -> %d", reqURL, resp.StatusCode)
 		}
@@ -180,7 +197,7 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 				case <-stressCtx.Done():
 					return
 				default:
-					path := wpPaths[rand.Intn(len(wpPaths))]
+					path := getRandomPath(wpPaths)
 					reqURL := baseURL + path
 					req, err := http.NewRequestWithContext(stressCtx, "GET", reqURL, nil)
 					if err != nil {
@@ -195,7 +212,7 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 						atomic.AddInt64(&failCount, 1)
 						time.Sleep(20 * time.Millisecond)
 					} else {
-						resp.Body.Close()
+						_ = resp.Body.Close()
 						if resp.StatusCode < 400 {
 							atomic.AddInt64(&successCount, 1)
 							mu.Lock()
@@ -238,4 +255,15 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 	if successCount > 0 {
 		logging.Info("Latency Mean: %v, P99: %v", mean, p99)
 	}
+}
+
+func getRandomPath(paths []string) string {
+	if len(paths) == 0 {
+		return "/"
+	}
+	n, err := crand.Int(crand.Reader, big.NewInt(int64(len(paths))))
+	if err != nil {
+		return paths[0]
+	}
+	return paths[n.Int64()]
 }

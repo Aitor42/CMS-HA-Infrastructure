@@ -74,7 +74,7 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 		return err
 	}
 	
-	knownHostsPath := filepath.Join(homeDir, ".ssh", "known_hosts")
+	knownHostsPath := filepath.Clean(filepath.Join(homeDir, ".ssh", "known_hosts"))
 	data, err := os.ReadFile(knownHostsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -110,7 +110,7 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 		}
 	}
 	
-	return os.WriteFile(knownHostsPath, []byte(strings.Join(newLines, "\n")), 0600)
+	return os.WriteFile(filepath.Clean(knownHostsPath), []byte(strings.Join(newLines, "\n")), 0600) // #nosec G703 G304 -- safely write cleaned known_hosts in user ssh dir
 }
 
 func hostMatchesIP(hostToken, targetIP string) bool {

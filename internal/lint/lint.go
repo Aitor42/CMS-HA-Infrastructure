@@ -106,7 +106,7 @@ func RunLints(ctx context.Context, opts Options) error {
 				return
 			}
 
-			cmd := exec.CommandContext(ctx, lint.cmd, lint.args...)
+			cmd := exec.CommandContext(ctx, lint.cmd, lint.args...) // #nosec G204 -- executes predefined static linters
 			cmd.Dir = root
 			out, err := cmd.CombinedOutput()
 

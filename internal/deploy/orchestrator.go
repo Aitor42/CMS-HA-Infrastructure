@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -108,10 +109,10 @@ func (o *Orchestrator) preflightChecks(ctx context.Context) error {
 	logging.Info("Running preflight checks...")
 
 	// Check disk space in storage dir
-	storageDir := o.Cfg.VM.StorageDir
-	if err := os.MkdirAll(storageDir, 0755); err == nil {
+	storageDir := filepath.Clean(o.Cfg.VM.StorageDir)
+	if err := os.MkdirAll(storageDir, 0750); err == nil {
 		var stat syscall.Statfs_t
-		if err := syscall.Statfs(storageDir, &stat); err == nil {
+		if err := syscall.Statfs(storageDir, &stat); err == nil && stat.Bsize > 0 {
 			freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
 			logging.Info("Disk space: %d GB free in %s", freeGB, storageDir)
 			if freeGB < 30 {

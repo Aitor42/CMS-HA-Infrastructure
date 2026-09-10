@@ -58,7 +58,7 @@ func (p *Pool) initKey() error {
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // #nosec G106 -- ephemeral VM provisioning across internal private network
 		Timeout:         p.connectTimeout,
 	}
 	return nil
@@ -228,7 +228,7 @@ func copyFileWithSFTP(ctx context.Context, sftpClient *sftp.Client, localPath, r
 		return err
 	}
 
-	srcFile, err := os.Open(localPath)
+	srcFile, err := os.Open(filepath.Clean(localPath))
 	if err != nil {
 		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
 	}

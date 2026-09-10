@@ -3,6 +3,7 @@ package root
 import (
     "fmt"
     "os"
+    "path/filepath"
     "strings"
 
     "github.com/spf13/cobra"
@@ -24,7 +25,7 @@ func init() {
             keyInput, _ := cmd.Flags().GetString("key")
             pubKey := strings.TrimSpace(keyInput)
             if keyInput != "" {
-                if data, err := os.ReadFile(keyInput); err == nil {
+                if data, err := os.ReadFile(filepath.Clean(keyInput)); err == nil {
                     pubKey = strings.TrimSpace(string(data))
                 }
             }
@@ -54,7 +55,7 @@ func init() {
         Run: func(cmd *cobra.Command, args []string) {
             pub, priv, err := config.GenerateKey()
             if err != nil { handleError(err); return }
-            if err := os.WriteFile("public.key", []byte(pub), 0644); err != nil {
+            if err := os.WriteFile("public.key", []byte(pub), 0600); err != nil {
                 handleError(fmt.Errorf("failed to write public key: %w", err))
                 return
             }

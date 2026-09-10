@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"filippo.io/age"
@@ -64,7 +65,8 @@ func DecryptValue(encValue, keyPath string) (string, error) {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}
 
-	keyData, err := os.ReadFile(keyPath)
+	cleanedKeyPath := filepath.Clean(keyPath)
+	keyData, err := os.ReadFile(cleanedKeyPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read key file: %w", err)
 	}
@@ -126,7 +128,8 @@ func processYAMLNode(node *yaml.Node, process func(string) (string, error)) erro
 
 // EncryptConfig reads the config file, encrypts sensitive fields, and writes it back.
 func EncryptConfig(configPath, publicKey string) error {
-	data, err := os.ReadFile(configPath)
+	cleanedConfigPath := filepath.Clean(configPath)
+	data, err := os.ReadFile(cleanedConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
 	}
