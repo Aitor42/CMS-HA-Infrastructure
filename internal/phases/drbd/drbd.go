@@ -102,7 +102,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	
 	logging.Info("Waiting for DRBD replication to start/sync...")
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, err := p.pool.RunScript(ctx, master1.IP, "drbdadm status cms-data")
+		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm status cms-data")
 		if err != nil {
 			return err
 		}

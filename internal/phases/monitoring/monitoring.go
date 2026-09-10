@@ -74,7 +74,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	
 	logging.Info("Testing Prometheus API reachability...")
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func() error {
-		out, err := p.pool.RunScript(ctx, monitorIP, "curl -s http://localhost:9090/api/v1/status/buildinfo")
+		out, _, _, err := p.pool.RunCommand(ctx, monitorIP, "curl -s http://localhost:9090/api/v1/status/buildinfo")
 		if err != nil {
 			return err
 		}

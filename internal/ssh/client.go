@@ -67,17 +67,18 @@ func (p *Pool) initKey() error {
 // getClient returns a cached connection or establishes a new one.
 func (p *Pool) getClient(host string) (*ssh.Client, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.config == nil {
 		if err := p.initKey(); err != nil {
+			p.mu.Unlock()
 			return nil, err
 		}
 	}
 
 	client, exists := p.clients[host]
+	cfg := p.config
+	p.mu.Unlock()
+
 	if exists {
-		// Basic liveness check could be added here
 		return client, nil
 	}
 
@@ -87,13 +88,21 @@ func (p *Pool) getClient(host string) (*ssh.Client, error) {
 		addr = host + ":22"
 	}
 
-	client, err := ssh.Dial("tcp", addr, p.config)
+	newClient, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial %s: %w", host, err)
 	}
 
-	p.clients[host] = client
-	return client, nil
+	p.mu.Lock()
+	if existing, ok := p.clients[host]; ok {
+		p.mu.Unlock()
+		newClient.Close()
+		return existing, nil
+	}
+	p.clients[host] = newClient
+	p.mu.Unlock()
+
+	return newClient, nil
 }
 
 func containsPort(host string) bool {
@@ -185,19 +194,58 @@ func (p *Pool) RunScript(ctx context.Context, host, script string) (string, erro
 	return stdout, nil
 }
 
-// CopyFile uploads a local file to the remote host.
+// CopyFile uploads a local file to the remote host using direct streaming (O(1) memory).
 func (p *Pool) CopyFile(ctx context.Context, host, localPath, remotePath string) error {
-	content, err := os.ReadFile(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to read local file %s: %w", localPath, err)
-	}
-	
 	info, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to stat local file %s: %w", localPath, err)
+	}
+
+	client, err := p.getClient(host)
 	if err != nil {
 		return err
 	}
 
-	return p.CopyContent(ctx, host, content, remotePath, info.Mode())
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		p.invalidateClient(host)
+		client, err = p.getClient(host)
+		if err != nil {
+			return err
+		}
+		sftpClient, err = sftp.NewClient(client)
+		if err != nil {
+			return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+		}
+	}
+	defer sftpClient.Close()
+
+	return copyFileWithSFTP(ctx, sftpClient, localPath, remotePath, info.Mode())
+}
+
+func copyFileWithSFTP(ctx context.Context, sftpClient *sftp.Client, localPath, remotePath string, mode os.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	srcFile, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
+	}
+	defer srcFile.Close()
+
+	remoteFile, err := sftpClient.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		return fmt.Errorf("failed to open remote file %s: %w", remotePath, err)
+	}
+	defer remoteFile.Close()
+
+	remoteFile.Chmod(mode)
+
+	if _, err := io.Copy(remoteFile, srcFile); err != nil {
+		return fmt.Errorf("failed to stream content to %s: %w", remotePath, err)
+	}
+	return nil
 }
 
 // CopyContent writes in-memory content to a remote file via SFTP.
@@ -242,7 +290,7 @@ func (p *Pool) CopyContent(ctx context.Context, host string, content []byte, rem
 	return nil
 }
 
-// CopyDir recursively uploads a directory.
+// CopyDir recursively uploads a directory reusing a single SFTP session.
 func (p *Pool) CopyDir(ctx context.Context, host, localDir, remoteDir string) error {
 	client, err := p.getClient(host)
 	if err != nil {
@@ -278,7 +326,7 @@ func (p *Pool) CopyDir(ctx context.Context, host, localDir, remoteDir string) er
 			return nil
 		}
 
-		return p.CopyFile(ctx, host, path, remPath)
+		return copyFileWithSFTP(ctx, sftpClient, path, remPath, info.Mode())
 	})
 }
 

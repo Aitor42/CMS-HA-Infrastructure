@@ -67,7 +67,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	logging.Info("Extracting K3s token from Master 1...")
 	var token string
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func() error {
-		tok, err := p.pool.RunScript(ctx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
+		tok, _, _, err := p.pool.RunCommand(ctx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
 		if err != nil || strings.TrimSpace(tok) == "" {
 			return fmt.Errorf("node-token not ready yet")
 		}
@@ -181,7 +181,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	
 	logging.Info("Waiting for MariaDB pod to be Running...")
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _ := p.pool.RunScript(ctx, master1.IP, "kubectl get pods -n cms -l app=mariadb -o jsonpath='{.items[0].status.phase}'")
+		out, _, _, _ := p.pool.RunCommand(ctx, master1.IP, "kubectl get pods -n cms -l app=mariadb -o jsonpath='{.items[0].status.phase}'")
 		if strings.TrimSpace(out) != "Running" {
 			return fmt.Errorf("mariadb not running: %s", out)
 		}
@@ -201,7 +201,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	logging.Info("Waiting for init-db-job completion...")
 	time.Sleep(10 * time.Second) // allow job to be created
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _ := p.pool.RunScript(ctx, master1.IP, "kubectl get job init-wordpress-db -n cms -o jsonpath='{.status.succeeded}'")
+		out, _, _, _ := p.pool.RunCommand(ctx, master1.IP, "kubectl get job init-wordpress-db -n cms -o jsonpath='{.status.succeeded}'")
 		if strings.TrimSpace(out) != "1" {
 			return fmt.Errorf("job not completed")
 		}

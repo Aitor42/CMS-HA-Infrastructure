@@ -101,7 +101,7 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 
 	logging.Info("Waiting for CA health endpoint...")
 	err := retry.Do(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func() error {
-		_, err := p.pool.RunScript(ctx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
+		_, _, _, err := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
 		return err
 	})
 	if err != nil {
@@ -109,7 +109,7 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	}
 	
 	logging.Info("Distributing root CA cert to all nodes...")
-	caCert, err := p.pool.RunScript(ctx, jumpIP, "cat /root/.step/certs/root_ca.crt")
+	caCert, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /root/.step/certs/root_ca.crt")
 	if err != nil {
 		return fmt.Errorf("failed to read root CA: %w", err)
 	}

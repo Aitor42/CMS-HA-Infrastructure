@@ -52,9 +52,9 @@ func (p *Phase) Run(ctx context.Context) error {
 		fullCmd := fmt.Sprintf("%s --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac-address=%s --autoinstall-meta='hostname=%s' --netboot-enabled=1", 
 			cmd, node.Name, node.Name, node.IP, mac, node.Name)
 			
-		_, err := p.pool.RunScript(ctx, jumpIP, fullCmd)
-		if err != nil {
-			logging.Error("Failed to register node %s: %v", node.Name, err)
+		_, _, code, err := p.pool.RunCommand(ctx, jumpIP, fullCmd)
+		if err != nil || code != 0 {
+			return fmt.Errorf("failed to register node %s (exit code %d): %w", node.Name, code, err)
 		}
 	}
 	
