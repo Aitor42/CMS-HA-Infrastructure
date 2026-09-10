@@ -55,6 +55,12 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	start := time.Now()
 	pass := true
 
+	if len(f.cfg.Nodes.Masters) < 2 {
+		logging.Warn("Skipping DRBD failover test: requires at least 2 master nodes")
+		f.printSummary("DRBD Master Failover", false, 0)
+		return
+	}
+
 	master1 := f.cfg.Nodes.Masters[0]
 	master2 := f.cfg.Nodes.Masters[1]
 
@@ -70,10 +76,14 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	}
 
 	// Verify HTTP 200
-	resp, err := http.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
 	if err != nil || resp.StatusCode != 200 {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200")
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
 	}
 
 	if !opts.SkipRestore {
@@ -90,6 +100,12 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	start := time.Now()
 	pass := true
 
+	if len(f.cfg.Nodes.CMSFrontends) == 0 {
+		logging.Warn("Skipping CMS failover test: requires at least 1 frontend")
+		f.printSummary("CMS Frontend Failover", false, 0)
+		return
+	}
+
 	cms1 := f.cfg.Nodes.CMSFrontends[0]
 
 	// Shutdown cms1
@@ -97,10 +113,14 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	time.Sleep(15 * time.Second)
 
 	// Verify HTTP 200 (routes to cms2)
-	resp, err := http.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
 	if err != nil || resp.StatusCode != 200 {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200 after cms1 shutdown")
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
 	}
 
 	if !opts.SkipRestore {
@@ -116,6 +136,12 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	logging.Info("Scenario 3: K3s Worker Failover")
 	start := time.Now()
 	pass := true
+
+	if len(f.cfg.Nodes.Workers) < 2 || len(f.cfg.Nodes.Masters) < 2 {
+		logging.Warn("Skipping Worker failover test: requires at least 2 workers and 2 masters")
+		f.printSummary("K3s Worker Failover", false, 0)
+		return
+	}
 
 	worker1 := f.cfg.Nodes.Workers[0]
 	worker2 := f.cfg.Nodes.Workers[1]

@@ -129,18 +129,26 @@ func FixBootOrder(ctx context.Context, l *libvirt.Client, vmNames []string) erro
 			xml = strings.Replace(xml, "<boot dev='network'/>", "", 1)
 			xml = strings.Replace(xml, "<boot dev='hd'/>", "<boot dev='hd'/>\n    <boot dev='network'/>", 1)
 			
-			tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s-boot.xml", vm))
-			if err := os.WriteFile(tmpFile, []byte(xml), 0644); err != nil {
+			tmpFile, err := os.CreateTemp("", fmt.Sprintf("%s-boot-*.xml", vm))
+			if err != nil {
+				logging.Error("Failed to create temp XML for %s: %v", vm, err)
+				continue
+			}
+			tmpPath := tmpFile.Name()
+			if _, err := tmpFile.Write([]byte(xml)); err != nil {
+				tmpFile.Close()
+				os.Remove(tmpPath)
 				logging.Error("Failed to write updated XML for %s: %v", vm, err)
 				continue
 			}
-			defer os.Remove(tmpFile)
+			tmpFile.Close()
 
-			if err := l.Define(ctx, tmpFile); err != nil {
+			if err := l.Define(ctx, tmpPath); err != nil {
 				logging.Error("Failed to define XML for %s: %v", vm, err)
 			} else {
 				logging.Success("Fixed boot order for %s (hd before network)", vm)
 			}
+			os.Remove(tmpPath)
 		}
 	}
 	return nil
@@ -215,10 +223,20 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			l.Shutdown(ctx, node.name)
 		}
 
-		time.Sleep(10 * time.Second)
-
+		// Wait for VMs to shut down gracefully before resizing
 		for _, node := range batch {
-			l.Destroy(ctx, node.name)
+			for attempt := 0; attempt < 15; attempt++ {
+				state, _ := l.DomainState(ctx, node.name)
+				if state == "shut off" {
+					break
+				}
+				time.Sleep(2 * time.Second)
+			}
+			state, _ := l.DomainState(ctx, node.name)
+			if state != "shut off" {
+				logging.Warn("VM %s did not shut down gracefully; forcing stop", node.name)
+				l.Destroy(ctx, node.name)
+			}
 			l.SetMemory(ctx, node.name, int64(node.ramFinalMB*1024))
 			l.Start(ctx, node.name)
 			logging.Success("Batch %d: %s resized to %d MB and running", i+1, node.name, node.ramFinalMB)

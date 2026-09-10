@@ -39,10 +39,12 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 			break
 		}
 
+		timer := time.NewTimer(cfg.Interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return fmt.Errorf("retry context cancelled: %w (last error: %v)", ctx.Err(), lastErr)
-		case <-time.After(cfg.Interval):
+		case <-timer.C:
 			// wait before next attempt
 		}
 	}
@@ -75,10 +77,12 @@ func Poll(ctx context.Context, cfg Config, fn func() (bool, error)) error {
 			break
 		}
 
+		timer := time.NewTimer(cfg.Interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return fmt.Errorf("poll context cancelled: %w", ctx.Err())
-		case <-time.After(cfg.Interval):
+		case <-timer.C:
 			// wait before next attempt
 		}
 	}

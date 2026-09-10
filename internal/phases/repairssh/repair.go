@@ -87,19 +87,49 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 	var newLines []string
 	
 	for _, line := range lines {
-		keep := true
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			newLines = append(newLines, line)
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			newLines = append(newLines, line)
+			continue
+		}
+		hostPart := fields[0]
+		match := false
 		for _, ip := range ips {
-			if strings.Contains(line, ip) {
-				keep = false
+			if ip != "" && hostMatchesIP(hostPart, ip) {
+				match = true
 				break
 			}
 		}
-		if keep {
+		if !match {
 			newLines = append(newLines, line)
 		}
 	}
 	
 	return os.WriteFile(knownHostsPath, []byte(strings.Join(newLines, "\n")), 0600)
+}
+
+func hostMatchesIP(hostToken, targetIP string) bool {
+	hostToken = strings.TrimPrefix(hostToken, "@cert-authority ")
+	hostToken = strings.TrimPrefix(hostToken, "@revoked ")
+	parts := strings.Split(hostToken, ",")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == targetIP {
+			return true
+		}
+		if strings.HasPrefix(p, "[") && strings.Contains(p, "]:") {
+			idx := strings.Index(p, "]:")
+			if p[1:idx] == targetIP {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error {
