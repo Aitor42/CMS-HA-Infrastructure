@@ -101,7 +101,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	logging.Info("Waiting for all nodes to be Ready...")
 	expectedCount := fmt.Sprintf("%d", len(p.cfg.Nodes.Masters)+len(p.cfg.Nodes.Workers))
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep -c Ready")
+		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep Ready | wc -l")
 		if err != nil {
 			return err
 		}

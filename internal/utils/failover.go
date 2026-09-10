@@ -100,8 +100,8 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	start := time.Now()
 	pass := true
 
-	if len(f.cfg.Nodes.CMSFrontends) == 0 {
-		logging.Warn("Skipping CMS failover test: requires at least 1 frontend")
+	if len(f.cfg.Nodes.CMSFrontends) < 2 {
+		logging.Warn("Skipping CMS failover test: requires at least 2 frontend nodes")
 		f.printSummary("CMS Frontend Failover", false, 0)
 		return
 	}

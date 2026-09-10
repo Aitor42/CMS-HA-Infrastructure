@@ -223,7 +223,7 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			l.Shutdown(ctx, node.name)
 		}
 
-		// Wait for VMs to shut down gracefully before resizing
+		// Wait for all VMs in the batch to shut down gracefully before resizing
 		for _, node := range batch {
 			for attempt := 0; attempt < 15; attempt++ {
 				state, _ := l.DomainState(ctx, node.name)
@@ -237,6 +237,10 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 				logging.Warn("VM %s did not shut down gracefully; forcing stop", node.name)
 				l.Destroy(ctx, node.name)
 			}
+		}
+
+		// Resize and restart all VMs in the batch with final RAM
+		for _, node := range batch {
 			l.SetMemory(ctx, node.name, int64(node.ramFinalMB*1024))
 			l.Start(ctx, node.name)
 			logging.Success("Batch %d: %s resized to %d MB and running", i+1, node.name, node.ramFinalMB)

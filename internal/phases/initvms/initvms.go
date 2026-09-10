@@ -168,9 +168,9 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			return fmt.Errorf("failed to write network XML: %w", err)
 		}
 		tmpFile.Close()
-		defer os.Remove(tmpPath)
-
-		if err := p.lv.NetDefine(ctx, tmpPath); err != nil {
+		err = p.lv.NetDefine(ctx, tmpPath)
+		os.Remove(tmpPath)
+		if err != nil {
 			return fmt.Errorf("failed to define network %s: %w", nd.name, err)
 		}
 		if err := p.lv.NetStart(ctx, nd.name); err != nil {

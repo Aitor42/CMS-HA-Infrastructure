@@ -128,7 +128,7 @@ func (o *Orchestrator) preflightChecks(ctx context.Context) error {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
 					if kb, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
-						totalGB := kb / (1024 * 1024)
+						totalGB := (kb + 512*1024) / (1024 * 1024)
 						logging.Info("Host RAM: %d GB total", totalGB)
 						if totalGB < 16 {
 							logging.Warn("Low host RAM: %d GB available (>= 16 GB recommended for full cluster)", totalGB)

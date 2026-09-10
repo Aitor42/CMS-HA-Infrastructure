@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -70,7 +71,11 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := p.pool.CopyContent(ctx, routerIP, []byte(natRules), "/tmp/nat.rules", 0600); err != nil {
 		return fmt.Errorf("failed to upload NAT rules: %w", err)
 	}
-	defer p.pool.RunCommand(ctx, routerIP, "rm -f /tmp/nat.rules")
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		p.pool.RunCommand(cleanupCtx, routerIP, "rm -f /tmp/nat.rules")
+	}()
 
 	injectCmd := `grep -q "*nat" /etc/ufw/before.rules || sed -i -e '/\*filter/r /tmp/nat.rules' -e '1N' /etc/ufw/before.rules`
 	if _, _, _, err := p.pool.RunCommand(ctx, routerIP, injectCmd); err != nil {
