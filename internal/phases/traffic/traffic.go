@@ -193,12 +193,15 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 
 					if err != nil {
 						atomic.AddInt64(&failCount, 1)
+						time.Sleep(20 * time.Millisecond)
 					} else {
 						resp.Body.Close()
 						if resp.StatusCode < 400 {
 							atomic.AddInt64(&successCount, 1)
 							mu.Lock()
-							latencies = append(latencies, elapsed)
+							if len(latencies) < 10000 {
+								latencies = append(latencies, elapsed)
+							}
 							mu.Unlock()
 						} else {
 							atomic.AddInt64(&failCount, 1)

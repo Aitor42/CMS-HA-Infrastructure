@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -67,7 +68,11 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 
 		if o.Cfg.Deploy.StaggerDelay > 0 && i < total-1 {
 			logging.Info("Waiting %v before next phase...", o.Cfg.Deploy.StaggerDelay)
-			time.Sleep(o.Cfg.Deploy.StaggerDelay)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(o.Cfg.Deploy.StaggerDelay):
+			}
 		}
 	}
 
@@ -120,9 +125,17 @@ func (o *Orchestrator) preflightChecks(ctx context.Context) error {
 	if err == nil {
 		for _, line := range strings.Split(string(memData), "\n") {
 			if strings.HasPrefix(line, "MemTotal:") {
-				// Parse kB value and convert to GB
-				// MemTotal:       16384000 kB
-				// ...
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if kb, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+						totalGB := kb / (1024 * 1024)
+						logging.Info("Host RAM: %d GB total", totalGB)
+						if totalGB < 16 {
+							logging.Warn("Low host RAM: %d GB available (>= 16 GB recommended for full cluster)", totalGB)
+						}
+					}
+				}
+				break
 			}
 		}
 	}

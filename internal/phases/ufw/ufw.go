@@ -47,7 +47,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Discovering WAN interface by MAC on Router...")
-	wanIface, err := p.pool.RunScript(ctx, routerIP, "ip -o link | awk '/52:54:00:10:00:02/ {print $2}' | sed 's/://'")
+	wanMAC := p.cfg.Nodes.Router.MACWAN
+	if wanMAC == "" {
+		wanMAC = "52:54:00:10:00:02"
+	}
+	wanCmd := fmt.Sprintf("ip -o link | awk '/%s/ {print $2}' | sed 's/://'", wanMAC)
+	wanIface, _, _, err := p.pool.RunCommand(ctx, routerIP, wanCmd)
+	wanIface = strings.TrimSpace(wanIface)
 	if err != nil || wanIface == "" {
 		wanIface = "enp2s0" // fallback
 	}
@@ -61,13 +67,12 @@ func (p *Phase) Run(ctx context.Context) error {
 	natRules := strings.ReplaceAll(string(tmplContent), "${WAN_IF}", wanIface)
 	natRules = strings.ReplaceAll(natRules, "${WAN_IFACE}", wanIface)
 	
-	// Inject block into before.rules using sed/awk or directly replace
-	injectCmd := fmt.Sprintf(`cat << 'EOF' > /tmp/nat.rules
-%s
-EOF
-grep -q "*nat" /etc/ufw/before.rules || sed -i -e '/\*filter/r /tmp/nat.rules' -e '1N' /etc/ufw/before.rules
-`, natRules)
+	if err := p.pool.CopyContent(ctx, routerIP, []byte(natRules), "/tmp/nat.rules", 0600); err != nil {
+		return fmt.Errorf("failed to upload NAT rules: %w", err)
+	}
+	defer p.pool.RunCommand(ctx, routerIP, "rm -f /tmp/nat.rules")
 
+	injectCmd := `grep -q "*nat" /etc/ufw/before.rules || sed -i -e '/\*filter/r /tmp/nat.rules' -e '1N' /etc/ufw/before.rules`
 	if _, _, _, err := p.pool.RunCommand(ctx, routerIP, injectCmd); err != nil {
 		return fmt.Errorf("failed to inject NAT rules: %w", err)
 	}
