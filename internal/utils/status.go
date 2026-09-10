@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -23,31 +24,58 @@ func CheckSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, l *libvirt.C
 	fmt.Printf("%-20s %-15s %-10s %-10s\n", "VM NAME", "IP", "STATE", "SSH")
 	fmt.Println(strings.Repeat("-", 60))
 
-	allHealthy := true
+	type nodeStatus struct {
+		name      string
+		ip        string
+		state     string
+		sshStatus string
+		healthy   bool
+	}
 
-	for _, node := range nodes {
-		state, err := l.DomainState(ctx, node.Name)
-		if err != nil {
-			state = "unknown"
-		}
+	results := make([]nodeStatus, len(nodes))
+	var wg sync.WaitGroup
 
-		sshStatus := "FAIL"
-		if state == "running" && node.IP != "" {
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort(node.IP, "22"), 2*time.Second)
-			if err == nil {
-				conn.Close()
-				_, _, _, err := s.RunCommand(ctx, node.IP, "echo ok")
+	for i, n := range nodes {
+		idx := i
+		node := n
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			state, err := l.DomainState(ctx, node.Name)
+			if err != nil {
+				state = "unknown"
+			}
+
+			sshStatus := "FAIL"
+			if state == "running" && node.IP != "" {
+				conn, err := net.DialTimeout("tcp", net.JoinHostPort(node.IP, "22"), 2*time.Second)
 				if err == nil {
-					sshStatus = "OK"
+					conn.Close()
+					_, _, _, err := s.RunCommand(ctx, node.IP, "echo ok")
+					if err == nil {
+						sshStatus = "OK"
+					}
 				}
 			}
-		}
 
-		if state != "running" || sshStatus != "OK" {
+			results[idx] = nodeStatus{
+				name:      node.Name,
+				ip:        node.IP,
+				state:     state,
+				sshStatus: sshStatus,
+				healthy:   state == "running" && sshStatus == "OK",
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	allHealthy := true
+	for _, res := range results {
+		if !res.healthy {
 			allHealthy = false
 		}
-
-		fmt.Printf("%-20s %-15s %-10s %-10s\n", node.Name, node.IP, state, sshStatus)
+		fmt.Printf("%-20s %-15s %-10s %-10s\n", res.name, res.ip, res.state, res.sshStatus)
 	}
 
 	if !allHealthy {

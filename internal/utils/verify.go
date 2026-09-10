@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
@@ -23,19 +24,56 @@ func NewVerifier(cfg *config.Config, s *ssh.Pool, l *libvirt.Client) *Verifier {
 	return &Verifier{cfg: cfg, ssh: s, libvirt: l}
 }
 
-// VerifyAll executes a full infrastructure health check.
+// CheckResult holds the status of an infrastructure check.
+type CheckResult struct {
+	Phase   string
+	Name    string
+	Pass    bool
+	Details string
+}
+
+// VerifyAll executes a full infrastructure health check concurrently.
 func (v *Verifier) VerifyAll(ctx context.Context) error {
 	timer := logging.PhaseStart("Infrastructure Verification")
 	defer timer.End()
 
-	v.phase00(ctx)
-	v.phase01(ctx)
-	v.phase02(ctx)
-	v.phase03(ctx)
-	v.phase04(ctx)
-	v.phase05(ctx)
-	v.phase06(ctx)
-	v.phase07(ctx)
+	checks := []func(ctx context.Context) CheckResult{
+		v.phase00,
+		v.phase01,
+		v.phase02,
+		v.phase03,
+		v.phase04,
+		v.phase05,
+		v.phase06,
+		v.phase07,
+	}
+
+	results := make([]CheckResult, len(checks))
+	var wg sync.WaitGroup
+
+	for i, chk := range checks {
+		idx := i
+		f := chk
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[idx] = f(ctx)
+		}()
+	}
+
+	wg.Wait()
+
+	allPassed := true
+	for _, res := range results {
+		v.printResult(res.Phase, res.Name, res.Pass, res.Details)
+		if !res.Pass {
+			allPassed = false
+		}
+	}
+
+	if !allPassed {
+		return fmt.Errorf("infrastructure verification failed: one or more checks did not pass")
+	}
 
 	return nil
 }
@@ -56,14 +94,14 @@ func (v *Verifier) printResult(phase, name string, pass bool, details string) {
 	}
 }
 
-func (v *Verifier) phase00(ctx context.Context) {
+func (v *Verifier) phase00(ctx context.Context) CheckResult {
 	// Libvirt VMs running + networks active
 	running, err := v.libvirt.ListRunning(ctx)
 	pass := err == nil && len(running) > 0
-	v.printResult("Phase 00", "Libvirt VMs & Networks", pass, fmt.Sprintf("%d running VMs", len(running)))
+	return CheckResult{"Phase 00", "Libvirt VMs & Networks", pass, fmt.Sprintf("%d running VMs", len(running))}
 }
 
-func (v *Verifier) phase01(ctx context.Context) {
+func (v *Verifier) phase01(ctx context.Context) CheckResult {
 	// Cobbler services + system count >= 13
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "systemctl is-active cobblerd apache2 isc-dhcp-server bind9 tftpd-hpa")
 	pass := err == nil && !strings.Contains(out, "inactive") && !strings.Contains(out, "failed")
@@ -73,10 +111,10 @@ func (v *Verifier) phase01(ctx context.Context) {
 	if sysCount == "0" || sysCount == "" {
 		pass = false
 	}
-	v.printResult("Phase 01", "Cobbler Services & Systems", pass, fmt.Sprintf("Systems: %s", sysCount))
+	return CheckResult{"Phase 01", "Cobbler Services & Systems", pass, fmt.Sprintf("Systems: %s", sysCount)}
 }
 
-func (v *Verifier) phase02(ctx context.Context) {
+func (v *Verifier) phase02(ctx context.Context) CheckResult {
 	// Puppet server + signed certs >= 9 + agent services
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "systemctl is-active puppetserver")
 	pass := err == nil && strings.TrimSpace(out) == "active"
@@ -86,10 +124,10 @@ func (v *Verifier) phase02(ctx context.Context) {
 	if certCount == "0" || certCount == "" {
 		pass = false
 	}
-	v.printResult("Phase 02", "Puppet Server & Certs", pass, fmt.Sprintf("Certs: %s", certCount))
+	return CheckResult{"Phase 02", "Puppet Server & Certs", pass, fmt.Sprintf("Certs: %s", certCount)}
 }
 
-func (v *Verifier) phase03(ctx context.Context) {
+func (v *Verifier) phase03(ctx context.Context) CheckResult {
 	// Nginx + Apache + SSL cert on LB
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.LB.IP, "systemctl is-active nginx")
 	pass := err == nil && strings.TrimSpace(out) == "active"
@@ -101,10 +139,10 @@ func (v *Verifier) phase03(ctx context.Context) {
 			pass = false
 		}
 	}
-	v.printResult("Phase 03", "Nginx & Apache & SSL", pass, "")
+	return CheckResult{"Phase 03", "Nginx & Apache & SSL", pass, ""}
 }
 
-func (v *Verifier) phase04(ctx context.Context) {
+func (v *Verifier) phase04(ctx context.Context) CheckResult {
 	// K3s cluster + MariaDB pod Running
 	if len(v.cfg.Nodes.Masters) > 0 {
 		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, "kubectl get nodes")
@@ -114,18 +152,19 @@ func (v *Verifier) phase04(ctx context.Context) {
 		if !strings.Contains(podOut, "Running") {
 			pass = false
 		}
-		v.printResult("Phase 04", "K3s & MariaDB Pod", pass, "")
+		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, ""}
 	}
+	return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
 }
 
-func (v *Verifier) phase05(ctx context.Context) {
+func (v *Verifier) phase05(ctx context.Context) CheckResult {
 	// Prometheus + Grafana + node-exporter
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Monitor.IP, "systemctl is-active prometheus grafana-server")
 	pass := err == nil && !strings.Contains(out, "inactive") && !strings.Contains(out, "failed")
-	v.printResult("Phase 05", "Prometheus & Grafana", pass, "")
+	return CheckResult{"Phase 05", "Prometheus & Grafana", pass, ""}
 }
 
-func (v *Verifier) phase06(ctx context.Context) {
+func (v *Verifier) phase06(ctx context.Context) CheckResult {
 	// UFW + ip_forward on router
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Router.IP, "cat /proc/sys/net/ipv4/ip_forward")
 	pass := err == nil && strings.TrimSpace(out) == "1"
@@ -134,20 +173,19 @@ func (v *Verifier) phase06(ctx context.Context) {
 	if !strings.Contains(ufwOut, "Status: active") {
 		pass = false
 	}
-	v.printResult("Phase 06", "Router UFW & IP Forward", pass, "")
+	return CheckResult{"Phase 06", "Router UFW & IP Forward", pass, ""}
 }
 
-func (v *Verifier) phase07(ctx context.Context) {
+func (v *Verifier) phase07(ctx context.Context) CheckResult {
 	// DRBD status on master node
 	masterIP := ""
 	if len(v.cfg.Nodes.Masters) > 0 {
 		masterIP = v.cfg.Nodes.Masters[0].IP
 	}
 	if masterIP == "" {
-		v.printResult("Phase 07", "DRBD Status", false, "No master node configured")
-		return
+		return CheckResult{"Phase 07", "DRBD Status", false, "No master node configured"}
 	}
 	out, _, _, err := v.ssh.RunCommand(ctx, masterIP, "drbdadm status")
 	pass := err == nil && (strings.Contains(out, "Primary") || strings.Contains(out, "Secondary") || strings.Contains(out, "UpToDate"))
-	v.printResult("Phase 07", "DRBD Status", pass, "")
+	return CheckResult{"Phase 07", "DRBD Status", pass, ""}
 }
