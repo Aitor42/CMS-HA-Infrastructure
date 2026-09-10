@@ -145,8 +145,13 @@ type NodeSpec struct {
 	DRBDDiskGB   int
 }
 
-// Load loads the configuration from the given path.
+// Load loads the configuration from the given path using default age key location.
 func Load(path string) (*Config, error) {
+	return LoadWithKey(path, "")
+}
+
+// LoadWithKey loads configuration from the given path using a specified age key file.
+func LoadWithKey(path string, keyPath string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	
@@ -162,23 +167,37 @@ func Load(path string) (*Config, error) {
 	c.VM.StorageDir = ExpandPath(c.VM.StorageDir)
 	c.SSH.PrivateKey = ExpandPath(c.SSH.PrivateKey)
 	
-	defaultKeyPath := ExpandPath("${HOME}/.config/cms-ha/age.key")
-	if _, err := os.Stat(defaultKeyPath); err == nil {
+	resolvedKeyPath := keyPath
+	if resolvedKeyPath == "" {
+		resolvedKeyPath = ExpandPath("${HOME}/.config/cms-ha/age.key")
+	} else {
+		resolvedKeyPath = ExpandPath(resolvedKeyPath)
+	}
+
+	hasEncrypted := IsEncrypted(c.Database.Password) ||
+		IsEncrypted(c.Database.RootPassword) ||
+		IsEncrypted(c.PKI.ProvisionerPassword)
+
+	if hasEncrypted {
+		if _, err := os.Stat(resolvedKeyPath); err != nil {
+			return nil, fmt.Errorf("configuration contains encrypted fields but key file %s does not exist: %w", resolvedKeyPath, err)
+		}
+
 		var err error
 		if IsEncrypted(c.Database.Password) {
-			c.Database.Password, err = DecryptValue(c.Database.Password, defaultKeyPath)
+			c.Database.Password, err = DecryptValue(c.Database.Password, resolvedKeyPath)
 			if err != nil {
 				return nil, fmt.Errorf("decrypt db password: %w", err)
 			}
 		}
 		if IsEncrypted(c.Database.RootPassword) {
-			c.Database.RootPassword, err = DecryptValue(c.Database.RootPassword, defaultKeyPath)
+			c.Database.RootPassword, err = DecryptValue(c.Database.RootPassword, resolvedKeyPath)
 			if err != nil {
 				return nil, fmt.Errorf("decrypt db root password: %w", err)
 			}
 		}
 		if IsEncrypted(c.PKI.ProvisionerPassword) {
-			c.PKI.ProvisionerPassword, err = DecryptValue(c.PKI.ProvisionerPassword, defaultKeyPath)
+			c.PKI.ProvisionerPassword, err = DecryptValue(c.PKI.ProvisionerPassword, resolvedKeyPath)
 			if err != nil {
 				return nil, fmt.Errorf("decrypt pki provisioner password: %w", err)
 			}

@@ -157,13 +157,20 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			return fmt.Errorf("failed to read network template %s: %w", nd.tmplPath, err)
 		}
 
-		tmpFile := filepath.Join(os.TempDir(), nd.name+"-net.xml")
-		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+		tmpFile, err := os.CreateTemp("", nd.name+"-net-*.xml")
+		if err != nil {
+			return fmt.Errorf("failed to create temp file for network XML: %w", err)
+		}
+		tmpPath := tmpFile.Name()
+		if _, err := tmpFile.Write(content); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpPath)
 			return fmt.Errorf("failed to write network XML: %w", err)
 		}
-		defer os.Remove(tmpFile)
+		tmpFile.Close()
+		defer os.Remove(tmpPath)
 
-		if err := p.lv.NetDefine(ctx, tmpFile); err != nil {
+		if err := p.lv.NetDefine(ctx, tmpPath); err != nil {
 			return fmt.Errorf("failed to define network %s: %w", nd.name, err)
 		}
 		if err := p.lv.NetStart(ctx, nd.name); err != nil {

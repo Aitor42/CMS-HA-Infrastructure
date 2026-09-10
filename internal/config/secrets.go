@@ -153,7 +153,7 @@ func EncryptConfig(configPath, publicKey string) error {
 		return fmt.Errorf("failed to encode yaml: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(configPath, buf.Bytes(), 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
@@ -162,14 +162,8 @@ func EncryptConfig(configPath, publicKey string) error {
 
 // DecryptConfig reads the config with encrypted fields, decrypts them, and returns Config.
 func DecryptConfig(configPath, keyPath string) (*Config, error) {
-	// The Load function automatically detects encrypted values and decrypts them if a key file exists.
-	// For testing with an arbitrary keyPath, we might need a custom loader or temporarily set the HOME env.
-	// We'll proxy to Load and ensure default behavior works.
-	oldHome := os.Getenv("HOME")
-	if keyPath != "" && keyPath != os.ExpandEnv("${HOME}/.config/cms-ha/age.key") {
-		// Temporary hack to inject custom key path for DecryptConfig
-		// Realistically, the requirement just said to return Config and we do that.
+	if keyPath == "" {
+		return Load(configPath)
 	}
-	_ = oldHome
-	return Load(configPath)
+	return LoadWithKey(configPath, keyPath)
 }

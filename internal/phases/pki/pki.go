@@ -2,6 +2,8 @@ package pki
 
 import (
 	"context"
+	crypto_rand "crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -53,17 +55,28 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	caPass := p.cfg.PKI.ProvisionerPassword
 	if caPass == "" {
-		caPass = "StepCA-Pr0v1s10ner!"
+		b := make([]byte, 16)
+		if _, err := crypto_rand.Read(b); err == nil {
+			caPass = hex.EncodeToString(b)
+		} else {
+			caPass = "StepCA-Pr0v1s10ner!"
+		}
 	}
 	caDomain := p.cfg.PKI.Domain
 	if caDomain == "" {
 		caDomain = "ca.internal.local"
 	}
 
+	// Prepare step directory and write password file securely with 0600 permissions
+	p.pool.RunCommand(ctx, jumpIP, "mkdir -p /root/.step && chmod 700 /root/.step")
+	if err := p.pool.CopyContent(ctx, jumpIP, []byte(caPass+"\n"), "/root/.step/password.txt", 0600); err != nil {
+		return fmt.Errorf("failed to upload CA password: %w", err)
+	}
+
 	initCmd := fmt.Sprintf(`export STEPPATH=/root/.step && \
 step ca init --name="CMS Local CA" --dns="%s,%s" \
---address=":%d" --provisioner="admin" --password-file=<(echo "%s") --with-ca-url="https://%s:%d"`,
-		caDomain, jumpIP, caPort, caPass, jumpIP, caPort)
+--address=":%d" --provisioner="admin" --password-file=/root/.step/password.txt --with-ca-url="https://%s:%d"`,
+		caDomain, jumpIP, caPort, jumpIP, caPort)
 
 	// Run initialization (ignore if already initialized)
 	p.pool.RunCommand(ctx, jumpIP, initCmd)
@@ -84,8 +97,6 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload && systemctl enable --now step-ca`
 
-	// Provide password file
-	p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("echo '%s' > /root/.step/password.txt", caPass))
 	p.pool.RunCommand(ctx, jumpIP, serviceCmd)
 
 	logging.Info("Waiting for CA health endpoint...")

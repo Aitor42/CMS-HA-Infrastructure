@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -98,11 +99,15 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Waiting for all nodes to be Ready...")
+	expectedCount := fmt.Sprintf("%d", len(p.cfg.Nodes.Masters)+len(p.cfg.Nodes.Workers))
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _ := p.pool.RunScript(ctx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep Ready | wc -l")
+		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep -c Ready")
+		if err != nil {
+			return err
+		}
 		count := strings.TrimSpace(out)
-		if count != "4" { // 2 masters + 2 workers
-			return fmt.Errorf("expected 4 Ready nodes, got %s", count)
+		if count != expectedCount {
+			return fmt.Errorf("expected %s Ready nodes, got %s", expectedCount, count)
 		}
 		return nil
 	})
@@ -152,7 +157,11 @@ func (p *Phase) Run(ctx context.Context) error {
 			}
 		}
 		
-		if err := p.pool.CopyContent(ctx, master1.IP, []byte(cfgContent), fmt.Sprintf("%s/%s", manifestsDir, mFile), 0644); err != nil {
+		perm := os.FileMode(0644)
+		if mFile == "mariadb-secret.yaml" {
+			perm = 0600
+		}
+		if err := p.pool.CopyContent(ctx, master1.IP, []byte(cfgContent), fmt.Sprintf("%s/%s", manifestsDir, mFile), perm); err != nil {
 			return fmt.Errorf("failed to copy manifest %s: %w", mFile, err)
 		}
 	}

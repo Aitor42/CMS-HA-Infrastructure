@@ -3,8 +3,11 @@ package root
 import (
     "fmt"
     "os"
+    "strings"
+
     "github.com/spf13/cobra"
     "github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+    "github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 )
 
 var secretsCmd = &cobra.Command{
@@ -18,11 +21,18 @@ func init() {
     encryptCmd := &cobra.Command{
         Use: "encrypt",
         Run: func(cmd *cobra.Command, args []string) {
-            keyPath, _ := cmd.Flags().GetString("key")
-            if err := config.EncryptConfig(configPath, keyPath); err != nil { handleError(err) }
+            keyInput, _ := cmd.Flags().GetString("key")
+            pubKey := strings.TrimSpace(keyInput)
+            if keyInput != "" {
+                if data, err := os.ReadFile(keyInput); err == nil {
+                    pubKey = strings.TrimSpace(string(data))
+                }
+            }
+            if err := config.EncryptConfig(configPath, pubKey); err != nil { handleError(err); return }
+            logging.Success("Configuration file %s encrypted successfully", configPath)
         },
     }
-    encryptCmd.Flags().String("key", "", "Public key path")
+    encryptCmd.Flags().String("key", "", "Public key or path to public key file")
     secretsCmd.AddCommand(encryptCmd)
 
     decryptCmd := &cobra.Command{
@@ -31,7 +41,9 @@ func init() {
             keyPath, _ := cmd.Flags().GetString("key")
             decrypted, err := config.DecryptConfig(configPath, keyPath)
             if err != nil { handleError(err); return }
-            fmt.Printf("%+v\n", decrypted)
+            logging.Success("Configuration file %s decrypted successfully (validated %d node definitions)", configPath, len(decrypted.AllNodes()))
+            fmt.Printf("Database: %s (user: %s, password: [MASKED])\n", decrypted.Database.Name, decrypted.Database.User)
+            fmt.Printf("PKI Domain: %s (provisioner: [CONFIGURED])\n", decrypted.PKI.Domain)
         },
     }
     decryptCmd.Flags().String("key", "", "Private key path")
@@ -42,10 +54,16 @@ func init() {
         Run: func(cmd *cobra.Command, args []string) {
             pub, priv, err := config.GenerateKey()
             if err != nil { handleError(err); return }
-            fmt.Printf("Public Key: %s\nPrivate Key: %s\n", pub, priv)
-            os.WriteFile("public.key", []byte(pub), 0644)
-            os.WriteFile("private.key", []byte(priv), 0600)
-            fmt.Println("Keys saved to public.key and private.key")
+            if err := os.WriteFile("public.key", []byte(pub), 0644); err != nil {
+                handleError(fmt.Errorf("failed to write public key: %w", err))
+                return
+            }
+            if err := os.WriteFile("private.key", []byte(priv), 0600); err != nil {
+                handleError(fmt.Errorf("failed to write private key: %w", err))
+                return
+            }
+            fmt.Printf("Public Key: %s\n", pub)
+            logging.Success("Keys saved securely to public.key (0644) and private.key (0600)")
         },
     }
     secretsCmd.AddCommand(genKeyCmd)
