@@ -76,7 +76,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	for _, ip := range []string{master1.IP, master2.IP} {
-		if err := p.pool.CopyContent(ctx, ip, []byte(buf.String()), "/etc/drbd.d/cms-data.res", 0644); err != nil {
+		if err := p.pool.CopyContent(ctx, ip, []byte(buf.String()), "/etc/drbd.d/cms_data.res", 0644); err != nil {
 			return fmt.Errorf("failed to copy DRBD config to %s: %w", ip, err)
 		}
 	}
@@ -84,8 +84,8 @@ func (p *Phase) Run(ctx context.Context) error {
 	logging.Info("Initializing DRBD metadata...")
 	initCmds := []string{
 		"modprobe drbd || true",
-		"drbdadm create-md cms-data --force || true",
-		"drbdadm up cms-data || true",
+		"drbdadm create-md cms_data --force || true",
+		"drbdadm up cms_data || true",
 	}
 	
 	for _, ip := range []string{master1.IP, master2.IP} {
@@ -95,14 +95,14 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Promoting Master 1 to Primary...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms-data --force || true")
+	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms_data --force || true")
 	if err != nil {
 		logging.Warn("Primary promotion output: %v", err)
 	}
 	
 	logging.Info("Waiting for DRBD replication to start/sync...")
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm status cms-data")
+		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm status cms_data")
 		if err != nil {
 			return err
 		}
@@ -147,6 +147,33 @@ fi
 		if err := p.pool.CopyContent(ctx, ip, []byte(scriptContent), "/usr/local/bin/drbd-failover.sh", 0755); err != nil {
 			return fmt.Errorf("failed to deploy failover script to %s: %w", ip, err)
 		}
+	}
+
+	logging.Info("Deploying DRBD boot-time service and tmpfiles on Master 1...")
+	primaryService := `[Unit]
+Description=Promote DRBD cms_data to Primary on master1
+After=drbd.service network-online.target
+Wants=drbd.service network-online.target
+Before=k3s.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "drbdadm up all 2>/dev/null; sleep 3; drbdadm primary cms_data 2>/dev/null || true"
+ExecStartPost=/bin/bash -c "drbdadm status 2>/dev/null || true"
+
+[Install]
+WantedBy=multi-user.target
+`
+	if err := p.pool.CopyContent(ctx, master1.IP, []byte(primaryService), "/etc/systemd/system/drbd-cms-primary.service", 0644); err != nil {
+		logging.Warn("Failed to upload drbd-cms-primary.service: %v", err)
+	} else {
+		p.pool.RunCommand(ctx, master1.IP, "systemctl daemon-reload && systemctl enable drbd-cms-primary.service")
+	}
+
+	tmpfilesContent := "d /mnt/data 0755 root root -\nd /mnt/data/mariadb 0755 999 999 -\n"
+	if err := p.pool.CopyContent(ctx, master1.IP, []byte(tmpfilesContent), "/etc/tmpfiles.d/mariadb-datadir.conf", 0644); err != nil {
+		logging.Warn("Failed to upload mariadb-datadir.conf: %v", err)
 	}
 	
 	logging.Success("DRBD Setup completed successfully.")
