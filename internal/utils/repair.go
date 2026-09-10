@@ -11,25 +11,27 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// SyncClocks sets date on all VMs to host time and restarts timesyncd.
+// SyncClocks sets date on all VMs to host time and restarts chrony / timesyncd.
 func SyncClocks(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	timer := logging.PhaseStart("Sync Clocks")
 	defer timer.End()
 
-	now := time.Now().UTC().Format("2006-01-02 15:04:05")
-	cmd := fmt.Sprintf("date -s '%s' && systemctl restart systemd-timesyncd", now)
+	now := time.Now().Unix()
+	cmd := fmt.Sprintf("date -s @%d && (systemctl restart chrony 2>/dev/null && chronyc makestep 2>/dev/null || systemctl restart systemd-timesyncd 2>/dev/null || true)", now)
 
-	ips := cfg.AllNodeIPs()
-
-	for _, ip := range ips {
-		if ip == "" {
-			continue
+	var validIPs []string
+	for _, ip := range cfg.AllNodeIPs() {
+		if ip != "" {
+			validIPs = append(validIPs, ip)
 		}
-		_, _, _, err := s.RunCommand(ctx, ip, cmd)
-		if err != nil {
-			logging.Warn("Failed to sync clock on %s: %v", ip, err)
+	}
+
+	results := s.RunParallel(ctx, validIPs, cmd)
+	for _, res := range results {
+		if res.Err != nil {
+			logging.Warn("Failed to sync clock on %s: %v", res.Host, res.Err)
 		} else {
-			logging.Info("Synced clock on %s", ip)
+			logging.Info("Synced clock on %s", res.Host)
 		}
 	}
 
@@ -43,45 +45,54 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 
 	SyncClocks(ctx, cfg, s)
 
-	var nodes []string
+	// Clean up stopped / hung k3s processes across all cluster nodes concurrently
+	var clusterIPs []string
 	for _, n := range cfg.Nodes.Masters {
-		nodes = append(nodes, n.IP)
+		if n.IP != "" {
+			clusterIPs = append(clusterIPs, n.IP)
+		}
 	}
 	for _, n := range cfg.Nodes.Workers {
-		nodes = append(nodes, n.IP)
-	}
-
-	// Stop k3s
-	for _, ip := range nodes {
-		if ip == "" {
-			continue
+		if n.IP != "" {
+			clusterIPs = append(clusterIPs, n.IP)
 		}
-		s.RunCommand(ctx, ip, "systemctl stop k3s k3s-agent || true")
-		s.RunCommand(ctx, ip, "killall containerd || true")
 	}
 
-	if len(cfg.Nodes.Masters) >= 2 {
-		// Restart master1
-		logging.Info("Restarting Master 1...")
-		s.RunCommand(ctx, cfg.Nodes.Masters[0].IP, "systemctl start k3s")
-		time.Sleep(15 * time.Second)
+	logging.Info("Stopping and cleaning hung K3s processes across cluster nodes...")
+	cleanupCmd := "systemctl stop k3s k3s-agent 2>/dev/null || true; killall -9 k3s k3s-server k3s-agent 2>/dev/null || true"
+	s.RunParallel(ctx, clusterIPs, cleanupCmd)
 
-		// Restart master2
-		logging.Info("Restarting Master 2...")
-		s.RunCommand(ctx, cfg.Nodes.Masters[1].IP, "systemctl start k3s")
-		time.Sleep(10 * time.Second)
+	// Start K3s masters concurrently to establish quorum
+	var masterIPs []string
+	for _, m := range cfg.Nodes.Masters {
+		if m.IP != "" {
+			masterIPs = append(masterIPs, m.IP)
+		}
+	}
+	if len(masterIPs) > 0 {
+		logging.Info("Starting K3s on master nodes in parallel to reach quorum...")
+		s.RunParallel(ctx, masterIPs, "systemctl start k3s")
+		time.Sleep(5 * time.Second)
 	}
 
-	// Restart workers
-	logging.Info("Restarting Workers...")
+	// Start K3s agents on workers concurrently
+	var workerIPs []string
 	for _, w := range cfg.Nodes.Workers {
-		s.RunCommand(ctx, w.IP, "systemctl start k3s-agent")
+		if w.IP != "" {
+			workerIPs = append(workerIPs, w.IP)
+		}
 	}
-	time.Sleep(20 * time.Second)
+	if len(workerIPs) > 0 {
+		logging.Info("Starting K3s agents on worker nodes...")
+		s.RunParallel(ctx, workerIPs, "systemctl start k3s-agent")
+		time.Sleep(5 * time.Second)
+	}
 
 	// Verify
-	if len(cfg.Nodes.Masters) > 0 {
-		out, _, _, err := s.RunCommand(ctx, cfg.Nodes.Masters[0].IP, "kubectl get nodes")
+	if len(masterIPs) > 0 {
+		logging.Info("Waiting for cluster stability and verifying Kubernetes status...")
+		time.Sleep(5 * time.Second)
+		out, _, _, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes")
 		if err != nil {
 			logging.Error("Failed to verify nodes: %v", err)
 			return err
@@ -89,7 +100,7 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 		if strings.Contains(out, "NotReady") {
 			logging.Warn("Some nodes are still NotReady")
 		} else {
-			logging.Success("All nodes are Ready")
+			logging.Success("All nodes are Ready:\n%s", out)
 		}
 	}
 

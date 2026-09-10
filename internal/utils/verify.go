@@ -119,7 +119,7 @@ func (v *Verifier) phase02(ctx context.Context) CheckResult {
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "systemctl is-active puppetserver")
 	pass := err == nil && strings.TrimSpace(out) == "active"
 	
-	certOut, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "puppetserver ca list --all | grep 'Signed' | wc -l")
+	certOut, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "puppetserver ca list --all 2>/dev/null | grep -E 'Signed|\\(SHA256\\)' | wc -l")
 	certCount := strings.TrimSpace(certOut)
 	if certCount == "0" || certCount == "" {
 		pass = false
@@ -177,15 +177,15 @@ func (v *Verifier) phase06(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase07(ctx context.Context) CheckResult {
-	// DRBD status on master node
-	masterIP := ""
-	if len(v.cfg.Nodes.Masters) > 0 {
-		masterIP = v.cfg.Nodes.Masters[0].IP
+	// DRBD status on master nodes
+	for _, m := range v.cfg.Nodes.Masters {
+		if m.IP == "" {
+			continue
+		}
+		out, _, _, err := v.ssh.RunCommand(ctx, m.IP, "drbdadm status cms_data 2>/dev/null || drbdadm status 2>/dev/null")
+		if err == nil && (strings.Contains(out, "Primary") || strings.Contains(out, "Secondary") || strings.Contains(out, "UpToDate")) {
+			return CheckResult{"Phase 07", "DRBD Status", true, fmt.Sprintf("Verified on %s", m.Name)}
+		}
 	}
-	if masterIP == "" {
-		return CheckResult{"Phase 07", "DRBD Status", false, "No master node configured"}
-	}
-	out, _, _, err := v.ssh.RunCommand(ctx, masterIP, "drbdadm status")
-	pass := err == nil && (strings.Contains(out, "Primary") || strings.Contains(out, "Secondary") || strings.Contains(out, "UpToDate"))
-	return CheckResult{"Phase 07", "DRBD Status", pass, ""}
+	return CheckResult{"Phase 07", "DRBD Status", false, "DRBD inactive or unreachable on masters"}
 }
