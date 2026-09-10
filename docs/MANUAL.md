@@ -47,33 +47,31 @@ newgrp libvirt
 Due to the **27 GB RAM limit**, launching all 14 VMs simultaneously with the Ubuntu 24.04 installer's minimum requirements (3-4 GB per node) would cause the host to run out of memory (OOM). Therefore, the initial deployment is performed **interactively in batches**.
 
 ### Step 1: Provision the Jumpstart Node and Configure Cobbler
-On the hypervisor terminal, run the main script to create virtual networks and install the central provisioning node (`jumpstart`):
+On the hypervisor terminal, run the Go CLI (or legacy scripts) to create virtual networks and install the central provisioning node (`jumpstart`):
 ```bash
 # 1. Create networks and launch the jumpstart VM
-bash scripts/00_init_vms.sh --jumpstart-only
+./cms-ha phase init-vms --jumpstart-only
+# (Legacy v1: bash scripts/00_init_vms.sh --jumpstart-only)
 
-# 2. Wait until Jumpstart is reachable via SSH
-# (The script below verifies connectivity automatically)
-```
-Once Jumpstart is powered on and responds to ping/SSH, run the Cobbler and NFS setup script:
-```bash
-# 3. Configure Cobbler server, DHCP, and NFS
-bash scripts/01_setup_cobbler.sh
+# 2. Configure Cobbler server, DHCP, and NFS
+./cms-ha phase setup-cobbler
+# (Legacy v1: bash scripts/01_setup_cobbler.sh)
 
-# 4. Register client node templates and profiles in Cobbler
-bash scripts/02_register_cobbler_nodes.sh
+# 3. Register client node templates and profiles in Cobbler
+./cms-ha phase register-nodes
+# (Legacy v1: bash scripts/02_register_cobbler_nodes.sh)
 ```
 
 ### Step 2: Sequential Installation and RAM Adjustment (Batches)
 
-Run the interactive script that automates the creation and installation of client nodes in 5 sequential batches:
+Run the command that automates the creation and installation of client nodes in sequential batches:
 ```bash
-bash scripts/utils/install_by_batches.sh
+./cms-ha vm install-batches
+# (Legacy v1: bash scripts/utils/install_by_batches.sh)
 ```
 **Instructions during execution:**
-*   The script creates VMs for each batch with high RAM (3-4 GB) so the Ubuntu installer does not suffer OOM.
-*   Once a batch's VMs finish installation and boot the OS for the first time, **press [ENTER]** in the script terminal.
-*   The script will shut down the batch VMs, reduce their RAM to production profile (512 MB - 1024 MB), and restart them before moving to the next batch.
+*   The orchestrator creates VMs for each batch with high RAM (3-4 GB) so the Ubuntu installer does not suffer OOM.
+*   Once a batch's VMs finish installation and boot the OS, the command shuts down the batch VMs, reduces their RAM to production profile (512 MB - 1024 MB), and restarts them before moving to the next batch.
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
 
@@ -81,9 +79,11 @@ The following screenshot shows the automated PXE network installation process vi
 
 
 ### Step 3: Service and Application Deployment
-Once all VMs are installed, running, and RAM-reduced to optimal production values, run the final orchestrator to install Puppet, K3s cluster, Nginx load balancer, per-node firewalling, and DRBD replication:
+Once all VMs are installed, running, and RAM-reduced to optimal production values, run the orchestrator to install Puppet, K3s cluster, Nginx load balancer, per-node firewalling, and DRBD replication:
 ```bash
-./deploy_all.sh --skip-vm-create
+./cms-ha deploy --skip-vm-create
+# (Or Makefile: make deploy-resume)
+# (Legacy v1: ./deploy_all.sh --skip-vm-create)
 ```
 This script handles:
 1. Installing Puppet Agent and configuring the Puppet CA on all nodes.
@@ -117,10 +117,12 @@ Send an HTTPS request to the load balancer to verify the CMS is responding:
 curl -sk https://192.168.20.100/ | grep -i "wordpress"
 ```
 
-### 3.4 Full Infrastructure Health Check (`verify_all.sh`)
-To perform a comprehensive, automated validation of all infrastructure phases, run the verification script on the hypervisor:
+### 3.4 Full Infrastructure Health Check
+To perform a comprehensive, automated validation of all infrastructure phases, run the verification command on the hypervisor:
 ```bash
-bash scripts/utils/verify_all.sh
+./cms-ha verify
+# (Or Makefile: make verify)
+# (Legacy v1: bash scripts/utils/verify_all.sh)
 ```
 
 Below is the expected output of a successful run where all services and configurations are operational:
@@ -270,8 +272,12 @@ The `internal-monitor` node centralises metrics collection and visualisation:
 
 **Automated backups** run daily at 02:00 UTC via a Kubernetes CronJob (`kubernetes/mariadb-backup-cronjob.yaml`). Backups are stored at `/mnt/data/mariadb-backups` on the DRBD-replicated volume with 7-day retention.
 
-To perform a manual backup from the internal network:
+To perform a manual backup:
 ```bash
+# Via Go CLI:
+./cms-ha backup db
+
+# Or direct command from the internal network:
 mysqldump -h 192.168.10.11 -P 30306 -u root -pmysqlrootpass wordpress | gzip > backup_wordpress.sql.gz
 ```
 
@@ -313,6 +319,13 @@ The CMS infrastructure (WordPress, Nginx, MariaDB, K3s, Monitoring) will continu
 ### 7.3 Automated Failover Testing
 Run the chaos engineering test suite to validate HA behaviour:
 ```bash
+# Via Go CLI:
+./cms-ha test failover
+
+# (Optional: inspect state without auto-restoring)
+./cms-ha test failover --skip-restore
+
+# Legacy v1:
 bash scripts/utils/test_failover.sh
 ```
 This tests DRBD master failover, CMS frontend failover, and K3s worker failover with timing metrics.
@@ -323,19 +336,25 @@ This tests DRBD master failover, CMS frontend failover, and K3s worker failover 
 
 This section describes the procedure to **resume the lab** when VMs have been paused (`virsh suspend`) or shut down (`virsh shutdown` / `shut off`). All configurations in this section were applied permanently on **10 June 2026** and activate automatically on future boots without manual intervention.
 
-### 8.1 Quick Procedure (automated script)
+### 8.1 Quick Procedure (automated CLI)
 
 From the hypervisor server, run in order:
 
 ```bash
 # 1. Start all VMs (paused → resume, stopped → start)
-bash scripts/start_all_vms.sh
+./cms-ha vm start
+# (Legacy v1: bash scripts/start_all_vms.sh)
 
 # 2. Wait ~60s for K3s nodes to become ready, then repair the cluster
-bash scripts/utils/repair_paused_kubernetes.sh
+./cms-ha repair k8s
+# (Legacy v1: bash scripts/utils/repair_paused_kubernetes.sh)
 
-# 3. Verify full infrastructure status
-bash scripts/utils/verify_all.sh
+# 3. Synchronise clocks across all nodes
+./cms-ha repair clocks
+
+# 4. Verify full infrastructure status
+./cms-ha verify
+# (Legacy v1: bash scripts/utils/verify_all.sh)
 ```
 
 ### 8.2 Detailed Procedure (step-by-step)

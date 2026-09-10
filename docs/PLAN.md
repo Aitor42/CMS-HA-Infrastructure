@@ -32,7 +32,7 @@ This project covers the **fully automated design, implementation, and provisioni
 
 The network is segmented into two subnets (`internal` and `main`) connected by a UFW router/firewall. The Jumpstart node (Cobbler + Puppet Server) has dual-homed presence in both networks to provision all nodes.
 
-The entire deployment is executed from a **single entry point**: `deploy_all.sh`.
+The entire deployment is executed from a **single entry point**: `./cms-ha deploy` (or `deploy_all.sh` in the legacy v1 scripts).
 
 ---
 
