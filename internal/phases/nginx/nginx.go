@@ -3,6 +3,7 @@ package nginx
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
@@ -61,10 +62,13 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 	}
 	
-	logging.Info("Testing HTTPS reachability...")
-	// Assuming LB is reachable internally from jumpstart/wherever we run this
-	// But let's just do it locally via SSH to jumpstart or from host
-	// Using runcommand on a node or local
+	logging.Info("Testing HTTPS reachability on Load Balancer...")
+	out, _, _, err := p.pool.RunCommand(ctx, p.cfg.Nodes.LB.IP, "curl -skI https://127.0.0.1/ | grep 'HTTP/'")
+	if err != nil || !strings.Contains(out, "HTTP/") {
+		logging.Warn("HTTPS check on LB reported: WordPress may still be initialising")
+	} else {
+		logging.Success("WordPress reachable via HTTPS on Load Balancer")
+	}
 	
 	logging.Success("NGINX & WordPress Setup completed successfully.")
 	return nil

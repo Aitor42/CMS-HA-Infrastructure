@@ -50,7 +50,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	master2 := p.cfg.Nodes.Masters[1]
 	
 	logging.Info("Installing K3s on Master 1 (cluster-init)...")
-	initCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"server --cluster-init --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP)
+	initCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --cluster-init --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP)
 	if _, _, _, err := p.pool.RunCommand(ctx, master1.IP, initCmd); err != nil {
 		return fmt.Errorf("failed to init k3s on master1: %w", err)
 	}
@@ -79,13 +79,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Installing K3s on Master 2 (join)...")
-	joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token %s --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, token, master2.IP)
+	joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token %s --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, token, master2.IP)
 	if _, _, _, err := p.pool.RunCommand(ctx, master2.IP, joinCmd); err != nil {
 		return fmt.Errorf("failed to join k3s on master2: %w", err)
 	}
 	
 	logging.Info("Installing K3s Agents on Workers...")
-	agentJoinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | K3S_URL=https://%s:6443 K3S_TOKEN=%s INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\" sh -", master1.IP, token)
+	agentJoinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" K3S_URL=https://%s:6443 K3S_TOKEN=%s INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\" sh -", master1.IP, token)
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
 		workerIPs = append(workerIPs, w.IP)
