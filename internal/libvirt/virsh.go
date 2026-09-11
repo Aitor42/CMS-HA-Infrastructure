@@ -199,7 +199,7 @@ func (c *Client) ListRunning(ctx context.Context) ([]string, error) {
 	
 	var running []string
 	for _, d := range domains {
-		if d.State == "running" {
+		if strings.EqualFold(strings.TrimSpace(d.State), "running") {
 			running = append(running, d.Name)
 		}
 	}

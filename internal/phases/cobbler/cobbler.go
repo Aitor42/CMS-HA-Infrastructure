@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
@@ -273,11 +274,19 @@ cobbler sync`,
 
 func (p *Phase) verifyCobbler(ctx context.Context, jumpIP string) error {
 	services := []string{"cobblerd", "apache2", "tftpd-hpa", "isc-dhcp-server", "named", "nfs-kernel-server"}
+	var failed []string
 	for _, svc := range services {
-		_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("systemctl is-active --quiet %s", svc))
-		if code != 0 {
-			logging.Warn("Service %s is not active", svc)
+		err := retry.Poll(ctx, retry.Config{MaxAttempts: 5, Interval: 1 * time.Second}, func() (bool, error) {
+			_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("systemctl is-active --quiet %s", svc))
+			return code == 0, nil
+		})
+		if err != nil {
+			failed = append(failed, svc)
+			logging.Warn("Service %s is not active after wait", svc)
 		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("cobbler verification failed: inactive services: %s", strings.Join(failed, ", "))
 	}
 	return nil
 }

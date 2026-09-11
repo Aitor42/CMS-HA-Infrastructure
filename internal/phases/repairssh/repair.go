@@ -29,7 +29,8 @@ func (p *Phase) Description() string {
 }
 
 func (p *Phase) Run(ctx context.Context) error {
-	logging.PhaseStart(p.Name())
+	timer := logging.PhaseStart(p.Name())
+	defer timer.End()
 	
 	allNodes := p.cfg.AllNodes()
 	allIPs := p.cfg.AllNodeIPs()
@@ -254,7 +255,7 @@ func (p *Phase) cleanPuppetCA(ctx context.Context, nodes []config.NodeSpec) erro
 			continue
 		}
 		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
-			pool.RunCommand(c, nodeIP, "find /etc/puppet /etc/puppetlabs -name *.pem -delete 2>/dev/null || true")
+			pool.RunCommand(c, nodeIP, "find /etc/puppet /etc/puppetlabs -name '*.pem' -delete 2>/dev/null || true")
 			return nil
 		}
 	}
