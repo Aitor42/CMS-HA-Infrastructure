@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -112,49 +113,55 @@ func ShrinkVMRAM(ctx context.Context, cfg *config.Config, l *libvirt.Client) err
 	return nil
 }
 
-// FixBootOrder modifies VM XML to ensure hd boots before network.
+// FixBootOrder modifies VM XML in parallel to ensure hd boots before network.
 func FixBootOrder(ctx context.Context, l *libvirt.Client, vmNames []string) error {
 	timer := logging.PhaseStart("Fix Boot Order")
 	defer timer.End()
 
+	var wg sync.WaitGroup
 	for _, vm := range vmNames {
-		exists := l.DomainExists(ctx, vm)
-		if !exists {
-			continue
-		}
-		
-		xml, err := l.DumpXML(ctx, vm)
-		if err != nil {
-			logging.Error("Failed to dump XML for %s: %v", vm, err)
-			continue
-		}
-
-		if strings.Contains(xml, "<boot dev='network'/>") && strings.Contains(xml, "<boot dev='hd'/>") {
-			xml = strings.Replace(xml, "<boot dev='network'/>", "", 1)
-			xml = strings.Replace(xml, "<boot dev='hd'/>", "<boot dev='hd'/>\n    <boot dev='network'/>", 1)
+		vmName := vm
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !l.DomainExists(ctx, vmName) {
+				return
+			}
 			
-			tmpFile, err := os.CreateTemp("", fmt.Sprintf("%s-boot-*.xml", vm))
+			xml, err := l.DumpXML(ctx, vmName)
 			if err != nil {
-				logging.Error("Failed to create temp XML for %s: %v", vm, err)
-				continue
+				logging.Error("Failed to dump XML for %s: %v", vmName, err)
+				return
 			}
-			tmpPath := tmpFile.Name()
-			if _, err := tmpFile.Write([]byte(xml)); err != nil {
-				tmpFile.Close()
-				os.Remove(tmpPath)
-				logging.Error("Failed to write updated XML for %s: %v", vm, err)
-				continue
-			}
-			tmpFile.Close()
 
-			if err := l.Define(ctx, tmpPath); err != nil {
-				logging.Error("Failed to define XML for %s: %v", vm, err)
-			} else {
-				logging.Success("Fixed boot order for %s (hd before network)", vm)
+			if strings.Contains(xml, "<boot dev='network'/>") && strings.Contains(xml, "<boot dev='hd'/>") {
+				xml = strings.Replace(xml, "<boot dev='network'/>", "", 1)
+				xml = strings.Replace(xml, "<boot dev='hd'/>", "<boot dev='hd'/>\n    <boot dev='network'/>", 1)
+				
+				tmpFile, err := os.CreateTemp("", fmt.Sprintf("%s-boot-*.xml", vmName))
+				if err != nil {
+					logging.Error("Failed to create temp XML for %s: %v", vmName, err)
+					return
+				}
+				tmpPath := tmpFile.Name()
+				defer os.Remove(tmpPath)
+
+				if _, err := tmpFile.Write([]byte(xml)); err != nil {
+					tmpFile.Close()
+					logging.Error("Failed to write updated XML for %s: %v", vmName, err)
+					return
+				}
+				tmpFile.Close()
+
+				if err := l.Define(ctx, tmpPath); err != nil {
+					logging.Error("Failed to define XML for %s: %v", vmName, err)
+				} else {
+					logging.Success("Fixed boot order for %s (hd before network)", vmName)
+				}
 			}
-			os.Remove(tmpPath)
-		}
+		}()
 	}
+	wg.Wait()
 	return nil
 }
 
@@ -221,30 +228,45 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			logging.Warn("Some VMs in batch %d timed out on SSH: %v", i+1, err)
 		}
 
-		// 3. Fix boot order and shrink RAM
+		// 3. Fix boot order in parallel and signal shutdown
+		var batchNamesList []string
 		for _, node := range batch {
-			FixBootOrder(ctx, l, []string{node.name})
-			l.Shutdown(ctx, node.name)
+			batchNamesList = append(batchNamesList, node.name)
+		}
+		_ = FixBootOrder(ctx, l, batchNamesList)
+
+		for _, node := range batch {
+			_ = l.Shutdown(ctx, node.name)
 		}
 
-		// Wait for all VMs in the batch to shut down gracefully before resizing
+		// Wait for all VMs in the batch to shut down concurrently
+		var shutdownWg sync.WaitGroup
 		for _, node := range batch {
-			for attempt := 0; attempt < 15; attempt++ {
-				state, _ := l.DomainState(ctx, node.name)
-				if state == "shut off" {
-					break
+			n := node
+			shutdownWg.Add(1)
+			go func() {
+				defer shutdownWg.Done()
+				for attempt := 0; attempt < 15; attempt++ {
+					state, _ := l.DomainState(ctx, n.name)
+					if state == "shut off" {
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(2 * time.Second):
+					}
 				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(2 * time.Second):
+				state, _ := l.DomainState(ctx, n.name)
+				if state != "shut off" {
+					logging.Warn("VM %s did not shut down gracefully; forcing stop", n.name)
+					_ = l.Destroy(ctx, n.name)
 				}
-			}
-			state, _ := l.DomainState(ctx, node.name)
-			if state != "shut off" {
-				logging.Warn("VM %s did not shut down gracefully; forcing stop", node.name)
-				l.Destroy(ctx, node.name)
-			}
+			}()
+		}
+		shutdownWg.Wait()
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		// Resize and restart all VMs in the batch with final RAM
