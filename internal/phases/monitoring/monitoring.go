@@ -42,7 +42,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	monitorIP := p.cfg.Nodes.Monitor.IP
 	
 	logging.Info("Running Puppet agent on Monitor node...")
-	_, _, exitCode, err := p.pool.RunCommand(ctx, monitorIP, "puppet agent -t")
+	_, _, exitCode, err := p.pool.RunCommand(ctx, monitorIP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	if exitCode != 0 && exitCode != 2 {
 		return fmt.Errorf("puppet agent failed on monitor node (exit code %d): %v", exitCode, err)
 	}
@@ -55,7 +55,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	exporterIPs = append(exporterIPs, p.cfg.Nodes.LB.IP)
 	exporterIPs = append(exporterIPs, p.cfg.Nodes.Router.IP)
 	
-	res := p.pool.RunParallel(ctx, exporterIPs, "puppet agent -t")
+	res := p.pool.RunParallel(ctx, exporterIPs, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	for _, r := range res {
 		if r.ExitCode != 0 && r.ExitCode != 2 {
 			logging.Warn("puppet agent failed on %s (exit code %d)", r.Host, r.ExitCode)

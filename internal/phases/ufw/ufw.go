@@ -95,7 +95,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	otherIPs = append(otherIPs, p.cfg.Nodes.LB.IP)
 	otherIPs = append(otherIPs, p.cfg.Nodes.Monitor.IP)
 	
-	res := p.pool.RunParallel(ctx, otherIPs, "puppet agent -t || [ $? -eq 2 ]")
+	res := p.pool.RunParallel(ctx, otherIPs, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	for _, r := range res {
 		if r.Err != nil {
 			logging.Warn("puppet agent failed on %s", r.Host)

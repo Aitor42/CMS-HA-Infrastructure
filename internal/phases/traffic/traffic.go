@@ -77,9 +77,17 @@ func (t *Traffic) Run(ctx context.Context) error {
 	if t.opts.TargetIP != "" {
 		baseURL = fmt.Sprintf("https://%s", t.opts.TargetIP)
 	} else if t.opts.Mode == "internal" {
-		baseURL = fmt.Sprintf("https://%s", getPrefix(t.cfg.Network.Internal.CIDR)+"20")
+		if len(t.cfg.Nodes.CMSFrontends) > 0 && t.cfg.Nodes.CMSFrontends[0].IP != "" {
+			baseURL = fmt.Sprintf("https://%s", t.cfg.Nodes.CMSFrontends[0].IP)
+		} else {
+			baseURL = fmt.Sprintf("https://%s", getPrefix(t.cfg.Network.Internal.CIDR)+"20")
+		}
 	} else {
-		baseURL = fmt.Sprintf("https://%s", getPrefix(t.cfg.Network.Main.CIDR)+"120") // Assuming LB IP
+		if t.cfg.Nodes.LB.IP != "" {
+			baseURL = fmt.Sprintf("https://%s", t.cfg.Nodes.LB.IP)
+		} else {
+			baseURL = fmt.Sprintf("https://%s", getPrefix(t.cfg.Network.Main.CIDR)+"100")
+		}
 	}
 	logging.Info("Target URL: %s", baseURL)
 
@@ -210,7 +218,11 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 
 					if err != nil {
 						atomic.AddInt64(&failCount, 1)
-						time.Sleep(20 * time.Millisecond)
+						select {
+						case <-stressCtx.Done():
+							return
+						case <-time.After(20 * time.Millisecond):
+						}
 					} else {
 						_ = resp.Body.Close()
 						if resp.StatusCode < 400 {
