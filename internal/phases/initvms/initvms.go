@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	crand "crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"math/big"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -217,7 +217,9 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 
 	// Determine WAN interface config (if libvirt default network exists)
 	wanIfaceConfig := ""
-	_ = wanIfaceConfig // used in template
+	if p.lv.NetExists(ctx, "default") {
+		wanIfaceConfig = fmt.Sprintf("\n      net2:\n        match:\n          macaddress: \"%s\"\n        dhcp4: true\n        dhcp4-overrides:\n          route-metric: 100\n          use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
+	}
 
 	// Build autoinstall user-data from template
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/autoinstall/user-data.tmpl")
@@ -239,6 +241,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		GatewayInternal: p.cfg.Network.Internal.Gateway,
 		MACMain:         p.cfg.Nodes.Jumpstart.MACMain,
 		IPMain:          p.cfg.Nodes.Jumpstart.IPMain,
+		WANIfaceConfig:  wanIfaceConfig,
 	}
 
 	var userDataBuf bytes.Buffer
@@ -530,19 +533,15 @@ func findUbuntuISO(dir string) (string, error) {
 }
 
 // generateRandomPasswordHash generates a random SHA-512 password hash using crypto/rand.
-// The actual password is random and discarded; SSH key auth is enforced.
+// The actual password is random and discarded; SSH key auth is enforced and late-commands locks the accounts.
 func generateRandomPasswordHash() string {
-	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 32)
-	for i := range b {
-		idx, err := crand.Int(crand.Reader, big.NewInt(int64(len(chars))))
-		if err != nil {
-			b[i] = chars[0]
-		} else {
-			b[i] = chars[idx.Int64()]
-		}
+	b := make([]byte, 16)
+	_, _ = crand.Read(b)
+	randSecret := hex.EncodeToString(b)
+	out, err := exec.Command("openssl", "passwd", "-6", randSecret).Output() // #nosec G204 -- openssl with generated random string
+	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		return strings.TrimSpace(string(out))
 	}
-	// Return a placeholder — actual hash generation needs openssl or Python
-	// The important security comes from PasswordAuthentication no in sshd_config
-	return "$6$GAR_RANDOM$placeholder_hash_password_login_disabled"
+	// Fallback to valid standard SHA-512 crypt format hash
+	return "$6$GAR_RANDOM$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
 }

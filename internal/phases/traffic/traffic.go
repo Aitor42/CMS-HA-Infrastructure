@@ -140,7 +140,7 @@ func (t *Traffic) Run(ctx context.Context) error {
 	// Phase 3: DB direct queries
 	if t.opts.WithDB {
 		logging.Info("Phase 3: Direct MariaDB SQL queries")
-		dbHost := getPrefix(t.cfg.Network.Internal.CIDR) + "10" // Assuming master1
+		dbHost := getPrefix(t.cfg.Network.Internal.CIDR) + "10" // Default fallback if no master node defined
 		if len(t.cfg.Nodes.Masters) > 0 && t.cfg.Nodes.Masters[0].IP != "" {
 			dbHost = t.cfg.Nodes.Masters[0].IP
 		}

@@ -3,6 +3,7 @@ package puppet
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -95,7 +96,15 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 }
 
 func (p *Phase) uploadPuppetCode(ctx context.Context, jumpstartIP string) error {
-	localPuppetDir := "puppet" // Assuming running from project root
+	localPuppetDir := "puppet"
+	if _, err := os.Stat(localPuppetDir); os.IsNotExist(err) {
+		for _, candidate := range []string{"../puppet", "../../puppet"} {
+			if _, err := os.Stat(candidate); err == nil {
+				localPuppetDir = candidate
+				break
+			}
+		}
+	}
 	remoteCodeDir := "/etc/puppetlabs/code/environments/production"
 
 	// Create directories

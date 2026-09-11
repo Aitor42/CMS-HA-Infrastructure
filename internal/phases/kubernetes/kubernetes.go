@@ -122,7 +122,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Applying Kubernetes Manifests...")
-	// We should extract manifests from embed and copy to master1
+	// Extract manifests from embed and copy to master1
 	manifestsDir := "/tmp/k3s-manifests"
 	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("mkdir -p %s", manifestsDir))
 	if err != nil {
