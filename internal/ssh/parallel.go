@@ -2,7 +2,9 @@ package ssh
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -92,10 +94,14 @@ func (p *Pool) WaitForAllSSH(ctx context.Context, hosts []string, timeout time.D
 	}
 
 	results := p.RunParallelFunc(ctx, tasks)
+	var failures []string
 	for _, res := range results {
 		if res.Err != nil {
-			return res.Err // Return on first error, although all finished
+			failures = append(failures, fmt.Sprintf("%s (%v)", res.Host, res.Err))
 		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("ssh wait failed for %d host(s): %s", len(failures), strings.Join(failures, "; "))
 	}
 	return nil
 }

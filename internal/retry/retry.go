@@ -17,6 +17,9 @@ type Config struct {
 
 // Do executes fn and retries it until it returns nil or the limits in cfg are reached.
 func Do(ctx context.Context, cfg Config, fn func() error) error {
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 1
+	}
 	if cfg.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)
@@ -57,6 +60,9 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 
 // Poll executes fn and retries until fn returns (true, nil) or the limits in cfg are reached.
 func Poll(ctx context.Context, cfg Config, fn func() (bool, error)) error {
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = 1
+	}
 	if cfg.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cfg.Timeout)

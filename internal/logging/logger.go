@@ -4,14 +4,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fatih/color"
 )
 
 var (
-	verbose bool
-	logger  *slog.Logger
+	verbose  atomic.Bool
+	loggerMu sync.RWMutex
+	logger   *slog.Logger
 )
 
 func init() {
@@ -20,7 +23,7 @@ func init() {
 
 // SetVerbose sets the verbosity level for logging.
 func SetVerbose(v bool) {
-	verbose = v
+	verbose.Store(v)
 	level := slog.LevelInfo
 	if v {
 		level = slog.LevelDebug
@@ -28,8 +31,11 @@ func SetVerbose(v bool) {
 	opts := &slog.HandlerOptions{
 		Level: level,
 	}
-	logger = slog.New(slog.NewTextHandler(os.Stdout, opts))
-	slog.SetDefault(logger)
+	l := slog.New(slog.NewTextHandler(os.Stdout, opts))
+	loggerMu.Lock()
+	logger = l
+	loggerMu.Unlock()
+	slog.SetDefault(l)
 }
 
 // FormatMsg formats a message if format arguments are provided.
@@ -40,12 +46,20 @@ func FormatMsg(msg string, args ...any) string {
 	return msg
 }
 
+func getLogger() *slog.Logger {
+	loggerMu.RLock()
+	defer loggerMu.RUnlock()
+	return logger
+}
+
 // Info prints an info message in cyan.
 func Info(msg string, args ...any) {
 	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.CyanString("ℹ ") + formatted + "\n")
-	if verbose {
-		logger.Info(formatted)
+	if verbose.Load() {
+		if l := getLogger(); l != nil {
+			l.Info(formatted)
+		}
 	}
 }
 
@@ -53,8 +67,10 @@ func Info(msg string, args ...any) {
 func Success(msg string, args ...any) {
 	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.GreenString("✓ ") + formatted + "\n")
-	if verbose {
-		logger.Info(formatted)
+	if verbose.Load() {
+		if l := getLogger(); l != nil {
+			l.Info(formatted)
+		}
 	}
 }
 
@@ -62,8 +78,10 @@ func Success(msg string, args ...any) {
 func Warn(msg string, args ...any) {
 	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.YellowString("⚠ ") + formatted + "\n")
-	if verbose {
-		logger.Warn(formatted)
+	if verbose.Load() {
+		if l := getLogger(); l != nil {
+			l.Warn(formatted)
+		}
 	}
 }
 
@@ -71,8 +89,10 @@ func Warn(msg string, args ...any) {
 func Error(msg string, args ...any) {
 	formatted := FormatMsg(msg, args...)
 	fmt.Print(color.RedString("✗ ") + formatted + "\n")
-	if verbose {
-		logger.Error(formatted)
+	if verbose.Load() {
+		if l := getLogger(); l != nil {
+			l.Error(formatted)
+		}
 	}
 }
 

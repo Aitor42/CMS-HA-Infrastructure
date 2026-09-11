@@ -295,7 +295,15 @@ func (p *Pool) CopyDir(ctx context.Context, host, localDir, remoteDir string) er
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
-		return fmt.Errorf("failed to create sftp client for %s: %w", host, err)
+		p.invalidateClient(host)
+		client, err = p.getClient(host)
+		if err != nil {
+			return err
+		}
+		sftpClient, err = sftp.NewClient(client)
+		if err != nil {
+			return fmt.Errorf("failed to create sftp client for %s: %w", host, err)
+		}
 	}
 	defer sftpClient.Close()
 
@@ -335,7 +343,15 @@ func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, e
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+		p.invalidateClient(host)
+		client, err = p.getClient(host)
+		if err != nil {
+			return nil, err
+		}
+		sftpClient, err = sftp.NewClient(client)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+		}
 	}
 	defer sftpClient.Close()
 
