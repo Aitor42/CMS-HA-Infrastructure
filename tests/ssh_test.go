@@ -42,4 +42,17 @@ func TestSSH_RunParallelAggregation(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
+
+	// Test with duplicate hosts - should return exact number of entries without collapsing
+	dupHosts := []string{"192.0.2.1", "192.0.2.1", "192.0.2.2"}
+	dupResults := pool.RunParallel(ctx, dupHosts, "echo test")
+	if len(dupResults) != 3 {
+		t.Fatalf("expected 3 results for duplicate hosts, got %d", len(dupResults))
+	}
+
+	// Test with empty hosts
+	emptyResults := pool.RunParallel(ctx, []string{}, "echo test")
+	if len(emptyResults) != 0 {
+		t.Fatalf("expected 0 results for empty hosts, got %d", len(emptyResults))
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -83,10 +84,7 @@ func (p *Pool) getClient(host string) (*ssh.Client, error) {
 	}
 
 	slog.Debug("establishing new ssh connection", "host", host)
-	addr := host
-	if filepath.Ext(host) == "" && !containsPort(host) { // simple check, assumes port 22 if not specified
-		addr = host + ":22"
-	}
+	addr := ensurePort(host, "22")
 
 	newClient, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
@@ -105,13 +103,11 @@ func (p *Pool) getClient(host string) (*ssh.Client, error) {
 	return newClient, nil
 }
 
-func containsPort(host string) bool {
-	for i := len(host) - 1; i >= 0; i-- {
-		if host[i] == ':' {
-			return true
-		}
+func ensurePort(host, defaultPort string) string {
+	if _, _, err := net.SplitHostPort(host); err == nil {
+		return host
 	}
-	return false
+	return net.JoinHostPort(host, defaultPort)
 }
 
 func (p *Pool) invalidateClient(host string) {
@@ -415,15 +411,20 @@ func (p *Pool) RunCommandWithRetry(ctx context.Context, host, cmd string, maxRet
 	var err error
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return stdout, stderr, code, err
+		}
 		stdout, stderr, code, err = p.RunCommand(ctx, host, cmd)
 		if err == nil && code == 0 {
 			return stdout, stderr, code, nil
 		}
 		if attempt < maxRetries {
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return stdout, stderr, code, ctx.Err()
-			case <-time.After(delay):
+			case <-timer.C:
 			}
 		}
 	}

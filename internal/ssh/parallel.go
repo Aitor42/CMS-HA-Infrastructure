@@ -17,16 +17,25 @@ type ParallelResult struct {
 
 // RunParallel runs the same command on multiple hosts concurrently using goroutines + sync.WaitGroup.
 func (p *Pool) RunParallel(ctx context.Context, hosts []string, cmd string) []ParallelResult {
-	tasks := make(map[string]func(ctx context.Context, pool *Pool) error)
 	results := make([]ParallelResult, len(hosts))
+	if len(hosts) == 0 {
+		return results
+	}
 
+	var wg sync.WaitGroup
 	var mu sync.Mutex
+	total := len(hosts)
+	completed := 0
+
 	for i, host := range hosts {
-		h := host
-		idx := i
-		tasks[h] = func(c context.Context, pool *Pool) error {
-			stdout, _, code, err := pool.RunCommand(c, h, cmd)
+		wg.Add(1)
+		go func(idx int, h string) {
+			defer wg.Done()
+			stdout, _, code, err := p.RunCommand(ctx, h, cmd)
+
 			mu.Lock()
+			completed++
+			slog.Info("parallel task progress", "completed", completed, "total", total, "host", h)
 			results[idx] = ParallelResult{
 				Host:     h,
 				Output:   stdout,
@@ -34,12 +43,10 @@ func (p *Pool) RunParallel(ctx context.Context, hosts []string, cmd string) []Pa
 				Err:      err,
 			}
 			mu.Unlock()
-			return err
-		}
+		}(i, host)
 	}
 
-	p.RunParallelFunc(ctx, tasks)
-	// Return the results mapped properly
+	wg.Wait()
 	return results
 }
 
