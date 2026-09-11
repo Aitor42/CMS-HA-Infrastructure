@@ -27,7 +27,8 @@ func (p *Phase) Description() string {
 }
 
 func (p *Phase) Run(ctx context.Context) error {
-	logging.PhaseStart(p.Name())
+	timer := logging.PhaseStart(p.Name())
+	defer timer.End()
 
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
 	if jumpstartIP == "" {

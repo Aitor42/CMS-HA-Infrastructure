@@ -137,7 +137,7 @@ fi
 `
 	_, err = p.pool.RunScript(ctx, master1.IP, mountCmd)
 	if err != nil {
-		logging.Warn("DRBD mount script reported: %v", err)
+		return fmt.Errorf("failed to format and mount DRBD volume on master1: %w", err)
 	}
 	
 	logging.Info("Updating fstab on Master 1...")

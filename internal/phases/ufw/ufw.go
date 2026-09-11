@@ -89,11 +89,11 @@ func (p *Phase) Run(ctx context.Context) error {
 	
 	logging.Info("Running Puppet agent on all other nodes in parallel...")
 	var otherIPs []string
-	for _, m := range p.cfg.Nodes.Masters { otherIPs = append(otherIPs, m.IP) }
-	for _, w := range p.cfg.Nodes.Workers { otherIPs = append(otherIPs, w.IP) }
-	for _, c := range p.cfg.Nodes.CMSFrontends { otherIPs = append(otherIPs, c.IP) }
-	otherIPs = append(otherIPs, p.cfg.Nodes.LB.IP)
-	otherIPs = append(otherIPs, p.cfg.Nodes.Monitor.IP)
+	for _, node := range p.cfg.AllNodes() {
+		if node.IP != "" && node.IP != routerIP && node.IP != p.cfg.Nodes.Jumpstart.IP {
+			otherIPs = append(otherIPs, node.IP)
+		}
+	}
 	
 	res := p.pool.RunParallel(ctx, otherIPs, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	for _, r := range res {

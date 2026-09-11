@@ -261,7 +261,11 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 		p99 = latencies[p99Idx]
 	}
 
-	rate := float64(total) / float64(t.opts.Duration)
+	durSec := t.opts.Duration
+	if durSec <= 0 {
+		durSec = 1
+	}
+	rate := float64(total) / float64(durSec)
 	logging.Info("Stress Test Results: %d reqs (%.2f req/s)", total, rate)
 	logging.Info("Success: %d, Fail: %d", successCount, failCount)
 	if successCount > 0 {

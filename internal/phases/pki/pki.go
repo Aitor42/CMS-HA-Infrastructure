@@ -115,10 +115,11 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	}
 
 	var allIPs []string
-	for _, m := range p.cfg.Nodes.Masters { allIPs = append(allIPs, m.IP) }
-	for _, w := range p.cfg.Nodes.Workers { allIPs = append(allIPs, w.IP) }
-	for _, c := range p.cfg.Nodes.CMSFrontends { allIPs = append(allIPs, c.IP) }
-	allIPs = append(allIPs, p.cfg.Nodes.LB.IP, p.cfg.Nodes.Monitor.IP, p.cfg.Nodes.Router.IP)
+	for _, node := range p.cfg.AllNodes() {
+		if node.IP != "" && node.IP != jumpIP {
+			allIPs = append(allIPs, node.IP)
+		}
+	}
 	
 	for _, ip := range allIPs {
 		p.pool.CopyContent(ctx, ip, []byte(caCert), "/usr/local/share/ca-certificates/cms_root_ca.crt", 0644)
