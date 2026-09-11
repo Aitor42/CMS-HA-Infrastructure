@@ -80,7 +80,7 @@ func init() {
         defer pool.Close()
         p := cobbler.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "cobbler")
 
     addPhaseCmd("register-nodes", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -90,7 +90,7 @@ func init() {
         defer pool.Close()
         p := registernodes.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "register")
 
     addPhaseCmd("repair-ssh", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -100,7 +100,7 @@ func init() {
         defer pool.Close()
         p := repairssh.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "ssh")
 
     addPhaseCmd("setup-puppet", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -110,7 +110,7 @@ func init() {
         defer pool.Close()
         p := puppet.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "puppet")
 
     addPhaseCmd("setup-drbd", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -120,7 +120,7 @@ func init() {
         defer pool.Close()
         p := drbd.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "drbd")
 
     addPhaseCmd("setup-kubernetes", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -130,7 +130,7 @@ func init() {
         defer pool.Close()
         p := kubernetes.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "kubernetes", "k8s")
 
     addPhaseCmd("setup-nginx-wordpress", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -140,7 +140,7 @@ func init() {
         defer pool.Close()
         p := nginx.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    }, "setup-nginx")
+    }, "setup-nginx", "nginx", "wordpress")
 
     addPhaseCmd("setup-monitoring", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -150,7 +150,7 @@ func init() {
         defer pool.Close()
         p := monitoring.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "monitoring")
 
     addPhaseCmd("setup-ufw", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -160,7 +160,7 @@ func init() {
         defer pool.Close()
         p := ufw.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "ufw")
 
     addPhaseCmd("setup-ca", func(cmd *cobra.Command) error {
         cfg, err := loadConfig()
@@ -170,5 +170,5 @@ func init() {
         defer pool.Close()
         p := pki.NewPhase(cfg, pool)
         return p.Run(cmd.Context())
-    })
+    }, "ca", "pki")
 }
