@@ -14,6 +14,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
+	"github.com/pkg/sftp"
 )
 
 type Phase struct {
@@ -128,16 +129,25 @@ func (p *Phase) uploadTemplates(ctx context.Context, jumpIP string) error {
 		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": "/tmp/tpl_autoinstall.yaml",
 	}
 
-	for src, dst := range templates {
-		content, err := cms.TemplatesFS.ReadFile(src)
-		if err != nil {
-			return fmt.Errorf("failed to read template %s: %w", src, err)
+	return p.pool.WithSFTP(ctx, jumpIP, func(sftpClient *sftp.Client) error {
+		for src, dst := range templates {
+			content, err := cms.TemplatesFS.ReadFile(src)
+			if err != nil {
+				return fmt.Errorf("failed to read template %s: %w", src, err)
+			}
+			f, err := sftpClient.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+			if err != nil {
+				return fmt.Errorf("failed to open remote file %s: %w", dst, err)
+			}
+			_ = f.Chmod(0644)
+			_, copyErr := f.Write(content)
+			_ = f.Close()
+			if copyErr != nil {
+				return fmt.Errorf("failed to write template %s: %w", dst, copyErr)
+			}
 		}
-		if err := p.pool.CopyContent(ctx, jumpIP, content, dst, 0644); err != nil {
-			return fmt.Errorf("failed to upload %s to %s: %w", src, dst, err)
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
