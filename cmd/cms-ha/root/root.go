@@ -55,7 +55,10 @@ func init() {
 
 // loadConfig loads and returns the configuration with fallback lookup.
 func loadConfig() (*config.Config, error) {
-    if _, err := os.Stat(configPath); os.IsNotExist(err) {
+    expanded := config.ExpandPath(configPath)
+    if _, err := os.Stat(expanded); err == nil {
+        configPath = expanded
+    } else if os.IsNotExist(err) {
         candidates := []string{
             "config.yaml",
             "../config.yaml",

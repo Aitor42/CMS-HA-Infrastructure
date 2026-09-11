@@ -66,7 +66,9 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 
 	// Shutdown master1
 	f.libvirt.Shutdown(ctx, master1.Name)
-	time.Sleep(30 * time.Second)
+	if !sleepCtx(ctx, 30*time.Second) {
+		return
+	}
 
 	// Verify master2 promotes & MariaDB migrates
 	out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -n cms | grep mariadb")
@@ -88,7 +90,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 
 	if !opts.SkipRestore {
 		f.libvirt.Start(ctx, master1.Name)
-		time.Sleep(30 * time.Second)
+		sleepCtx(ctx, 30*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -110,7 +112,9 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 
 	// Shutdown cms1
 	f.libvirt.Shutdown(ctx, cms1.Name)
-	time.Sleep(15 * time.Second)
+	if !sleepCtx(ctx, 15*time.Second) {
+		return
+	}
 
 	// Verify HTTP 200 (routes to cms2)
 	httpClient := &http.Client{Timeout: 10 * time.Second}
@@ -125,7 +129,7 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 
 	if !opts.SkipRestore {
 		f.libvirt.Start(ctx, cms1.Name)
-		time.Sleep(15 * time.Second)
+		sleepCtx(ctx, 15*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -149,7 +153,9 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 
 	// Shutdown worker1
 	f.libvirt.Shutdown(ctx, worker1.Name)
-	time.Sleep(45 * time.Second) // wait for pod eviction
+	if !sleepCtx(ctx, 45*time.Second) {
+		return
+	}
 
 	// Verify pods reschedule to worker2
 	out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -o wide -A | grep -v Terminating")
@@ -160,11 +166,20 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 
 	if !opts.SkipRestore {
 		f.libvirt.Start(ctx, worker1.Name)
-		time.Sleep(30 * time.Second)
+		sleepCtx(ctx, 30*time.Second)
 	}
 
 	duration := time.Since(start)
 	f.printSummary("K3s Worker Failover", pass, duration)
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
 }
 
 func (f *FailoverTester) printSummary(name string, pass bool, duration time.Duration) {

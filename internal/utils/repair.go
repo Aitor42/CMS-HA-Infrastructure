@@ -72,7 +72,9 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	if len(masterIPs) > 0 {
 		logging.Info("Starting K3s on master nodes in parallel to reach quorum...")
 		s.RunParallel(ctx, masterIPs, "systemctl start k3s")
-		time.Sleep(5 * time.Second)
+		if !sleepCtx(ctx, 5*time.Second) {
+			return ctx.Err()
+		}
 	}
 
 	// Start K3s agents on workers concurrently
@@ -85,13 +87,17 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	if len(workerIPs) > 0 {
 		logging.Info("Starting K3s agents on worker nodes...")
 		s.RunParallel(ctx, workerIPs, "systemctl start k3s-agent")
-		time.Sleep(5 * time.Second)
+		if !sleepCtx(ctx, 5*time.Second) {
+			return ctx.Err()
+		}
 	}
 
 	// Verify
 	if len(masterIPs) > 0 {
 		logging.Info("Waiting for cluster stability and verifying Kubernetes status...")
-		time.Sleep(5 * time.Second)
+		if !sleepCtx(ctx, 5*time.Second) {
+			return ctx.Err()
+		}
 		out, _, _, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes")
 		if err != nil {
 			logging.Error("Failed to verify nodes: %v", err)
