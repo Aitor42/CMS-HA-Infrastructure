@@ -99,6 +99,13 @@ func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
 	
 	remotePath := "/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
 	
+	// Check if already present on Jumpstart
+	_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("[ -f %s ] && [ $(stat -c%%s %s 2>/dev/null || echo 0) -gt 1000000000 ]", remotePath, remotePath))
+	if code == 0 {
+		logging.Success("Ubuntu ISO already exists on Jumpstart (%s), skipping transfer", remotePath)
+		return nil
+	}
+
 	// Create dir
 	_, _, _, err = p.pool.RunCommand(ctx, jumpIP, "mkdir -p /var/lib/cobbler/isos")
 	if err != nil {

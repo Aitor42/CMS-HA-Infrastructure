@@ -473,14 +473,15 @@ func (p *Phase) cleanup(ctx context.Context) error {
 	return nil
 }
 
-// destroyVM safely destroys and undefines a VM if it exists.
+// destroyVM safely destroys and undefines a VM if it exists, and cleans up its disks.
 func (p *Phase) destroyVM(ctx context.Context, name string) {
-	if !p.lv.DomainExists(ctx, name) {
-		return
+	if p.lv.DomainExists(ctx, name) {
+		logging.Info("Removing existing VM: %s", name)
+		p.lv.Destroy(ctx, name)
+		p.lv.Undefine(ctx, name)
 	}
-	logging.Info("Removing existing VM: %s", name)
-	p.lv.Destroy(ctx, name)
-	p.lv.Undefine(ctx, name)
+	os.Remove(filepath.Join(p.cfg.VM.StorageDir, name+".qcow2"))
+	os.Remove(filepath.Join(p.cfg.VM.StorageDir, name+"-drbd.qcow2"))
 }
 
 // ensureSSHKey returns the public key for the given private key path, generating it if needed.
