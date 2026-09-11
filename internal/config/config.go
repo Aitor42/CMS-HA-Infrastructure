@@ -152,6 +152,7 @@ func Load(path string) (*Config, error) {
 
 // LoadWithKey loads configuration from the given path using a specified age key file.
 func LoadWithKey(path string, keyPath string) (*Config, error) {
+	path = ExpandPath(path)
 	v := viper.New()
 	v.SetConfigFile(path)
 	

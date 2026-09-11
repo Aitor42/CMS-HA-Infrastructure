@@ -25,6 +25,9 @@ func Do(ctx context.Context, cfg Config, fn func() error) error {
 
 	var lastErr error
 	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("retry context cancelled: %w (last error: %v)", err, lastErr)
+		}
 		if attempt > 1 {
 			logging.Info("Retry attempt %d/%d", attempt, cfg.MaxAttempts)
 		}
@@ -61,6 +64,9 @@ func Poll(ctx context.Context, cfg Config, fn func() (bool, error)) error {
 	}
 
 	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("poll context cancelled: %w", err)
+		}
 		if attempt > 1 {
 			logging.Info("Poll attempt %d/%d", attempt, cfg.MaxAttempts)
 		}

@@ -61,4 +61,62 @@ func TestRetry_Do(t *testing.T) {
 			t.Errorf("expected 3 calls, got %d", calls)
 		}
 	})
+
+	t.Run("aborts when context cancelled", func(t *testing.T) {
+		cancCtx, cancel := context.WithCancel(context.Background())
+		cancel() // cancel immediately
+		calls := 0
+		err := retry.Do(cancCtx, cfg, func() error {
+			calls++
+			return nil
+		})
+		if err == nil {
+			t.Errorf("expected error due to cancelled context, got nil")
+		}
+		if calls != 0 {
+			t.Errorf("expected 0 calls when context cancelled upfront, got %d", calls)
+		}
+	})
+}
+
+func TestRetry_Poll(t *testing.T) {
+	ctx := context.Background()
+	cfg := retry.Config{
+		MaxAttempts: 3,
+		Interval:    10 * time.Millisecond,
+		Timeout:     1 * time.Second,
+	}
+
+	t.Run("poll succeeds", func(t *testing.T) {
+		calls := 0
+		err := retry.Poll(ctx, cfg, func() (bool, error) {
+			calls++
+			if calls == 2 {
+				return true, nil
+			}
+			return false, nil
+		})
+		if err != nil {
+			t.Fatalf("poll failed: %v", err)
+		}
+		if calls != 2 {
+			t.Errorf("expected 2 calls, got %d", calls)
+		}
+	})
+
+	t.Run("poll aborts on cancelled context", func(t *testing.T) {
+		cancCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		calls := 0
+		err := retry.Poll(cancCtx, cfg, func() (bool, error) {
+			calls++
+			return true, nil
+		})
+		if err == nil {
+			t.Errorf("expected error, got nil")
+		}
+		if calls != 0 {
+			t.Errorf("expected 0 calls, got %d", calls)
+		}
+	})
 }

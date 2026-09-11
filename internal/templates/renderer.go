@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 )
@@ -71,6 +72,13 @@ func (r *Renderer) RenderToFile(templatePath string, data interface{}, outPath s
 	rendered, err := r.Render(templatePath, data)
 	if err != nil {
 		return err
+	}
+
+	dir := filepath.Dir(outPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("failed to create directory for %s: %w", outPath, err)
+		}
 	}
 
 	if err := os.WriteFile(outPath, rendered, perm); err != nil {

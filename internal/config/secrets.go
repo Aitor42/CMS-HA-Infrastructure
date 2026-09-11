@@ -65,7 +65,7 @@ func DecryptValue(encValue, keyPath string) (string, error) {
 		return "", fmt.Errorf("failed to decode base64: %w", err)
 	}
 
-	cleanedKeyPath := filepath.Clean(keyPath)
+	cleanedKeyPath := filepath.Clean(ExpandPath(keyPath))
 	keyData, err := os.ReadFile(cleanedKeyPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read key file: %w", err)
@@ -128,7 +128,7 @@ func processYAMLNode(node *yaml.Node, process func(string) (string, error)) erro
 
 // EncryptConfig reads the config file, encrypts sensitive fields, and writes it back.
 func EncryptConfig(configPath, publicKey string) error {
-	cleanedConfigPath := filepath.Clean(configPath)
+	cleanedConfigPath := filepath.Clean(ExpandPath(configPath))
 	data, err := os.ReadFile(cleanedConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
@@ -156,7 +156,7 @@ func EncryptConfig(configPath, publicKey string) error {
 		return fmt.Errorf("failed to encode yaml: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, buf.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(cleanedConfigPath, buf.Bytes(), 0600); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
