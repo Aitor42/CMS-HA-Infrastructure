@@ -219,6 +219,31 @@ func (p *Pool) CopyFile(ctx context.Context, host, localPath, remotePath string)
 	return copyFileWithSFTP(ctx, sftpClient, localPath, remotePath, info.Mode())
 }
 
+// WithSFTP opens an SFTP client and executes fn, allowing multiple file transfers
+// to reuse a single SFTP session and avoid repeated subsystem negotiation roundtrips.
+func (p *Pool) WithSFTP(ctx context.Context, host string, fn func(sftpClient *sftp.Client) error) error {
+	client, err := p.getClient(host)
+	if err != nil {
+		return err
+	}
+
+	sftpClient, err := sftp.NewClient(client)
+	if err != nil {
+		p.invalidateClient(host)
+		client, err = p.getClient(host)
+		if err != nil {
+			return err
+		}
+		sftpClient, err = sftp.NewClient(client)
+		if err != nil {
+			return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+		}
+	}
+	defer sftpClient.Close()
+
+	return fn(sftpClient)
+}
+
 func copyFileWithSFTP(ctx context.Context, sftpClient *sftp.Client, localPath, remotePath string, mode os.FileMode) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -236,9 +261,11 @@ func copyFileWithSFTP(ctx context.Context, sftpClient *sftp.Client, localPath, r
 	}
 	defer remoteFile.Close()
 
-	remoteFile.Chmod(mode)
+	_ = remoteFile.Chmod(mode)
 
-	if _, err := io.Copy(remoteFile, srcFile); err != nil {
+	// 256KB buffer reduces packet roundtrips and syscalls by 8x during large file streaming
+	buf := make([]byte, 256*1024)
+	if _, err := io.CopyBuffer(remoteFile, srcFile, buf); err != nil {
 		return fmt.Errorf("failed to stream content to %s: %w", remotePath, err)
 	}
 	return nil
@@ -374,15 +401,17 @@ func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, e
 	return buf.Bytes(), nil
 }
 
-// WaitForSSH polls until SSH connection succeeds, with configurable interval (default 10s).
+// WaitForSSH polls until SSH connection succeeds using adaptive backoff (starting at 1s up to 5s).
 func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duration) error {
 	slog.Info("waiting for ssh to become available", "host", host, "timeout", timeout)
 	
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
+	interval := 1 * time.Second
+	maxInterval := 5 * time.Second
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 
 	for {
 		client, err := p.getClient(host)
@@ -399,8 +428,12 @@ func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duratio
 		select {
 		case <-pollCtx.Done():
 			return fmt.Errorf("timed out waiting for ssh on %s: %w", host, pollCtx.Err())
-		case <-ticker.C:
-			// Retry
+		case <-timer.C:
+			interval = time.Duration(float64(interval) * 1.5)
+			if interval > maxInterval {
+				interval = maxInterval
+			}
+			timer.Reset(interval)
 		}
 	}
 }
