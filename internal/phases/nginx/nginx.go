@@ -55,10 +55,17 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("nginx verification failed on LB: %w", err)
 	}
 	
-	logging.Info("Verifying Apache configuration on CMS nodes...")
+	logging.Info("Verifying Apache configuration on CMS nodes in parallel...")
+	var cmsIPs []string
 	for _, cms := range p.cfg.Nodes.CMSFrontends {
-		if _, _, _, err := p.pool.RunCommand(ctx, cms.IP, "apache2ctl -t && systemctl is-active apache2"); err != nil {
-			return fmt.Errorf("apache verification failed on %s: %w", cms.IP, err)
+		if cms.IP != "" {
+			cmsIPs = append(cmsIPs, cms.IP)
+		}
+	}
+	resApache := p.pool.RunParallel(ctx, cmsIPs, "apache2ctl -t && systemctl is-active apache2")
+	for _, r := range resApache {
+		if r.Err != nil || r.ExitCode != 0 {
+			return fmt.Errorf("apache verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
 		}
 	}
 	

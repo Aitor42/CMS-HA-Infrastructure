@@ -166,17 +166,20 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 	}
 	
-	// Apply in order (all except init-db-job)
+	// Apply base manifests (all except init-db-job) in single command
+	var applyArgs []string
 	for i := 0; i < len(manifestFiles)-1; i++ {
-		mFile := manifestFiles[i]
-		logging.Info("Applying %s...", mFile)
-		err = retry.Do(ctx, retry.Config{MaxAttempts: 6, Interval: 10 * time.Second, Timeout: 60 * time.Second}, func() error {
-			_, _, _, err := p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl apply -f %s/%s", manifestsDir, mFile))
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("failed to apply %s: %w", mFile, err)
-		}
+		applyArgs = append(applyArgs, fmt.Sprintf("-f %s/%s", manifestsDir, manifestFiles[i]))
+	}
+	applyCmd := "kubectl apply " + strings.Join(applyArgs, " ")
+
+	logging.Info("Applying base Kubernetes manifests in batch...")
+	err = retry.Do(ctx, retry.Config{MaxAttempts: 6, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func() error {
+		_, _, _, err := p.pool.RunCommand(ctx, master1.IP, applyCmd)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("failed to apply base Kubernetes manifests: %w", err)
 	}
 	
 	logging.Info("Waiting for MariaDB pod to be Running...")

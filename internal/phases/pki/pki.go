@@ -121,8 +121,18 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 		}
 	}
 	
+	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	certBytes := []byte(caCert)
 	for _, ip := range allIPs {
-		p.pool.CopyContent(ctx, ip, []byte(caCert), "/usr/local/share/ca-certificates/cms_root_ca.crt", 0644)
+		nodeIP := ip
+		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+			return pool.CopyContent(c, nodeIP, certBytes, "/usr/local/share/ca-certificates/cms_root_ca.crt", 0644)
+		}
+	}
+	for _, r := range p.pool.RunParallelFunc(ctx, tasks) {
+		if r.Err != nil {
+			return fmt.Errorf("failed to distribute root CA to %s: %w", r.Host, r.Err)
+		}
 	}
 	
 	p.pool.RunParallel(ctx, allIPs, "update-ca-certificates")

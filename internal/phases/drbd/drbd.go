@@ -84,24 +84,23 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
 	
+	drbdCfgBytes := buf.Bytes()
+	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
 	for _, ip := range []string{master1.IP, master2.IP} {
-		if err := p.pool.CopyContent(ctx, ip, []byte(buf.String()), "/etc/drbd.d/cms_data.res", 0644); err != nil {
-			return fmt.Errorf("failed to copy DRBD config to %s: %w", ip, err)
+		nodeIP := ip
+		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+			return pool.CopyContent(c, nodeIP, drbdCfgBytes, "/etc/drbd.d/cms_data.res", 0644)
+		}
+	}
+	for _, r := range p.pool.RunParallelFunc(ctx, tasks) {
+		if r.Err != nil {
+			return fmt.Errorf("failed to copy DRBD config to %s: %w", r.Host, r.Err)
 		}
 	}
 	
-	logging.Info("Initializing DRBD metadata...")
-	initCmds := []string{
-		"modprobe drbd || true",
-		"drbdadm create-md cms_data --force || true",
-		"drbdadm up cms_data || true",
-	}
-	
-	for _, ip := range []string{master1.IP, master2.IP} {
-		for _, cmd := range initCmds {
-			p.pool.RunCommand(ctx, ip, cmd)
-		}
-	}
+	logging.Info("Initializing DRBD metadata in parallel...")
+	initCmd := "modprobe drbd || true; drbdadm create-md cms_data --force || true; drbdadm up cms_data || true"
+	p.pool.RunParallel(ctx, []string{master1.IP, master2.IP}, initCmd)
 	
 	logging.Info("Promoting Master 1 to Primary...")
 	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms_data --force || true")
