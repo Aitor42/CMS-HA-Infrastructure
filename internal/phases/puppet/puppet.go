@@ -128,15 +128,23 @@ func (p *Phase) getAgentIPs() []string {
 }
 
 func (p *Phase) installAgents(ctx context.Context, agentIPs []string) error {
-	cmd := `
+	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
+	cmd := fmt.Sprintf(`
 		export DEBIAN_FRONTEND=noninteractive
+		cloud-init status --wait 2>/dev/null || true
+		for i in {1..30}; do
+			if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+				break
+			fi
+			sleep 2
+		done
 		wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
 		dpkg -i /tmp/puppet8-release-noble.deb || true
 		apt-get update
 		apt-get install -y puppet-agent
 		
 		ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
-		grep -q "jumpstart.internal.local" /etc/hosts || echo "192.168.10.10 jumpstart.internal.local jumpstart puppet" >> /etc/hosts
+		grep -q "jumpstart.internal.local" /etc/hosts || echo "%s jumpstart.internal.local jumpstart puppet" >> /etc/hosts
 		
 		mkdir -p /etc/puppetlabs/puppet
 		cat << 'EOF_PUPPET' > /etc/puppetlabs/puppet/puppet.conf
@@ -147,7 +155,7 @@ runinterval = 30m
 EOF_PUPPET
 
 		/opt/puppetlabs/bin/puppet resource service puppet ensure=running enable=true
-	`
+	`, jumpstartIP)
 	results := p.pool.RunParallel(ctx, agentIPs, cmd)
 	var errs []string
 	for _, res := range results {

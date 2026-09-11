@@ -50,7 +50,16 @@ func (p *Phase) Run(ctx context.Context) error {
 	master2 := p.cfg.Nodes.Masters[1]
 	
 	logging.Info("Installing DRBD utils on master nodes...")
-	installCmd := "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils"
+	installCmd := `
+cloud-init status --wait 2>/dev/null || true
+for i in {1..30}; do
+	if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+		break
+	fi
+	sleep 2
+done
+apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
+`
 	
 	res := p.pool.RunParallel(ctx, []string{master1.IP, master2.IP}, installCmd)
 	for _, r := range res {

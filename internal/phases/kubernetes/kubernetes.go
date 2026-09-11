@@ -199,7 +199,11 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Waiting for init-db-job completion...")
-	time.Sleep(10 * time.Second) // allow job to be created
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(5 * time.Second):
+	}
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
 		out, _, _, _ := p.pool.RunCommand(ctx, master1.IP, "kubectl get job init-wordpress-db -n cms -o jsonpath='{.status.succeeded}'")
 		if strings.TrimSpace(out) != "1" {
