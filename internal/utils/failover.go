@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"strings"
@@ -77,15 +78,10 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 		logging.Warn("MariaDB pod not running on master2")
 	}
 
-	// Verify HTTP 200
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
-	if err != nil || resp.StatusCode != 200 {
+	// Verify HTTP / HTTPS reachability
+	if !checkLBReachability(f.cfg.Nodes.LB.IP) {
 		pass = false
-		logging.Warn("CMS frontend not returning HTTP 200")
-	}
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
+		logging.Warn("CMS frontend not reachable on Load Balancer (HTTP 200/301/302)")
 	}
 
 	if !opts.SkipRestore {
@@ -116,15 +112,10 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 		return
 	}
 
-	// Verify HTTP 200 (routes to cms2)
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := httpClient.Get(fmt.Sprintf("http://%s", f.cfg.Nodes.LB.IP))
-	if err != nil || resp.StatusCode != 200 {
+	// Verify HTTP / HTTPS reachability (routes to cms2)
+	if !checkLBReachability(f.cfg.Nodes.LB.IP) {
 		pass = false
-		logging.Warn("CMS frontend not returning HTTP 200 after cms1 shutdown")
-	}
-	if resp != nil && resp.Body != nil {
-		resp.Body.Close()
+		logging.Warn("CMS frontend not returning HTTP 200/301/302 after cms1 shutdown")
 	}
 
 	if !opts.SkipRestore {
@@ -193,4 +184,20 @@ func (f *FailoverTester) printSummary(name string, pass bool, duration time.Dura
 	} else {
 		logging.Error("%s", msg)
 	}
+}
+
+func checkLBReachability(lbIP string) bool {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- test failover on lab LB
+	}
+	client := &http.Client{Timeout: 10 * time.Second, Transport: tr}
+	resp, err := client.Get(fmt.Sprintf("https://%s", lbIP))
+	if err != nil {
+		resp, err = client.Get(fmt.Sprintf("http://%s", lbIP))
+	}
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
 }

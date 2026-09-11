@@ -132,10 +132,9 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.LB.IP, "systemctl is-active nginx")
 	pass := err == nil && strings.TrimSpace(out) == "active"
 	
-	if len(v.cfg.Nodes.CMSFrontends) >= 2 {
-		outApache1, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.CMSFrontends[0].IP, "systemctl is-active apache2")
-		outApache2, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.CMSFrontends[1].IP, "systemctl is-active apache2")
-		if strings.TrimSpace(outApache1) != "active" || strings.TrimSpace(outApache2) != "active" {
+	for _, cms := range v.cfg.Nodes.CMSFrontends {
+		outApache, _, _, _ := v.ssh.RunCommand(ctx, cms.IP, "systemctl is-active apache2")
+		if strings.TrimSpace(outApache) != "active" {
 			pass = false
 		}
 	}

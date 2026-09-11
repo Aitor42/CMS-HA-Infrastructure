@@ -53,7 +53,11 @@ func StartAllVMs(ctx context.Context, cfg *config.Config, l *libvirt.Client, sta
 			if err := l.Start(ctx, vmName); err != nil {
 				logging.Error("Failed to start %s: %v", vmName, err)
 			} else {
-				time.Sleep(stagger)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(stagger):
+				}
 			}
 		}
 	}
@@ -230,7 +234,11 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 				if state == "shut off" {
 					break
 				}
-				time.Sleep(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(2 * time.Second):
+				}
 			}
 			state, _ := l.DomainState(ctx, node.name)
 			if state != "shut off" {
@@ -258,6 +266,9 @@ func RecreateFailedVMs(ctx context.Context, cfg *config.Config, l *libvirt.Clien
 
 	for _, node := range cfg.AllNodes() {
 		if node.Name == "" || node.Name == cfg.Nodes.Jumpstart.Name {
+			continue
+		}
+		if !l.DomainExists(ctx, node.Name) {
 			continue
 		}
 		state, err := l.DomainState(ctx, node.Name)

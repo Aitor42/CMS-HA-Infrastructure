@@ -151,11 +151,13 @@ func FindModuleRoot() (string, error) {
 func FindFiles(root, pattern string) []string {
 	var files []string
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return nil
 		}
-		// Skip .git directories
-		if strings.Contains(path, string(os.PathSeparator)+".git"+string(os.PathSeparator)) {
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		matched, _ := filepath.Match(pattern, filepath.Base(path))
