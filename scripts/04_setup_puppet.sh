@@ -14,6 +14,7 @@
 #     converge to their declared desired state immediately.
 
 set -euo pipefail
+trap 'echo -e "\n[!] Operación interrumpida por el usuario."; exit 130' INT TERM
 
 # Cargar configuración global
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +66,15 @@ getent passwd puppet >/dev/null || useradd -r -g puppet -d /opt/puppetlabs/serve
 mkdir -p /usr/share/puppet/modules/
 
 # Descargar e instalar repositorio de Puppet 8 oficial para Ubuntu Noble (24.04)
+echo "[+] Esperando liberación de bloqueos de APT..."
+cloud-init status --wait 2>/dev/null || true
+for i in $(seq 1 30); do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+
 echo "[+] Instalando Puppet Server..."
 wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
 dpkg -i /tmp/puppet8-release-noble.deb || true
@@ -193,6 +203,14 @@ for NODE_NAME in "${!AGENT_NODES[@]}"; do
     # Instalar agente, configurar config de Puppet Agent y solicitar certificado
     ssh ${SSH_OPTS} root@${NODE_IP} <<AGENT_EOF
 set -euo pipefail
+
+cloud-init status --wait 2>/dev/null || true
+for i in $(seq 1 30); do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
 
 echo "[+] Instalando puppet-agent oficial..."
 wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb

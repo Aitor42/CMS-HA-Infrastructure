@@ -16,6 +16,7 @@
 #   - Publicación de la lista de claves autorizadas (host + jumpstart) en el pub de Cobbler.
 
 set -euo pipefail
+trap 'echo -e "\n[!] Operación interrumpida por el usuario."; exit 130' INT TERM
 
 # Cargar configuraciones centrales del proyecto
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,14 +40,16 @@ if [ -z "$ISO_SOURCE" ]; then
     fi
 fi
 if [ -z "$ISO_SOURCE" ]; then
-    echo "[ERROR] No se localizó ninguna ISO válida de Ubuntu 24.04 Noble en $VM_DIR"
+    echo "[ERROR] No se encontró ninguna ISO de Ubuntu 24.04 en ${VM_DIR}."
+    echo "        Por favor descargue la ISO oficial (>= 1GB) antes de continuar."
     exit 1
 fi
-echo "[+] ISO origen para Cobbler: $ISO_SOURCE"
+echo "[+] ISO seleccionada para despliegue: ${ISO_SOURCE}"
 
-# Asegurar disponibilidad de claves SSH del hipervisor
+# Garantizar la presencia de la clave SSH del host
 if [ ! -f "${HOST_KEY_FILE}" ]; then
-    echo "[+] Generando clave SSH del host en ${HOST_KEY_FILE}..."
+    echo "[+] Clave SSH ${HOST_KEY_FILE} no encontrada en el host. Generando..."
+    mkdir -p "$(dirname "${HOST_KEY_FILE}")"
     ssh-keygen -t ed25519 -N "" -f "${HOST_KEY_FILE}"
 fi
 HOST_PUBKEY="$(cat "${HOST_KEY_FILE}.pub")"
@@ -65,7 +68,12 @@ echo "[+] Propagando claves SSH al usuario root de Jumpstart..."
 ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "admin@${JUMPSTART_IP}" 'bash -s' << 'ELEVATE_EOF'
 set -e
 sudo mkdir -p /root/.ssh
-sudo cp /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys
+for f in /home/*/.ssh/authorized_keys; do
+    if [ -f "$f" ]; then
+        sudo cat "$f" >> /root/.ssh/authorized_keys
+    fi
+done
+sudo sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/null || true
 sudo chown -R root:root /root/.ssh
 sudo chmod 700 /root/.ssh
 sudo chmod 600 /root/.ssh/authorized_keys
@@ -134,6 +142,15 @@ scp -i "${HOST_KEY_FILE}" ${SSH_OPTS} \
 
 ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "root@${JUMPSTART_IP}" "HOST_PUBKEY='${HOST_PUBKEY}' RESOLV_CONF_CONTENT='${RESOLV_CONF_CONTENT}' bash" << 'REMOTE_EOF'
 set -euo pipefail
+
+echo "[+] Esperando a que cloud-init y los bloqueos de APT se liberen..."
+cloud-init status --wait 2>/dev/null || true
+for i in $(seq 1 30); do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
 
 # ── Fase 1: Repositorios de Paquetes ──
 echo "[+] [1/14] Activando repositorio universe de Ubuntu..."

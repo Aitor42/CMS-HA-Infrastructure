@@ -14,6 +14,7 @@
 #     temporales de indisponibilidad del API Server durante su arranque.
 
 set -euo pipefail
+trap 'echo -e "\n[!] Operación interrumpida por el usuario."; exit 130' INT TERM
 
 # Cargar la configuración global
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,28 +39,23 @@ ssh ${SSH_OPTS} root@$MASTER1_IP << EOF
     else
         echo "[+] Ejecutando instalador de K3s Server..."
         # Habilitar etcd con almacenamiento interno redundante
-        # Aumentar timeouts de etcd para evitar división del clúster por latencia de disco (etcd-arg)
-        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server \
-            --cluster-init \
-            --node-ip ${MASTER1_IP} \
-            --tls-san ${MASTER1_IP} \
-            --tls-san ${MASTER2_IP} \
-            --write-kubeconfig-mode 644 \
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init \
+            --node-external-ip ${MASTER1_IP} \
+            --flannel-iface enp1s0 \
             --etcd-arg=heartbeat-interval=1000 \
             --etcd-arg=election-timeout=10000" sh -
 
-        echo "[+] Habilitando servicio systemd de K3s..."
+        echo "[+] Habilitando servicio systemd..."
         systemctl daemon-reload
         systemctl enable k3s
         systemctl start k3s --no-block
     fi
 
-    # Sonda para esperar que la API local esté disponible
     echo "[+] Esperando a que el API Server esté listo..."
     K3S_READY=false
     for i in \$(seq 1 30); do
         if kubectl get nodes &>/dev/null; then
-            echo "[OK] API Server de K3s responde consultas."
+            echo "[OK] K3s API Server disponible y respondiendo."
             K3S_READY=true
             break
         fi
@@ -86,7 +82,18 @@ EOF
 # ==============================================================================
 echo ""
 echo "[+] Obteniendo Token de unión desde Master 1..."
-K3S_TOKEN=$(ssh ${SSH_OPTS} root@$MASTER1_IP "cat /var/lib/rancher/k3s/server/node-token")
+K3S_TOKEN=""
+for i in $(seq 1 30); do
+  if K3S_TOKEN=$(ssh ${SSH_OPTS} root@"$MASTER1_IP" "cat /var/lib/rancher/k3s/server/node-token 2>/dev/null") && [ -n "$K3S_TOKEN" ]; then
+    break
+  fi
+  echo "[*] Esperando a que el archivo node-token esté listo ($i/30)..."
+  sleep 2
+done
+if [ -z "$K3S_TOKEN" ]; then
+  echo "✗ ERROR: No se pudo obtener el token de K3s tras 60s."
+  exit 1
+fi
 echo "[OK] Token recuperado con éxito."
 
 # ==============================================================================
