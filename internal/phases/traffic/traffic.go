@@ -145,23 +145,10 @@ func (t *Traffic) Run(ctx context.Context) error {
 			dbHost = t.cfg.Nodes.Masters[0].IP
 		}
 		dbDSN := fmt.Sprintf("root:%s@tcp(%s:3306)/cms", t.cfg.Database.RootPassword, dbHost)
-		db, err := sql.Open("mysql", dbDSN)
-		if err == nil {
-			err = db.PingContext(ctx)
-			if err == nil {
-				rows, err := db.QueryContext(ctx, "SELECT option_value FROM wp_options LIMIT 5")
-				if err == nil {
-					rows.Close()
-					logging.Success("DB queries executed successfully")
-				} else {
-					logging.Warn("DB query failed: %v", err)
-				}
-			} else {
-				logging.Warn("DB ping failed: %v", err)
-			}
-			db.Close()
+		if err := testDBQueries(ctx, dbDSN); err != nil {
+			logging.Warn("DB direct queries failed: %v", err)
 		} else {
-			logging.Warn("DB connection failed: %v", err)
+			logging.Success("DB queries executed successfully")
 		}
 	}
 
@@ -223,19 +210,21 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 							return
 						case <-time.After(20 * time.Millisecond):
 						}
-					} else {
-						_ = resp.Body.Close()
-						if resp.StatusCode < 400 {
-							atomic.AddInt64(&successCount, 1)
-							mu.Lock()
-							if len(latencies) < 10000 {
-								latencies = append(latencies, elapsed)
-							}
-							mu.Unlock()
-						} else {
-							atomic.AddInt64(&failCount, 1)
-						}
+						continue
 					}
+
+					_ = resp.Body.Close()
+					if resp.StatusCode >= 400 {
+						atomic.AddInt64(&failCount, 1)
+						continue
+					}
+
+					atomic.AddInt64(&successCount, 1)
+					mu.Lock()
+					if len(latencies) < 10000 {
+						latencies = append(latencies, elapsed)
+					}
+					mu.Unlock()
 				}
 			}
 		}()
@@ -282,4 +271,24 @@ func getRandomPath(paths []string) string {
 		return paths[0]
 	}
 	return paths[n.Int64()]
+}
+
+func testDBQueries(ctx context.Context, dsn string) error {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return fmt.Errorf("connection: %w", err)
+	}
+	defer db.Close()
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT option_value FROM wp_options LIMIT 5")
+	if err != nil {
+		return fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+
+	return nil
 }
