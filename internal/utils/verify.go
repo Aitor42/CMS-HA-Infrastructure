@@ -102,12 +102,19 @@ func (v *Verifier) phase00(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase01(ctx context.Context) CheckResult {
-	// Cobbler services + system count >= 13
-	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "systemctl is-active cobblerd apache2 isc-dhcp-server bind9 tftpd-hpa")
-	pass := err == nil && !strings.Contains(out, "inactive") && !strings.Contains(out, "failed")
-	
-	sysCountOut, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "cobbler system list | wc -l")
-	sysCount := strings.TrimSpace(sysCountOut)
+	// Cobbler services + system count in single SSH session
+	cmd := `systemctl is-active cobblerd apache2 isc-dhcp-server bind9 tftpd-hpa; echo "---CMS_DELIM---"; cobbler system list | wc -l`
+	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, cmd)
+	parts := strings.Split(out, "---CMS_DELIM---")
+	servicesOut := ""
+	sysCount := ""
+	if len(parts) >= 2 {
+		servicesOut = parts[0]
+		sysCount = strings.TrimSpace(parts[1])
+	} else {
+		servicesOut = out
+	}
+	pass := err == nil && !strings.Contains(servicesOut, "inactive") && !strings.Contains(servicesOut, "failed")
 	if sysCount == "0" || sysCount == "" {
 		pass = false
 	}
@@ -115,12 +122,19 @@ func (v *Verifier) phase01(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase02(ctx context.Context) CheckResult {
-	// Puppet server + signed certs >= 9 + agent services
-	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "systemctl is-active puppetserver")
-	pass := err == nil && strings.TrimSpace(out) == "active"
-	
-	certOut, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, "puppetserver ca list --all 2>/dev/null | grep -E 'Signed|\\(SHA256\\)' | wc -l")
-	certCount := strings.TrimSpace(certOut)
+	// Puppet server + signed certs in single SSH session
+	cmd := `systemctl is-active puppetserver; echo "---CMS_DELIM---"; puppetserver ca list --all 2>/dev/null | grep -E 'Signed|\(SHA256\)' | wc -l`
+	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, cmd)
+	parts := strings.Split(out, "---CMS_DELIM---")
+	svcOut := ""
+	certCount := ""
+	if len(parts) >= 2 {
+		svcOut = strings.TrimSpace(parts[0])
+		certCount = strings.TrimSpace(parts[1])
+	} else {
+		svcOut = strings.TrimSpace(out)
+	}
+	pass := err == nil && svcOut == "active"
 	if certCount == "0" || certCount == "" {
 		pass = false
 	}
@@ -132,9 +146,15 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.LB.IP, "systemctl is-active nginx")
 	pass := err == nil && strings.TrimSpace(out) == "active"
 	
+	var cmsIPs []string
 	for _, cms := range v.cfg.Nodes.CMSFrontends {
-		outApache, _, _, _ := v.ssh.RunCommand(ctx, cms.IP, "systemctl is-active apache2")
-		if strings.TrimSpace(outApache) != "active" {
+		if cms.IP != "" {
+			cmsIPs = append(cmsIPs, cms.IP)
+		}
+	}
+	resApache := v.ssh.RunParallel(ctx, cmsIPs, "systemctl is-active apache2")
+	for _, r := range resApache {
+		if r.Err != nil || strings.TrimSpace(r.Output) != "active" {
 			pass = false
 		}
 	}
@@ -142,15 +162,20 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase04(ctx context.Context) CheckResult {
-	// K3s cluster + MariaDB pod Running
+	// K3s cluster + MariaDB pod Running in single SSH session
 	if len(v.cfg.Nodes.Masters) > 0 {
-		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, "kubectl get nodes")
-		pass := err == nil && strings.Contains(out, "Ready")
-		
-		podOut, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, "kubectl get pods -n cms | grep mariadb")
-		if !strings.Contains(podOut, "Running") {
-			pass = false
+		cmd := `kubectl get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb`
+		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, cmd)
+		parts := strings.Split(out, "---CMS_DELIM---")
+		nodesOut := ""
+		podOut := ""
+		if len(parts) >= 2 {
+			nodesOut = parts[0]
+			podOut = parts[1]
+		} else {
+			nodesOut = out
 		}
+		pass := err == nil && strings.Contains(nodesOut, "Ready") && strings.Contains(podOut, "Running")
 		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, ""}
 	}
 	return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
@@ -164,26 +189,37 @@ func (v *Verifier) phase05(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase06(ctx context.Context) CheckResult {
-	// UFW + ip_forward on router
-	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Router.IP, "cat /proc/sys/net/ipv4/ip_forward")
-	pass := err == nil && strings.TrimSpace(out) == "1"
-	
-	ufwOut, _, _, _ := v.ssh.RunCommand(ctx, v.cfg.Nodes.Router.IP, "ufw status")
-	if !strings.Contains(ufwOut, "Status: active") {
-		pass = false
+	// UFW + ip_forward on router in single SSH session
+	cmd := `cat /proc/sys/net/ipv4/ip_forward; echo "---CMS_DELIM---"; ufw status`
+	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Router.IP, cmd)
+	parts := strings.Split(out, "---CMS_DELIM---")
+	fwdOut := ""
+	ufwOut := ""
+	if len(parts) >= 2 {
+		fwdOut = strings.TrimSpace(parts[0])
+		ufwOut = parts[1]
+	} else {
+		fwdOut = strings.TrimSpace(out)
 	}
+	pass := err == nil && fwdOut == "1" && strings.Contains(ufwOut, "Status: active")
 	return CheckResult{"Phase 06", "Router UFW & IP Forward", pass, ""}
 }
 
 func (v *Verifier) phase07(ctx context.Context) CheckResult {
-	// DRBD status on master nodes
+	// DRBD status on master nodes concurrently
+	var masterIPs []string
 	for _, m := range v.cfg.Nodes.Masters {
-		if m.IP == "" {
-			continue
+		if m.IP != "" {
+			masterIPs = append(masterIPs, m.IP)
 		}
-		out, _, _, err := v.ssh.RunCommand(ctx, m.IP, "drbdadm status cms_data 2>/dev/null || drbdadm status 2>/dev/null")
-		if err == nil && (strings.Contains(out, "Primary") || strings.Contains(out, "Secondary") || strings.Contains(out, "UpToDate")) {
-			return CheckResult{"Phase 07", "DRBD Status", true, fmt.Sprintf("Verified on %s", m.Name)}
+	}
+	if len(masterIPs) == 0 {
+		return CheckResult{"Phase 07", "DRBD Status", false, "No master nodes configured"}
+	}
+	res := v.ssh.RunParallel(ctx, masterIPs, "drbdadm status cms_data 2>/dev/null || drbdadm status 2>/dev/null")
+	for _, r := range res {
+		if r.Err == nil && (strings.Contains(r.Output, "Primary") || strings.Contains(r.Output, "Secondary") || strings.Contains(r.Output, "UpToDate")) {
+			return CheckResult{"Phase 07", "DRBD Status", true, fmt.Sprintf("Verified on %s", r.Host)}
 		}
 	}
 	return CheckResult{"Phase 07", "DRBD Status", false, "DRBD inactive or unreachable on masters"}
