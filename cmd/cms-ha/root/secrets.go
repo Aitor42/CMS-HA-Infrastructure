@@ -28,6 +28,16 @@ func init() {
                 if data, err := os.ReadFile(filepath.Clean(keyInput)); err == nil {
                     pubKey = strings.TrimSpace(string(data))
                 }
+            } else {
+                if data, err := os.ReadFile("public.key"); err == nil {
+                    pubKey = strings.TrimSpace(string(data))
+                } else if data, err := os.ReadFile(config.ExpandPath("${HOME}/.config/cms-ha/public.key")); err == nil {
+                    pubKey = strings.TrimSpace(string(data))
+                }
+            }
+            if pubKey == "" {
+                handleError(fmt.Errorf("public key is required: provide --key or place public.key in current directory or ~/.config/cms-ha/public.key"))
+                return
             }
             if err := config.EncryptConfig(configPath, pubKey); err != nil { handleError(err); return }
             logging.Success("Configuration file %s encrypted successfully", configPath)
@@ -64,7 +74,7 @@ func init() {
                 return
             }
             fmt.Printf("Public Key: %s\n", pub)
-            logging.Success("Keys saved securely to public.key (0644) and private.key (0600)")
+            logging.Success("Keys saved securely to public.key (0600) and private.key (0600)")
         },
     }
     secretsCmd.AddCommand(genKeyCmd)

@@ -156,8 +156,13 @@ func EncryptConfig(configPath, publicKey string) error {
 		return fmt.Errorf("failed to encode yaml: %w", err)
 	}
 
-	if err := os.WriteFile(cleanedConfigPath, buf.Bytes(), 0600); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
+	tmpFile := cleanedConfigPath + ".tmp"
+	if err := os.WriteFile(tmpFile, buf.Bytes(), 0600); err != nil {
+		return fmt.Errorf("failed to write temporary config: %w", err)
+	}
+	if err := os.Rename(tmpFile, cleanedConfigPath); err != nil {
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to replace config: %w", err)
 	}
 
 	return nil

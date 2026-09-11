@@ -170,7 +170,14 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 	
 	resolvedKeyPath := keyPath
 	if resolvedKeyPath == "" {
-		resolvedKeyPath = ExpandPath("${HOME}/.config/cms-ha/age.key")
+		defaultKey := ExpandPath("${HOME}/.config/cms-ha/age.key")
+		if _, err := os.Stat(defaultKey); err == nil {
+			resolvedKeyPath = defaultKey
+		} else if _, err := os.Stat("private.key"); err == nil {
+			resolvedKeyPath = "private.key"
+		} else {
+			resolvedKeyPath = defaultKey
+		}
 	} else {
 		resolvedKeyPath = ExpandPath(resolvedKeyPath)
 	}
