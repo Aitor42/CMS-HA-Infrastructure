@@ -98,7 +98,11 @@ check_cms_reachable() {
   local label="${1:-CMS reachability}"
   local http_code
 
-  http_code=$(curl -skL -o /dev/null -w '%{http_code}' --max-time 15 "${CMS_URL}" 2>/dev/null || echo "000")
+  http_code=$(curl -skL \
+    --resolve "cms.fake-enterprise.com:443:${LB_IP:-192.168.20.100}" \
+    --resolve "cms.fake-enterprise.com:80:${LB_IP:-192.168.20.100}" \
+    -H "Host: cms.fake-enterprise.com" \
+    -o /dev/null -w '%{http_code}' --max-time 15 "https://cms.fake-enterprise.com" 2>/dev/null || echo "000")
 
   if [ "$http_code" = "200" ]; then
     success "${label}: HTTP ${http_code}"

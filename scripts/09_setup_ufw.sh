@@ -97,7 +97,7 @@ for ENTRY in "${ALL_NODES[@]}"; do
     NODE_IP="${ENTRY%%:*}"
     NODE_NAME="${ENTRY##*:}"
     if ssh ${SSH_OPTS} -o ConnectTimeout=5 root@"$NODE_IP" true 2>/dev/null; then
-        ssh ${SSH_OPTS} root@"$NODE_IP" "$PUPPET_RUN" >/dev/null 2>&1 &
+        ssh ${SSH_OPTS} root@"$NODE_IP" "$PUPPET_RUN || [ \$? -eq 2 ]" >/dev/null 2>&1 &
         NODE_PIDS[$NODE_NAME]=$!
     else
         echo "  [SKIP] $NODE_NAME not reachable."

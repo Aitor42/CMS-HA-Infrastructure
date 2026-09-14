@@ -4,7 +4,7 @@
 # Útil después de pausar/reanudar las VMs para evitar desajustes en K3s/etcd.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
+source "${SCRIPT_DIR}/../config.sh"
 
 CUR_TIME=$(date +%s)
 echo -e "${GREEN}=========================================================${NC}"
@@ -33,7 +33,7 @@ for entry in "${vms[@]}"; do
     echo -n "[+] Sincronizando $name ($ip)... "
     
     # Intentar SSH rápido
-    if ssh $SSH_OPTS -o ConnectTimeout=3 root@$ip "date -s @$CUR_TIME && (systemctl restart systemd-timesyncd || true)" &>/dev/null; then
+    if ssh $SSH_OPTS -o ConnectTimeout=3 root@$ip "date -s @$CUR_TIME && (systemctl restart chrony 2>/dev/null && chronyc makestep 2>/dev/null || systemctl restart systemd-timesyncd 2>/dev/null || true)" &>/dev/null; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FALLIDO (Inaccesible o error de SSH)${NC}"

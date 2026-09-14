@@ -17,7 +17,7 @@ set -euo pipefail
 
 # Cargar configuraciones centrales del proyecto
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
+source "${SCRIPT_DIR}/../config.sh"
 
 # Estado y banderas de ejecución por defecto
 FORCE_REINSTALL=false

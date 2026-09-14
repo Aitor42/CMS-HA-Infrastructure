@@ -4,7 +4,7 @@
 # Sincroniza los relojes de todos los nodos, limpia procesos bloqueados y reinicia los servicios en paralelo.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
+source "${SCRIPT_DIR}/../config.sh"
 
 CUR_TIME=$(date +%s)
 echo -e "${GREEN}=========================================================${NC}"

@@ -191,13 +191,23 @@ func checkLBReachability(lbIP string) bool {
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- test failover on lab LB
 	}
 	client := &http.Client{Timeout: 10 * time.Second, Transport: tr}
-	resp, err := client.Get(fmt.Sprintf("https://%s", lbIP))
-	if err != nil {
-		resp, err = client.Get(fmt.Sprintf("http://%s", lbIP))
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s", lbIP), nil)
+	if err == nil {
+		req.Host = "cms.fake-enterprise.com"
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
+		}
 	}
-	if err != nil {
-		return false
+	reqHTTP, err := http.NewRequest("GET", fmt.Sprintf("http://%s", lbIP), nil)
+	if err == nil {
+		reqHTTP.Host = "cms.fake-enterprise.com"
+		resp, err := client.Do(reqHTTP)
+		if err == nil {
+			defer resp.Body.Close()
+			return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
+		}
 	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
+	return false
 }

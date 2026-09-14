@@ -12,7 +12,7 @@ set -uo pipefail
 
 # Cargar la configuración global
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
+source "${SCRIPT_DIR}/../config.sh"
 
 FAILS=0
 VIRSH="${VIRSH:-virsh -c qemu:///system}"

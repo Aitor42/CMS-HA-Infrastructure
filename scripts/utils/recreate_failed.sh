@@ -12,7 +12,7 @@ set -euo pipefail
 
 # Cargar configuración global
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
+source "${SCRIPT_DIR}/../config.sh"
 
 VIRSH_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 VIRT_TYPE="kvm"
