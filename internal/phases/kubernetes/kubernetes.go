@@ -134,8 +134,10 @@ func (p *Phase) Run(ctx context.Context) error {
 		"mariadb-secret.yaml",
 		"mariadb-pv.yaml",
 		"mariadb-pvc.yaml",
+		"mariadb-backup-pv.yaml",
 		"mariadb-service.yaml",
 		"mariadb-statefulset.yaml",
+		"mariadb-backup-cronjob.yaml",
 		"init-db-job.yaml",
 	}
 

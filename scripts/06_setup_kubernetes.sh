@@ -256,9 +256,10 @@ ssh ${SSH_OPTS} root@$MASTER1_IP << 'EOF'
 
     # 6c. Configurar almacenamiento persistente (Volumen en local /mnt/data/mariadb)
     # Al utilizar DRBD, esta carpeta está físicamente montada sobre el dispositivo distribuido
-    echo "[+] Creando volumen persistente y PVC para MariaDB..."
+    echo "[+] Creando volumen persistente y PVC para MariaDB y Backups..."
     apply_with_retry $MANIFESTS/mariadb-pv.yaml
     apply_with_retry $MANIFESTS/mariadb-pvc.yaml
+    apply_with_retry $MANIFESTS/mariadb-backup-pv.yaml
 
     # 6d. Desplegar abstracción de red (Service)
     echo "[+] Creando servicios de red de MariaDB (ClusterIP + NodePort)..."
@@ -300,6 +301,10 @@ ssh ${SSH_OPTS} root@$MASTER1_IP << 'EOF'
     kubectl wait --for=condition=complete job/init-wordpress-db -n cms --timeout=180s
 
     echo "[OK] Base de datos y privilegios del CMS inicializados correctamente."
+
+    # 6g. Desplegar CronJob de copias de seguridad
+    echo "[+] Desplegando CronJob de copias de seguridad automáticas..."
+    apply_with_retry $MANIFESTS/mariadb-backup-cronjob.yaml
 
     # Mostrar inventario de recursos
     echo ""

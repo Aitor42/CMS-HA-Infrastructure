@@ -37,16 +37,21 @@ func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 	
-	nodes := []string{p.cfg.Nodes.LB.IP}
-	for _, cms := range p.cfg.Nodes.CMSFrontends {
-		nodes = append(nodes, cms.IP)
+	logging.Info("Running Puppet agent on LB node...")
+	_, _, code, err := p.pool.RunCommand(ctx, p.cfg.Nodes.LB.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
+	if code != 0 && code != 2 {
+		return fmt.Errorf("puppet agent failed on LB %s (exit code %d): %v", p.cfg.Nodes.LB.IP, code, err)
 	}
-	
-	logging.Info("Running Puppet agent on LB and CMS nodes...")
-	res := p.pool.RunParallel(ctx, nodes, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
-	for _, r := range res {
-		if r.ExitCode != 0 && r.ExitCode != 2 {
-			return fmt.Errorf("puppet agent failed on %s (exit code %d): %v", r.Host, r.ExitCode, r.Err)
+
+	logging.Info("Running Puppet agent on CMS frontends sequentially to prevent install race conditions...")
+	for _, cms := range p.cfg.Nodes.CMSFrontends {
+		if cms.IP == "" {
+			continue
+		}
+		logging.Info("Converging CMS frontend %s (%s)...", cms.Name, cms.IP)
+		_, _, code, err := p.pool.RunCommand(ctx, cms.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
+		if code != 0 && code != 2 {
+			return fmt.Errorf("puppet agent failed on %s (exit code %d): %v", cms.Name, code, err)
 		}
 	}
 	
