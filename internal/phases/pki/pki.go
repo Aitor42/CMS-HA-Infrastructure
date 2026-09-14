@@ -83,8 +83,8 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	initCmd := fmt.Sprintf(`export STEPPATH=/root/.step && \
-step ca init --name="CMS Local CA" --dns="%s,%s" \
---address=":%d" --provisioner="admin" --password-file=/root/.step/password.txt --with-ca-url="https://%s:%d"`,
+[ -f /root/.step/certs/root_ca.crt ] || step ca init --name="CMS Local CA" --dns="%s,%s" \
+--address=":%d" --provisioner="admin" --password-file=/root/.step/password.txt --with-ca-url="https://%s:%d" --deployment-type=standalone`,
 		caDomain, jumpIP, caPort, jumpIP, caPort)
 
 	// Run initialization (ignore if already initialized)

@@ -52,6 +52,9 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("install puppet agents: %w", err)
 	}
 
+	logging.Info("Signing any pending agent certificates on Puppet Server...")
+	p.pool.RunCommand(ctx, jumpstartIP, "puppetserver ca sign --all 2>/dev/null || true")
+
 	logging.Info("Running first puppet agent catalog on all nodes...")
 	if err := p.runFirstCatalog(ctx, agentIPs); err != nil {
 		return fmt.Errorf("run first catalog: %w", err)

@@ -251,7 +251,7 @@ func (p *Phase) cleanPuppetCA(ctx context.Context, nodes []config.NodeSpec) erro
 	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
 	for _, n := range nodes {
 		nodeIP := n.IP
-		if nodeIP == "" {
+		if nodeIP == "" || nodeIP == jumpstartIP {
 			continue
 		}
 		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {

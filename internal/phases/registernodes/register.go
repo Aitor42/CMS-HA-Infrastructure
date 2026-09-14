@@ -29,17 +29,6 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
 	
-	// Pre-fetch all existing Cobbler systems in a single command (O(1) roundtrip)
-	logging.Info("Querying existing Cobbler systems...")
-	out, _, _, _ := p.pool.RunCommand(ctx, jumpIP, "cobbler system list")
-	existingSystems := make(map[string]bool)
-	for _, line := range strings.Split(out, "\n") {
-		name := strings.TrimSpace(line)
-		if name != "" {
-			existingSystems[name] = true
-		}
-	}
-
 	var scriptBuilder strings.Builder
 	scriptBuilder.WriteString("set -e\n")
 
@@ -48,14 +37,9 @@ func (p *Phase) Run(ctx context.Context) error {
 			continue
 		}
 		
-		cmd := "cobbler system add"
-		if existingSystems[node.Name] {
-			cmd = "cobbler system edit"
-		}
-		
 		mac := node.MAC
 		if mac == "" {
-			mac = "00:00:00:00:00:00" // Fallback if MAC isn't populated
+			mac = "00:00:00:00:00:00"
 		}
 
 		cobblerServerIP := jumpIP
@@ -70,9 +54,10 @@ func (p *Phase) Run(ctx context.Context) error {
 		kernelOpts := fmt.Sprintf("autoinstall ds=nocloud-net;s=http://%s/cblr/svc/op/autoinstall/system/%s/ netboot=nfs nfsroot=%s:/var/www/cobbler/distro_mirror/ubuntu-24.04 boot=casper ip=dhcp",
 			cobblerServerIP, node.Name, cobblerServerIP)
 
-		logging.Info("Registering node %s (%s)...", node.Name, cmd)
-		scriptBuilder.WriteString(fmt.Sprintf("%s --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
-			cmd, node.Name, node.FQDN, node.IP, mac, kernelOpts, node.Name))
+		logging.Info("Registering node %s...", node.Name)
+		scriptBuilder.WriteString(fmt.Sprintf("cobbler system remove --name=%s 2>/dev/null || true\n", node.Name))
+		scriptBuilder.WriteString(fmt.Sprintf("cobbler system add --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
+			node.Name, node.FQDN, node.IP, mac, kernelOpts, node.Name))
 	}
 	
 	logging.Info("Synchronizing Cobbler...")
