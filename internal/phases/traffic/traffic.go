@@ -140,13 +140,38 @@ func (t *Traffic) Run(ctx context.Context) error {
 	// Phase 3: DB direct queries
 	if t.opts.WithDB {
 		logging.Info("Phase 3: Direct MariaDB SQL queries")
-		dbHost := getPrefix(t.cfg.Network.Internal.CIDR) + "10" // Default fallback if no master node defined
+		dbHost := getPrefix(t.cfg.Network.Internal.CIDR) + "10"
 		if len(t.cfg.Nodes.Masters) > 0 && t.cfg.Nodes.Masters[0].IP != "" {
 			dbHost = t.cfg.Nodes.Masters[0].IP
 		}
-		dbDSN := fmt.Sprintf("root:%s@tcp(%s:3306)/cms", t.cfg.Database.RootPassword, dbHost)
+		dbPort := t.cfg.Database.Port
+		if dbPort == 0 {
+			dbPort = 30306
+		}
+		dbName := t.cfg.Database.Name
+		if dbName == "" {
+			dbName = "wordpress"
+		}
+		dbUser := t.cfg.Database.User
+		if dbUser == "" {
+			dbUser = "wp_user"
+		}
+		dbPass := t.cfg.Database.Password
+		if dbPass == "" {
+			dbPass = "WpS3cur3P4ss!"
+		}
+		dbDSN := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", dbUser, dbPass, dbHost, dbPort, dbName)
 		if err := testDBQueries(ctx, dbDSN); err != nil {
-			logging.Warn("DB direct queries failed: %v", err)
+			rootPass := t.cfg.Database.RootPassword
+			if rootPass == "" {
+				rootPass = "mysqlrootpass"
+			}
+			rootDSN := fmt.Sprintf("root:%s@tcp(%s:%d)/%s", rootPass, dbHost, dbPort, dbName)
+			if errRoot := testDBQueries(ctx, rootDSN); errRoot != nil {
+				logging.Warn("DB direct queries failed: %v", err)
+			} else {
+				logging.Success("DB queries executed successfully (via root)")
+			}
 		} else {
 			logging.Success("DB queries executed successfully")
 		}

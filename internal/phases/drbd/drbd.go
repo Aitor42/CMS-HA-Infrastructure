@@ -139,11 +139,12 @@ fi
 		return fmt.Errorf("failed to format and mount DRBD volume on master1: %w", err)
 	}
 	
-	logging.Info("Updating fstab on Master 1...")
-	fstabCmd := "grep -q '/dev/drbd0' /etc/fstab || echo '/dev/drbd0 /mnt/data/mariadb ext4 defaults,noauto 0 0' >> /etc/fstab"
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fstabCmd)
-	if err != nil {
-		return fmt.Errorf("failed to update fstab: %w", err)
+	logging.Info("Updating fstab and mount directory on masters...")
+	fstabCmd := "mkdir -p /mnt/data/mariadb && (grep -q '/dev/drbd0' /etc/fstab || echo '/dev/drbd0 /mnt/data/mariadb ext4 defaults,noauto 0 0' >> /etc/fstab)"
+	for _, ip := range []string{master1.IP, master2.IP} {
+		if _, _, _, err := p.pool.RunCommand(ctx, ip, fstabCmd); err != nil {
+			logging.Warn("failed to update fstab on %s: %v", ip, err)
+		}
 	}
 
 	logging.Info("Deploying DRBD failover script...")
@@ -180,8 +181,12 @@ WantedBy=multi-user.target
 	}
 
 	tmpfilesContent := "d /mnt/data 0755 root root -\nd /mnt/data/mariadb 0755 999 999 -\n"
-	if err := p.pool.CopyContent(ctx, master1.IP, []byte(tmpfilesContent), "/etc/tmpfiles.d/mariadb-datadir.conf", 0644); err != nil {
-		logging.Warn("Failed to upload mariadb-datadir.conf: %v", err)
+	for _, ip := range []string{master1.IP, master2.IP} {
+		if err := p.pool.CopyContent(ctx, ip, []byte(tmpfilesContent), "/etc/tmpfiles.d/mariadb-datadir.conf", 0644); err != nil {
+			logging.Warn("Failed to upload mariadb-datadir.conf on %s: %v", ip, err)
+		} else {
+			p.pool.RunCommand(ctx, ip, "systemd-tmpfiles --create /etc/tmpfiles.d/mariadb-datadir.conf 2>/dev/null || true")
+		}
 	}
 	
 	logging.Success("DRBD Setup completed successfully.")
