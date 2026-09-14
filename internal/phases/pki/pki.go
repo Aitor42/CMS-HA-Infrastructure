@@ -43,7 +43,16 @@ func (p *Phase) Run(ctx context.Context) error {
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
 	
 	logging.Info("Installing step-cli and step-ca on Jumpstart...")
-	installCmd := "apt-get update && apt-get install -y step-cli step-ca"
+	installCmd := `(command -v step &>/dev/null && command -v step-ca &>/dev/null) || (
+		ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+		wget -q "https://github.com/smallstep/cli/releases/latest/download/step-cli_${ARCH}.deb" -O /tmp/step-cli.deb && \
+		(dpkg -i /tmp/step-cli.deb || apt-get install -f -y)
+		rm -f /tmp/step-cli.deb
+
+		wget -q "https://github.com/smallstep/certificates/releases/latest/download/step-ca_${ARCH}.deb" -O /tmp/step-ca.deb && \
+		(dpkg -i /tmp/step-ca.deb || apt-get install -f -y)
+		rm -f /tmp/step-ca.deb
+	)`
 	if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, installCmd); err != nil {
 		return fmt.Errorf("failed to install step-ca: %w", err)
 	}

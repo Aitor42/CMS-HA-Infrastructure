@@ -55,8 +55,10 @@ echo ""
 # ==============================================================================
 info "Installing step CLI and step-ca on jumpstart ($CA_HOST)..."
 
-ssh ${SSH_OPTS} root@"$CA_HOST" bash -s <<'INSTALL_EOF'
+ssh ${SSH_OPTS} root@"$CA_HOST" bash -s -- "$STEP_VERSION" "$STEP_CA_VERSION" <<'INSTALL_EOF'
 set -euo pipefail
+STEP_VERSION="$1"
+STEP_CA_VERSION="$2"
 
 # Skip if already installed
 if command -v step &>/dev/null && command -v step-ca &>/dev/null; then
@@ -69,10 +71,10 @@ ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 # Install step CLI
 if ! command -v step &>/dev/null; then
     echo "  [+] Installing step CLI..."
-    STEP_DEB="step-cli_STEP_VERSION_${ARCH}.deb"
-    wget -q "https://dl.smallstep.com/cli/docs-cli-install/latest/step-cli_STEP_VERSION_${ARCH}.deb" \
+    STEP_DEB="step-cli_${ARCH}.deb"
+    wget -q "https://github.com/smallstep/cli/releases/download/v${STEP_VERSION}/${STEP_DEB}" \
         -O "/tmp/${STEP_DEB}" 2>/dev/null || \
-    wget -q "https://github.com/smallstep/cli/releases/latest/download/step-cli_STEP_VERSION_${ARCH}.deb" \
+    wget -q "https://github.com/smallstep/cli/releases/latest/download/${STEP_DEB}" \
         -O "/tmp/${STEP_DEB}" 2>/dev/null || true
 
     if [ -f "/tmp/${STEP_DEB}" ] && [ -s "/tmp/${STEP_DEB}" ]; then
@@ -87,10 +89,10 @@ fi
 # Install step-ca
 if ! command -v step-ca &>/dev/null; then
     echo "  [+] Installing step-ca..."
-    STEP_CA_DEB="step-ca_STEP_CA_VERSION_${ARCH}.deb"
-    wget -q "https://dl.smallstep.com/certificates/docs-ca-install/latest/step-ca_STEP_CA_VERSION_${ARCH}.deb" \
+    STEP_CA_DEB="step-ca_${ARCH}.deb"
+    wget -q "https://github.com/smallstep/certificates/releases/download/v${STEP_CA_VERSION}/${STEP_CA_DEB}" \
         -O "/tmp/${STEP_CA_DEB}" 2>/dev/null || \
-    wget -q "https://github.com/smallstep/certificates/releases/latest/download/step-ca_STEP_CA_VERSION_${ARCH}.deb" \
+    wget -q "https://github.com/smallstep/certificates/releases/latest/download/${STEP_CA_DEB}" \
         -O "/tmp/${STEP_CA_DEB}" 2>/dev/null || true
 
     if [ -f "/tmp/${STEP_CA_DEB}" ] && [ -s "/tmp/${STEP_CA_DEB}" ]; then

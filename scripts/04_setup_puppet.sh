@@ -220,8 +220,14 @@ apt-get update
 apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -y puppet-agent
 
 echo "[+] Deploying puppet.conf for agent..."
-export NODE_FQDN
-envsubst < /tmp/tpl_puppet_agent.conf > /etc/puppetlabs/puppet/puppet.conf
+mkdir -p /etc/puppetlabs/puppet
+cat << EOF_CONF > /etc/puppetlabs/puppet/puppet.conf
+[main]
+server = ${PUPPET_SERVER_FQDN}
+environment = production
+runinterval = 30m
+certname = ${NODE_FQDN}
+EOF_CONF
 
 # Garantizar resolución local hacia el Puppet Master
 grep -q "${PUPPET_SERVER_FQDN}" /etc/hosts || \
@@ -347,7 +353,7 @@ for NODE_NAME in "${SUCCESSFUL_NODES[@]}"; do
     NODE_IP="${AGENT_NODES[$NODE_NAME]}"
     if ssh ${SSH_OPTS} -o ConnectTimeout=5 root@"$NODE_IP" true 2>/dev/null; then
         echo "    → $NODE_NAME ($NODE_IP)"
-        ssh ${SSH_OPTS} root@"$NODE_IP" "$PUPPET_BIN agent -t" 2>&1 | \
+        ssh ${SSH_OPTS} root@"$NODE_IP" "$PUPPET_BIN agent -t || [ \$? -eq 2 ]" 2>&1 | \
             tail -3 | sed 's/^/        /'
     fi
 done
