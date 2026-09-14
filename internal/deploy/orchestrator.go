@@ -86,11 +86,16 @@ func (o *Orchestrator) BuildPhaseList(opts DeployOpts) []phases.Phase {
 	var list []phases.Phase
 
 	if !opts.SkipVMCreate {
-		list = append(list, initvms.NewPhase(o.Cfg, o.SSH, o.Libvirt))
+		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{JumpstartOnly: true}))
 	}
 	list = append(list,
 		cobbler.NewPhase(o.Cfg, o.SSH),
 		registernodes.NewPhase(o.Cfg, o.SSH),
+	)
+	if !opts.SkipVMCreate {
+		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{NodesOnly: true}))
+	}
+	list = append(list,
 		repairssh.NewPhase(o.Cfg, o.SSH),
 		puppet.NewPhase(o.Cfg, o.SSH),
 		drbd.NewPhase(o.Cfg, o.SSH),

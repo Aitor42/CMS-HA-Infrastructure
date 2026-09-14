@@ -23,8 +23,8 @@ func TestDeploy_BuildPhaseList(t *testing.T) {
 
 	// Full list with VM creation
 	phasesAll := orch.BuildPhaseList(deploy.DeployOpts{SkipVMCreate: false})
-	if len(phasesAll) != 11 {
-		t.Errorf("expected 11 phases, got %d", len(phasesAll))
+	if len(phasesAll) != 12 {
+		t.Errorf("expected 12 phases, got %d", len(phasesAll))
 	}
 
 	// List skipping VM creation

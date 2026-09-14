@@ -57,10 +57,22 @@ func (p *Phase) Run(ctx context.Context) error {
 		if mac == "" {
 			mac = "00:00:00:00:00:00" // Fallback if MAC isn't populated
 		}
-		
+
+		cobblerServerIP := jumpIP
+		if strings.HasPrefix(node.IP, "192.168.20.") {
+			if p.cfg.Nodes.Jumpstart.IPMain != "" {
+				cobblerServerIP = p.cfg.Nodes.Jumpstart.IPMain
+			} else {
+				cobblerServerIP = "192.168.20.10"
+			}
+		}
+
+		kernelOpts := fmt.Sprintf("autoinstall ds=nocloud-net;s=http://%s/cblr/svc/op/autoinstall/system/%s/ netboot=nfs nfsroot=%s:/var/www/cobbler/distro_mirror/ubuntu-24.04 boot=casper ip=dhcp",
+			cobblerServerIP, node.Name, cobblerServerIP)
+
 		logging.Info("Registering node %s (%s)...", node.Name, cmd)
-		scriptBuilder.WriteString(fmt.Sprintf("%s --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac-address=%s --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
-			cmd, node.Name, node.Name, node.IP, mac, node.Name))
+		scriptBuilder.WriteString(fmt.Sprintf("%s --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
+			cmd, node.Name, node.FQDN, node.IP, mac, kernelOpts, node.Name))
 	}
 	
 	logging.Info("Synchronizing Cobbler...")
