@@ -44,11 +44,6 @@ ssh ${SSH_OPTS} root@$MASTER1_IP << EOF
             --flannel-iface enp1s0 \
             --etcd-arg=heartbeat-interval=1000 \
             --etcd-arg=election-timeout=10000" sh -
-
-        echo "[+] Habilitando servicio systemd..."
-        systemctl daemon-reload
-        systemctl enable k3s
-        systemctl start k3s --no-block
     fi
 
     echo "[+] Esperando a que el API Server esté listo..."
@@ -111,19 +106,16 @@ ssh ${SSH_OPTS} root@$MASTER2_IP << EOF
         curl -sfL https://get.k3s.io | K3S_URL=https://${MASTER1_IP}:6443 \
             K3S_TOKEN=${K3S_TOKEN} \
             INSTALL_K3S_EXEC="server --node-ip ${MASTER2_IP} \
+            --node-external-ip ${MASTER2_IP} \
+            --flannel-iface enp1s0 \
             --etcd-arg=heartbeat-interval=1000 \
             --etcd-arg=election-timeout=10000" sh -
-
-        echo "[+] Habilitando servicio systemd..."
-        systemctl daemon-reload
-        systemctl enable k3s
-        systemctl start k3s --no-block
     fi
 
     echo "[+] Esperando a que el Master 2 se integre al clúster..."
     K3S_READY=false
     for i in \$(seq 1 30); do
-        if kubectl get nodes | grep -q "${MASTER2_IP}"; then
+        if kubectl get nodes -o wide | grep -q "${MASTER2_IP}"; then
             echo "[OK] Master 2 integrado en el plano de control."
             K3S_READY=true
             break
@@ -157,12 +149,7 @@ for WORKER_IP in "$WORKER1_IP" "$WORKER2_IP"; do
             echo "[+] Ejecutando instalador en modo Agent..."
             curl -sfL https://get.k3s.io | K3S_URL=https://${MASTER1_IP}:6443 \
                 K3S_TOKEN=${K3S_TOKEN} \
-                INSTALL_K3S_EXEC="agent --node-ip ${WORKER_IP}" sh -
-
-            echo "[+] Activando servicio systemd..."
-            systemctl daemon-reload
-            systemctl enable k3s-agent
-            systemctl start k3s-agent --no-block
+                INSTALL_K3S_EXEC="agent --node-ip ${WORKER_IP} --flannel-iface enp1s0" sh -
         fi
 
         echo "[+] Validando levantamiento del Agente..."
