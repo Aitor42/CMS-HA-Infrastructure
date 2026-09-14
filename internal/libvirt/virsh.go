@@ -266,7 +266,7 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--network", netArg)
 	}
 
-	if opts.PXE {
+	if opts.PXE && len(opts.BootOrder) == 0 {
 		args = append(args, "--pxe")
 	}
 	

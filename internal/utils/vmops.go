@@ -103,7 +103,9 @@ func ShrinkVMRAM(ctx context.Context, cfg *config.Config, l *libvirt.Client) err
 			logging.Warn("VM %s is running, cannot shrink RAM. Shutdown first.", vm)
 			continue
 		}
-		err := l.SetMemory(ctx, vm, int64(mem*1024))
+		kib := int64(mem * 1024)
+		_ = l.SetMaxMemory(ctx, vm, kib)
+		err := l.SetMemory(ctx, vm, kib)
 		if err != nil {
 			logging.Error("Failed to set memory for %s: %v", vm, err)
 		} else {
@@ -271,8 +273,10 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 
 		// Resize and restart all VMs in the batch with final RAM
 		for _, node := range batch {
-			l.SetMemory(ctx, node.name, int64(node.ramFinalMB*1024))
-			l.Start(ctx, node.name)
+			kib := int64(node.ramFinalMB * 1024)
+			_ = l.SetMaxMemory(ctx, node.name, kib)
+			_ = l.SetMemory(ctx, node.name, kib)
+			_ = l.Start(ctx, node.name)
 			logging.Success("Batch %d: %s resized to %d MB and running", i+1, node.name, node.ramFinalMB)
 		}
 	}

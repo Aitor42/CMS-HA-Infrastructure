@@ -182,7 +182,7 @@ func (p *Pool) RunScript(ctx context.Context, host, script string) (string, erro
 		p.RunCommand(cleanupCtx, host, "rm -f "+tmpPath)
 	}()
 
-	stdout, stderr, exitCode, err := p.RunCommand(ctx, host, tmpPath)
+	stdout, stderr, exitCode, err := p.RunCommand(ctx, host, "bash "+tmpPath)
 	if err != nil || exitCode != 0 {
 		return stdout, fmt.Errorf("script execution failed on %s (exit %d): %v\nStderr: %s", host, exitCode, err, stderr)
 	}
