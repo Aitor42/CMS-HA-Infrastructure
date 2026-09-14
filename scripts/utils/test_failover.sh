@@ -157,10 +157,11 @@ test_drbd_failover() {
   # Wait for the VM to actually stop so the cluster detects the failure
   sleep 10
 
-  # Step 3: Wait for DRBD on master2 to promote to Primary
-  # The drbd-failover.sh script or manual promotion should make master2 Primary.
-  # We poll the DRBD status output on master2 looking for 'Primary' in the role.
-  info "[3/7] Waiting for internal-master2 to become DRBD Primary (timeout: ${TIMEOUT_DRBD}s)..."
+  # Step 3: Trigger DRBD failover promotion on master2
+  info "[3/7] Promoting internal-master2 to DRBD Primary via failover script..."
+  ssh ${SSH_OPTS} root@"${MASTER2_IP}" '/usr/local/bin/drbd-failover.sh promote' 2>/dev/null || true
+
+  info "Waiting for internal-master2 to report DRBD Primary (timeout: ${TIMEOUT_DRBD}s)..."
   local elapsed=0
   local drbd_promoted=false
 

@@ -106,9 +106,6 @@ ssh $SSH_OPTS root@"$NODE1_IP" bash -s <<'PRIMARY_SETUP'
     echo "  ℹ ext4 filesystem already present, skipping format to preserve data"
   fi
 
-  echo "[+] Stopping K3s to avoid mount point locks..."
-  systemctl stop k3s || true
-
   mkdir -p /tmp/mariadb_backup
   if [ -d "/mnt/data/mariadb" ] && [ "$(ls -A "/mnt/data/mariadb" 2>/dev/null)" ]; then
     echo "[+] Saving existing MariaDB data..."
@@ -138,14 +135,32 @@ ssh $SSH_OPTS root@"$NODE1_IP" bash -s <<'PRIMARY_SETUP'
     echo "  ℹ Persistent entry already exists"
   fi
 
-  if command -v kubectl &>/dev/null; then
-    echo "[+] Labelling Kubernetes node as drbd-status=primary..."
-    kubectl label node $(hostname) drbd-status=primary --overwrite || true
-    kubectl label node internal-master2 drbd-status- 2>/dev/null || true
-  fi
+  echo "[+] Deploying DRBD boot-time promotion service and tmpfiles on Master 1..."
+  cat << 'EOF_SERVICE' > /etc/systemd/system/drbd-cms-primary.service
+[Unit]
+Description=Promote DRBD cms_data to Primary on master1
+After=drbd.service network-online.target
+Wants=drbd.service network-online.target
+Before=k3s.service
 
-  echo "[+] Restarting K3s..."
-  systemctl start k3s || true
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "drbdadm up all 2>/dev/null; sleep 3; drbdadm primary cms_data 2>/dev/null || true; mkdir -p /mnt/data/mariadb; mountpoint -q /mnt/data/mariadb || mount /dev/drbd0 /mnt/data/mariadb 2>/dev/null || true"
+ExecStartPost=/bin/bash -c "drbdadm status 2>/dev/null || true"
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+  systemctl daemon-reload
+  systemctl enable drbd-cms-primary.service
+
+  cat << 'EOF_TMPFILES' > /etc/tmpfiles.d/mariadb-datadir.conf
+d /mnt/data 0755 root root -
+d /mnt/data/mariadb 0755 999 999 -
+EOF_TMPFILES
+  systemd-tmpfiles --create /etc/tmpfiles.d/mariadb-datadir.conf 2>/dev/null || true
+  chown -R 999:999 /mnt/data/mariadb 2>/dev/null || true
 
   echo "  ✔ Primary configuration complete"
 PRIMARY_SETUP
