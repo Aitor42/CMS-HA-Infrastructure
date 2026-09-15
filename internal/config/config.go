@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -167,6 +168,13 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 	
 	c.VM.StorageDir = ExpandPath(c.VM.StorageDir)
 	c.SSH.PrivateKey = ExpandPath(c.SSH.PrivateKey)
+
+	// Allow NUM_HOTDESKS environment variable to override hotdesks count dynamically (matching scripts/config.sh)
+	if envHotdesks := os.Getenv("NUM_HOTDESKS"); envHotdesks != "" {
+		if val, err := strconv.Atoi(envHotdesks); err == nil && val > 0 {
+			c.Nodes.Hotdesks.Count = val
+		}
+	}
 	
 	resolvedKeyPath := keyPath
 	if resolvedKeyPath == "" {

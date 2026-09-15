@@ -15,6 +15,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/pkg/sftp"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 type Phase struct {
@@ -65,19 +66,79 @@ func (p *Phase) Run(ctx context.Context) error {
 }
 
 func (p *Phase) elevateRootSSH(ctx context.Context, jumpIP string) error {
-	script := `
+	// First check if root SSH works directly
+	logging.Info("Waiting for SSH on Jumpstart (%s)...", jumpIP)
+	if err := p.pool.WaitForSSH(ctx, jumpIP, 45*time.Second); err == nil {
+		logging.Success("Root SSH already accessible on %s", jumpIP)
+		return nil
+	}
+
+	logging.Info("Root SSH not directly accessible; attempting elevation via admin user on %s...", jumpIP)
+	keyBytes, err := os.ReadFile(p.cfg.SSH.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("failed to read private key: %w", err)
+	}
+	signer, err := gossh.ParsePrivateKey(keyBytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	adminCfg := &gossh.ClientConfig{
+		User:            "admin",
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(signer)},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         10 * time.Second,
+	}
+
+	// Poll admin SSH up to 5 minutes
+	var adminClient *gossh.Client
+	pollTimeout := time.After(5 * time.Minute)
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-pollTimeout:
+			return fmt.Errorf("timed out waiting for SSH (admin/root) on %s", jumpIP)
+		case <-ticker.C:
+			c, err := gossh.Dial("tcp", jumpIP+":22", adminCfg)
+			if err == nil {
+				adminClient = c
+				break
+			}
+		}
+		if adminClient != nil {
+			break
+		}
+	}
+	defer adminClient.Close()
+
+	elevateCmd := `sudo bash -c '
 mkdir -p /root/.ssh
-for f in /home/*/.ssh/authorized_keys; do
-	if [ -f "$f" ]; then
-		cat "$f" >> /root/.ssh/authorized_keys
-	fi
-done
+cat /home/admin/.ssh/authorized_keys >> /root/.ssh/authorized_keys 2>/dev/null || true
 sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/null || true
+chown -R root:root /root/.ssh
 chmod 700 /root/.ssh
 chmod 600 /root/.ssh/authorized_keys
-`
-	_, err := p.pool.RunScript(ctx, jumpIP, script)
-	return err
+mkdir -p /etc/ssh/sshd_config.d
+echo "PermitRootLogin prohibit-password" > /etc/ssh/sshd_config.d/01-permitrootlogin.conf
+systemctl reload ssh 2>/dev/null || service ssh reload 2>/dev/null || true
+'`
+	session, err := adminClient.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to open admin session: %w", err)
+	}
+	defer session.Close()
+
+	if out, err := session.CombinedOutput(elevateCmd); err != nil {
+		return fmt.Errorf("elevation script failed: %w: %s", err, string(out))
+	}
+
+	logging.Success("Root SSH successfully elevated on %s", jumpIP)
+	p.pool.Invalidate(jumpIP)
+	return p.pool.WaitForSSH(ctx, jumpIP, 30*time.Second)
 }
 
 func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"text/template"
+	"time"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -74,10 +75,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	deployJumpstart := p.opts.JumpstartOnly || (!p.opts.JumpstartOnly && !p.opts.NodesOnly)
 	deployNodes := p.opts.NodesOnly || (!p.opts.JumpstartOnly && !p.opts.NodesOnly)
 
-	if deployJumpstart {
+	if deployJumpstart || deployNodes {
 		if err := p.setupNetworks(ctx); err != nil {
 			return fmt.Errorf("network setup failed: %w", err)
 		}
+	}
+
+	if deployJumpstart {
 		if err := p.deployJumpstart(ctx); err != nil {
 			return fmt.Errorf("jumpstart deployment failed: %w", err)
 		}
@@ -133,55 +137,135 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 	return nil
 }
 
-// setupNetworks creates the internal and main virtual networks.
+// setupNetworks creates and activates the internal and main virtual networks,
+// and configures host bridge IPs for local cluster routing.
 func (p *Phase) setupNetworks(ctx context.Context) error {
 	logging.Info("Setting up virtual networks...")
 
 	type netDef struct {
-		name    string
-		tmplPath string
+		name       string
+		tmplPath   string
+		bridge     string
+		hostCIDR   string
+		routerCIDR string
 	}
 	nets := []netDef{
-		{"internal", "templates/libvirt/internal-net.xml"},
-		{"main", "templates/libvirt/main-net.xml"},
+		{
+			name:       "internal",
+			tmplPath:   "templates/libvirt/internal-net.xml",
+			bridge:     p.cfg.Network.Internal.Bridge,
+			hostCIDR:   "192.168.10.254/24",
+			routerCIDR: "192.168.10.1/24",
+		},
+		{
+			name:       "main",
+			tmplPath:   "templates/libvirt/main-net.xml",
+			bridge:     p.cfg.Network.Main.Bridge,
+			hostCIDR:   "192.168.20.254/24",
+			routerCIDR: "192.168.20.1/24",
+		},
 	}
 
 	for _, nd := range nets {
-		if p.lv.NetExists(ctx, nd.name) {
-			logging.Info("Network %q already exists, skipping", nd.name)
-			continue
-		}
+		if !p.lv.NetExists(ctx, nd.name) {
+			content, err := cms.TemplatesFS.ReadFile(nd.tmplPath)
+			if err != nil {
+				return fmt.Errorf("failed to read network template %s: %w", nd.tmplPath, err)
+			}
 
-		content, err := cms.TemplatesFS.ReadFile(nd.tmplPath)
-		if err != nil {
-			return fmt.Errorf("failed to read network template %s: %w", nd.tmplPath, err)
-		}
-
-		tmpFile, err := os.CreateTemp("", nd.name+"-net-*.xml")
-		if err != nil {
-			return fmt.Errorf("failed to create temp file for network XML: %w", err)
-		}
-		tmpPath := tmpFile.Name()
-		if _, err := tmpFile.Write(content); err != nil {
+			tmpFile, err := os.CreateTemp("", nd.name+"-net-*.xml")
+			if err != nil {
+				return fmt.Errorf("failed to create temp file for network XML: %w", err)
+			}
+			tmpPath := tmpFile.Name()
+			if _, err := tmpFile.Write(content); err != nil {
+				tmpFile.Close()
+				os.Remove(tmpPath)
+				return fmt.Errorf("failed to write network XML: %w", err)
+			}
 			tmpFile.Close()
+			err = p.lv.NetDefine(ctx, tmpPath)
 			os.Remove(tmpPath)
-			return fmt.Errorf("failed to write network XML: %w", err)
+			if err != nil {
+				return fmt.Errorf("failed to define network %s: %w", nd.name, err)
+			}
+			if err := p.lv.NetStart(ctx, nd.name); err != nil {
+				return fmt.Errorf("failed to start network %s: %w", nd.name, err)
+			}
+			if err := p.lv.NetAutostart(ctx, nd.name); err != nil {
+				logging.Warn("Failed to set autostart for network %s: %v", nd.name, err)
+			}
+			logging.Success("Network %q created and started", nd.name)
+		} else {
+			if !p.lv.NetIsActive(ctx, nd.name) {
+				if err := p.lv.NetStart(ctx, nd.name); err != nil {
+					return fmt.Errorf("failed to start network %s: %w", nd.name, err)
+				}
+				logging.Success("Network %q started", nd.name)
+			} else {
+				logging.Info("Network %q is active", nd.name)
+			}
 		}
-		tmpFile.Close()
-		err = p.lv.NetDefine(ctx, tmpPath)
-		os.Remove(tmpPath)
-		if err != nil {
-			return fmt.Errorf("failed to define network %s: %w", nd.name, err)
+
+		bridge := nd.bridge
+		if bridge == "" {
+			if nd.name == "internal" {
+				bridge = "virbr-int"
+			} else {
+				bridge = "virbr-main"
+			}
 		}
-		if err := p.lv.NetStart(ctx, nd.name); err != nil {
-			return fmt.Errorf("failed to start network %s: %w", nd.name, err)
+		if err := configureHostBridge(ctx, bridge, nd.hostCIDR, nd.routerCIDR); err != nil {
+			logging.Warn("Could not configure host IP %s on bridge %s: %v", nd.hostCIDR, bridge, err)
 		}
-		if err := p.lv.NetAutostart(ctx, nd.name); err != nil {
-			logging.Warn("Failed to set autostart for network %s: %v", nd.name, err)
-		}
-		logging.Success("Network %q created and started", nd.name)
 	}
 
+	return nil
+}
+
+// configureHostBridge assigns a .254 IP address to a host bridge interface to allow host routing to VMs.
+func configureHostBridge(ctx context.Context, bridge, targetCIDR, routerCIDR string) error {
+	cmd := exec.CommandContext(ctx, "ip", "-o", "-4", "addr", "show", "dev", bridge)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to check bridge %s: %w", bridge, err)
+	}
+
+	output := string(out)
+	if strings.Contains(output, targetCIDR) {
+		logging.Info("Bridge %s already has IP %s", bridge, targetCIDR)
+		return nil
+	}
+
+	logging.Info("Assigning IP %s to host bridge %s...", targetCIDR, bridge)
+
+	runNetCmd := func(args ...string) error {
+		var c *exec.Cmd
+		if os.Geteuid() == 0 {
+			c = exec.CommandContext(ctx, "ip", args...)
+		} else {
+			sudoArgs := append([]string{"-n", "ip"}, args...)
+			c = exec.CommandContext(ctx, "sudo", sudoArgs...)
+		}
+		if cOut, cErr := c.CombinedOutput(); cErr != nil {
+			return fmt.Errorf("ip %s failed: %w: %s", strings.Join(args, " "), cErr, string(cOut))
+		}
+		return nil
+	}
+
+	// Remove conflicting router IP (.1) if accidentally bound to host bridge
+	if routerCIDR != "" && strings.Contains(output, routerCIDR) {
+		_ = runNetCmd("addr", "del", routerCIDR, "dev", bridge)
+	}
+
+	if err := runNetCmd("addr", "add", targetCIDR, "dev", bridge); err != nil {
+		return err
+	}
+	if err := runNetCmd("link", "set", "dev", bridge, "up"); err != nil {
+		return err
+	}
+
+	logging.Success("Bridge %s configured with IP %s", bridge, targetCIDR)
 	return nil
 }
 
@@ -310,7 +394,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		GraphicsNone:  true,
 		Wait:          -1,
 		NoReboot:      true,
-		NoAutoConsole: false,
+		NoAutoConsole: true,
 	})
 	if err != nil {
 		return fmt.Errorf("jumpstart virt-install failed: %w", err)
@@ -320,6 +404,13 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	logging.Info("Starting Jumpstart VM...")
 	if err := p.lv.Start(ctx, p.cfg.Nodes.Jumpstart.Name); err != nil {
 		logging.Warn("Failed to start jumpstart (may already be running): %v", err)
+	}
+
+	logging.Info("Waiting for Jumpstart VM to boot and SSH to become ready...")
+	if err := p.pool.WaitForSSH(ctx, p.cfg.Nodes.Jumpstart.IP, 3*time.Minute); err != nil {
+		logging.Warn("Jumpstart VM started, but SSH is not yet ready: %v", err)
+	} else {
+		logging.Success("Jumpstart VM is reachable via SSH at %s", p.cfg.Nodes.Jumpstart.IP)
 	}
 
 	logging.Success("Jumpstart VM deployed and started")

@@ -50,5 +50,7 @@ autoinstall:
     - chmod 600 /target/root/.ssh/authorized_keys /target/home/admin/.ssh/authorized_keys
     - curtin in-target --target=/target -- chown -R admin:admin /home/admin/.ssh
     - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+    - mkdir -p /target/etc/ssh/sshd_config.d
+    - echo 'PermitRootLogin prohibit-password' > /target/etc/ssh/sshd_config.d/01-permitrootlogin.conf
     - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
     - curtin in-target --target=/target -- systemctl enable ssh

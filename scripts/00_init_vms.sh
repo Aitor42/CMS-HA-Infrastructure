@@ -441,6 +441,8 @@ ${WAN_IFACE_CONFIG}
     - curtin in-target --target=/target -- chown -R admin:admin /home/admin/.ssh
     # Endurecer SSHD: prohibir login interactivo por contraseña
     - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+    - mkdir -p /target/etc/ssh/sshd_config.d
+    - echo 'PermitRootLogin prohibit-password' > /target/etc/ssh/sshd_config.d/01-permitrootlogin.conf
     - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
     - curtin in-target --target=/target -- systemctl enable ssh
 EOF_AUTOINSTALL

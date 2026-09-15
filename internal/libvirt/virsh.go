@@ -26,6 +26,9 @@ type DomainInfo struct {
 type DiskOpt struct {
 	Path   string
 	SizeGB int
+	Format string
+	Bus    string
+	Device string
 }
 
 // NetworkOpt represents a network option for virt-install.
@@ -246,6 +249,24 @@ func (c *Client) NetExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
+// NetIsActive checks if a libvirt network is active.
+func (c *Client) NetIsActive(ctx context.Context, name string) bool {
+	out, err := c.virsh(ctx, "net-info", name)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Active:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && strings.EqualFold(fields[1], "yes") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // VirtInstall builds and executes a virt-install command.
 func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 	args := []string{"--connect", c.URI, "--name", opts.Name, "--memory", fmt.Sprintf("%d", opts.RAM), "--vcpus", fmt.Sprintf("%d", opts.VCPUs)}
@@ -255,11 +276,29 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 	}
 
 	for _, d := range opts.Disks {
+		var parts []string
+		parts = append(parts, "path="+d.Path)
 		if d.SizeGB > 0 {
-			args = append(args, "--disk", fmt.Sprintf("path=%s,size=%d,format=qcow2,bus=virtio", d.Path, d.SizeGB))
-		} else {
-			args = append(args, "--disk", fmt.Sprintf("path=%s", d.Path))
+			parts = append(parts, fmt.Sprintf("size=%d", d.SizeGB))
 		}
+		if d.Format != "" {
+			parts = append(parts, "format="+d.Format)
+		} else if d.SizeGB > 0 || strings.HasSuffix(d.Path, ".qcow2") {
+			parts = append(parts, "format=qcow2")
+		}
+		if d.Bus != "" {
+			parts = append(parts, "bus="+d.Bus)
+		} else if d.Device == "cdrom" || strings.HasSuffix(d.Path, ".iso") {
+			parts = append(parts, "bus=sata")
+		} else {
+			parts = append(parts, "bus=virtio")
+		}
+		if d.Device != "" {
+			parts = append(parts, "device="+d.Device)
+		} else if strings.HasSuffix(d.Path, ".iso") {
+			parts = append(parts, "device=cdrom")
+		}
+		args = append(args, "--disk", strings.Join(parts, ","))
 	}
 	
 	for _, n := range opts.Networks {

@@ -119,6 +119,11 @@ func (p *Pool) invalidateClient(host string) {
 	}
 }
 
+// Invalidate closes and removes any cached SSH connection to host.
+func (p *Pool) Invalidate(host string) {
+	p.invalidateClient(host)
+}
+
 // RunCommand executes a command remotely and captures output.
 func (p *Pool) RunCommand(ctx context.Context, host, cmd string) (string, string, int, error) {
 	client, err := p.getClient(host)
