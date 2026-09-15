@@ -75,7 +75,11 @@ func (t *Traffic) Run(ctx context.Context) error {
 
 	baseURL := ""
 	if t.opts.TargetIP != "" {
-		baseURL = fmt.Sprintf("https://%s", t.opts.TargetIP)
+		if strings.HasPrefix(t.opts.TargetIP, "http://") || strings.HasPrefix(t.opts.TargetIP, "https://") {
+			baseURL = t.opts.TargetIP
+		} else {
+			baseURL = fmt.Sprintf("https://%s", t.opts.TargetIP)
+		}
 	} else if t.opts.Mode == "internal" {
 		if len(t.cfg.Nodes.CMSFrontends) > 0 && t.cfg.Nodes.CMSFrontends[0].IP != "" {
 			baseURL = fmt.Sprintf("https://%s", t.cfg.Nodes.CMSFrontends[0].IP)

@@ -55,11 +55,15 @@ type VirtInstallOpts struct {
 // NewClient creates a new Client and auto-detects if sudo is needed.
 func NewClient(uri string) *Client {
 	useSudo := false
-	if uri == "qemu:///system" || strings.HasPrefix(uri, "qemu+ssh://root@") {
-		// Just a heuristic. In a real system, you could check if current user is in libvirt group.
-		err := exec.Command("virsh", "-c", uri, "list").Run() // #nosec G204 -- check libvirt access
-		if err != nil {
-			useSudo = true
+	if _, err := exec.LookPath("virsh"); err == nil {
+		if uri == "qemu:///system" || strings.HasPrefix(uri, "qemu+ssh://root@") {
+			// Check if virsh works directly
+			if err := exec.Command("virsh", "-c", uri, "list").Run(); err != nil { // #nosec G204
+				// Only use sudo if sudo -n works non-interactively
+				if errSudo := exec.Command("sudo", "-n", "virsh", "-c", uri, "list").Run(); errSudo == nil { // #nosec G204
+					useSudo = true
+				}
+			}
 		}
 	}
 
@@ -75,7 +79,7 @@ func (c *Client) virsh(ctx context.Context, args ...string) ([]byte, error) {
 
 	var cmd *exec.Cmd
 	if c.UseSudo {
-		sudoArgs := append([]string{"virsh"}, cmdArgs...)
+		sudoArgs := append([]string{"-n", "virsh"}, cmdArgs...)
 		cmd = exec.CommandContext(ctx, "sudo", sudoArgs...) // #nosec G204 -- virsh command with validated arguments
 	} else {
 		cmd = exec.CommandContext(ctx, "virsh", cmdArgs...) // #nosec G204 -- virsh command with validated arguments
@@ -300,7 +304,7 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 
 	var cmd *exec.Cmd
 	if c.UseSudo {
-		sudoArgs := append([]string{"virt-install"}, args...)
+		sudoArgs := append([]string{"-n", "virt-install"}, args...)
 		cmd = exec.CommandContext(ctx, "sudo", sudoArgs...) // #nosec G204 -- virt-install command with structured arguments
 	} else {
 		cmd = exec.CommandContext(ctx, "virt-install", args...) // #nosec G204 -- virt-install command with structured arguments
