@@ -31,6 +31,15 @@ spec:
             purpose: backup
         spec:
           restartPolicy: OnFailure
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: drbd-status
+                        operator: In
+                        values:
+                          - primary
           # Allow scheduling on master nodes (same tolerations as MariaDB StatefulSet)
           tolerations:
             - key: "node-role.kubernetes.io/master"
