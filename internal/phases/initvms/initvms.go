@@ -579,6 +579,9 @@ func (p *Phase) destroyVM(ctx context.Context, name string) {
 	}
 	os.Remove(filepath.Join(p.cfg.VM.StorageDir, name+".qcow2"))
 	os.Remove(filepath.Join(p.cfg.VM.StorageDir, name+"-drbd.qcow2"))
+	if name == p.cfg.Nodes.Jumpstart.Name {
+		os.Remove(filepath.Join(p.cfg.VM.StorageDir, "seed.iso"))
+	}
 }
 
 // ensureSSHKey returns the public key for the given private key path, generating it if needed.

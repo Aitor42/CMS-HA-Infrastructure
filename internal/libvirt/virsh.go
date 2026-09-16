@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -372,6 +373,7 @@ func CreateDisk(ctx context.Context, path string, sizeGB int, format string) err
 
 // CreateISO runs xorrisofs to create an ISO.
 func CreateISO(ctx context.Context, outputPath, sourceDir, volID string) error {
+	_ = os.Remove(outputPath)
 	args := []string{"-o", outputPath, "-V", volID, "-R", "-J", sourceDir}
 	cmd := exec.CommandContext(ctx, "xorrisofs", args...) // #nosec G204 -- xorrisofs command with validated options
 	out, err := cmd.CombinedOutput()
