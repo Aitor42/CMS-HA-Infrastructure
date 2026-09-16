@@ -394,7 +394,7 @@ autoinstall:
     layout: es
   identity:
     hostname: jumpstart
-    username: admin
+    username: ubuntu
     password: "${RANDOM_PASS_HASH}"
   ssh:
     install-server: true
@@ -426,19 +426,19 @@ ${WAN_IFACE_CONFIG}
     layout:
       name: direct
   late-commands:
-    # Permitir sudo al usuario admin sin contraseña
-    - echo 'admin ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/admin
-    - chmod 440 /target/etc/sudoers.d/admin
-    # Bloquear las contraseñas de las cuentas admin y root para forzar SSH key obligatoria
-    - curtin in-target --target=/target -- passwd -l admin
+    # Permitir sudo al usuario ubuntu sin contraseña
+    - echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ubuntu
+    - chmod 440 /target/etc/sudoers.d/ubuntu
+    # Bloquear las contraseñas de las cuentas ubuntu y root para forzar SSH key obligatoria
+    - curtin in-target --target=/target -- passwd -l ubuntu
     - curtin in-target --target=/target -- passwd -l root
-    # Copiar clave autorizada a root y admin
-    - mkdir -p /target/root/.ssh /target/home/admin/.ssh
+    # Copiar clave autorizada a root y ubuntu
+    - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
     - echo "${HOST_PUBKEY}" >> /target/root/.ssh/authorized_keys
-    - echo "${HOST_PUBKEY}" >> /target/home/admin/.ssh/authorized_keys
-    - chmod 700 /target/root/.ssh /target/home/admin/.ssh
-    - chmod 600 /target/root/.ssh/authorized_keys /target/home/admin/.ssh/authorized_keys
-    - curtin in-target --target=/target -- chown -R admin:admin /home/admin/.ssh
+    - echo "${HOST_PUBKEY}" >> /target/home/ubuntu/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
     # Endurecer SSHD: prohibir login interactivo por contraseña
     - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
     - mkdir -p /target/etc/ssh/sshd_config.d

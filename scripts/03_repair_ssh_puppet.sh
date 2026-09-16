@@ -18,7 +18,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
 
-JUMPSTART_USER="${JUMPSTART_USER:-admin}"
+JUMPSTART_USER="${JUMPSTART_USER:-ubuntu}"
 PUPPET_SERVER_FQDN="${PUPPET_SERVER_FQDN:-jumpstart.internal.local}"
 
 # Opciones SSH comunes para comprobación y automatización sin interacción
@@ -72,22 +72,30 @@ bootstrap_jumpstart_root() {
         return 0
     fi
 
-    # 2. Si falla, intentar acceder como 'admin' y copiar la clave a root
+    # 2. Si falla, intentar acceder como 'ubuntu' o 'admin' y copiar la clave a root
     require_host_key || return 1
-    if ssh "${SSH_KEY_OPTS[@]}" "${JUMPSTART_USER}@${JUMPSTART_IP}" true 2>/dev/null; then
-        info "Acceso admin válido. Copiando claves al home de root via sudo..."
-        ssh "${SSH_KEY_OPTS[@]}" "${JUMPSTART_USER}@${JUMPSTART_IP}" 'bash -s' << 'ELEVATE'
+    for u in "$JUMPSTART_USER" ubuntu admin; do
+        if ssh "${SSH_KEY_OPTS[@]}" "${u}@${JUMPSTART_IP}" true 2>/dev/null; then
+            info "Acceso ${u} válido. Copiando claves al home de root via sudo..."
+            ssh "${SSH_KEY_OPTS[@]}" "${u}@${JUMPSTART_IP}" 'bash -s' << 'ELEVATE'
 sudo mkdir -p /root/.ssh
-sudo cp /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys
+for f in /home/*/.ssh/authorized_keys; do
+    [ -f "$f" ] && sudo cat "$f" >> /root/.ssh/authorized_keys
+done
+sudo sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/null || true
 sudo chown -R root:root /root/.ssh
 sudo chmod 700 /root/.ssh
 sudo chmod 600 /root/.ssh/authorized_keys
+sudo mkdir -p /etc/ssh/sshd_config.d
+echo "PermitRootLogin prohibit-password" | sudo tee /etc/ssh/sshd_config.d/01-permitrootlogin.conf >/dev/null
+sudo systemctl reload ssh 2>/dev/null || sudo service ssh reload 2>/dev/null || true
 ELEVATE
-        ssh "${SSH_KEY_OPTS[@]}" "root@${JUMPSTART_IP}" true
-        return $?
-    fi
+            ssh "${SSH_KEY_OPTS[@]}" "root@${JUMPSTART_IP}" true
+            return $?
+        fi
+    done
 
-    error "Incapaz de establecer conexión SSH con admin o root en ${JUMPSTART_IP}."
+    error "Incapaz de establecer conexión SSH con ubuntu, admin o root en ${JUMPSTART_IP}."
     error "Asegúrese de haber inyectado la clave pública mediante 00_init_vms.sh."
     return 1
 }

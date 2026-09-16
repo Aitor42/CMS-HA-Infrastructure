@@ -8,10 +8,10 @@ autoinstall:
     layout: es
   identity:
     hostname: $hostname
-    username: admin
+    username: ubuntu
     password: "$6$LOCKED$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
   users:
-    - name: admin
+    - name: ubuntu
       shell: /bin/bash
       sudo: ALL=(ALL) NOPASSWD:ALL
       lock_passwd: true
@@ -35,7 +35,7 @@ autoinstall:
       name: direct
   late-commands:
     # Create SSH key directories
-    - mkdir -p /target/root/.ssh /target/home/admin/.ssh
+    - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
     # Fetch authorised public keys from the Jumpstart Cobbler pub endpoint
     - >-
       sh -c 'curl -fsS http://192.168.10.10/cblr/pub/authorized_keys
@@ -44,13 +44,15 @@ autoinstall:
     - >-
       sh -c 'curl -fsS http://192.168.10.10/cblr/pub/authorized_keys
       || curl -fsS http://192.168.20.10/cblr/pub/authorized_keys'
-      >> /target/home/admin/.ssh/authorized_keys
-    - chmod 700 /target/root/.ssh /target/home/admin/.ssh
-    - chmod 600 /target/root/.ssh/authorized_keys /target/home/admin/.ssh/authorized_keys
-    - curtin in-target --target=/target -- chown -R admin:admin /home/admin/.ssh
+      >> /target/home/ubuntu/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
     # Harden SSH daemon on provisioned node
     - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
     - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /target/etc/ssh/sshd_config
+    - mkdir -p /target/etc/ssh/sshd_config.d
+    - echo 'PermitRootLogin prohibit-password' > /target/etc/ssh/sshd_config.d/01-permitrootlogin.conf
     - curtin in-target --target=/target -- systemctl enable ssh
     # Signal Cobbler that installation is complete to prevent re-PXE on next boot
     - >-

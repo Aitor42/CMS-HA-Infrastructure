@@ -73,7 +73,7 @@ func (p *Phase) elevateRootSSH(ctx context.Context, jumpIP string) error {
 		return nil
 	}
 
-	logging.Info("Root SSH not directly accessible; attempting elevation via admin user on %s...", jumpIP)
+	logging.Info("Root SSH not directly accessible; attempting elevation via non-root user (ubuntu/admin) on %s...", jumpIP)
 	keyBytes, err := os.ReadFile(p.cfg.SSH.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("failed to read private key: %w", err)
@@ -83,15 +83,8 @@ func (p *Phase) elevateRootSSH(ctx context.Context, jumpIP string) error {
 		return fmt.Errorf("failed to parse private key: %w", err)
 	}
 
-	adminCfg := &gossh.ClientConfig{
-		User:            "admin",
-		Auth:            []gossh.AuthMethod{gossh.PublicKeys(signer)},
-		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
-	}
-
-	// Poll admin SSH up to 5 minutes
-	var adminClient *gossh.Client
+	fallbackUsers := []string{"ubuntu", "admin"}
+	var unprivilegedClient *gossh.Client
 	pollTimeout := time.After(5 * time.Minute)
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
@@ -101,23 +94,32 @@ func (p *Phase) elevateRootSSH(ctx context.Context, jumpIP string) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-pollTimeout:
-			return fmt.Errorf("timed out waiting for SSH (admin/root) on %s", jumpIP)
+			return fmt.Errorf("timed out waiting for SSH (ubuntu/admin/root) on %s", jumpIP)
 		case <-ticker.C:
-			c, err := gossh.Dial("tcp", jumpIP+":22", adminCfg)
-			if err == nil {
-				adminClient = c
-				break
+			for _, u := range fallbackUsers {
+				cfg := &gossh.ClientConfig{
+					User:            u,
+					Auth:            []gossh.AuthMethod{gossh.PublicKeys(signer)},
+					HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+					Timeout:         5 * time.Second,
+				}
+				if c, err := gossh.Dial("tcp", jumpIP+":22", cfg); err == nil {
+					unprivilegedClient = c
+					break
+				}
 			}
 		}
-		if adminClient != nil {
+		if unprivilegedClient != nil {
 			break
 		}
 	}
-	defer adminClient.Close()
+	defer unprivilegedClient.Close()
 
 	elevateCmd := `sudo bash -c '
 mkdir -p /root/.ssh
-cat /home/admin/.ssh/authorized_keys >> /root/.ssh/authorized_keys 2>/dev/null || true
+for f in /home/*/.ssh/authorized_keys; do
+    [ -f "$f" ] && cat "$f" >> /root/.ssh/authorized_keys
+done
 sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/null || true
 chown -R root:root /root/.ssh
 chmod 700 /root/.ssh
@@ -126,9 +128,9 @@ mkdir -p /etc/ssh/sshd_config.d
 echo "PermitRootLogin prohibit-password" > /etc/ssh/sshd_config.d/01-permitrootlogin.conf
 systemctl reload ssh 2>/dev/null || service ssh reload 2>/dev/null || true
 '`
-	session, err := adminClient.NewSession()
+	session, err := unprivilegedClient.NewSession()
 	if err != nil {
-		return fmt.Errorf("failed to open admin session: %w", err)
+		return fmt.Errorf("failed to open session: %w", err)
 	}
 	defer session.Close()
 

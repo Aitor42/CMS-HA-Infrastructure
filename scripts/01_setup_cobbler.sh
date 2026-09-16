@@ -55,17 +55,25 @@ fi
 HOST_PUBKEY="$(cat "${HOST_KEY_FILE}.pub")"
 
 # ─── 1. VERIFICAR ACCESO SSH POR CLAVE AL JUMPSTART ───────────────────────────
-echo "[+] Verificando acceso SSH con admin@${JUMPSTART_IP}..."
-if ! ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "admin@${JUMPSTART_IP}" true 2>/dev/null; then
-    echo "[ERROR] Acceso SSH sin clave no disponible para admin@${JUMPSTART_IP}."
+echo "[+] Verificando acceso SSH al Jumpstart (${JUMPSTART_IP})..."
+SSH_USER="root"
+if ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "root@${JUMPSTART_IP}" true 2>/dev/null; then
+    SSH_USER="root"
+elif ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "ubuntu@${JUMPSTART_IP}" true 2>/dev/null; then
+    SSH_USER="ubuntu"
+elif ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "admin@${JUMPSTART_IP}" true 2>/dev/null; then
+    SSH_USER="admin"
+else
+    echo "[ERROR] Acceso SSH sin clave no disponible para root, ubuntu o admin en ${JUMPSTART_IP}."
     echo "        Asegúrese de haber ejecutado 00_init_vms.sh previamente."
     exit 1
 fi
-echo "  [OK] Acceso SSH verificado para admin@${JUMPSTART_IP}"
+echo "  [OK] Acceso SSH verificado con ${SSH_USER}@${JUMPSTART_IP}"
 
 # ─── 2. AUTORIZAR ACCESO SSH DE ROOT EN JUMPSTART ─────────────────────────────
-echo "[+] Propagando claves SSH al usuario root de Jumpstart..."
-ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "admin@${JUMPSTART_IP}" 'bash -s' << 'ELEVATE_EOF'
+if [[ "$SSH_USER" != "root" ]]; then
+    echo "[+] Propagando claves SSH al usuario root de Jumpstart..."
+    ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "${SSH_USER}@${JUMPSTART_IP}" 'bash -s' << 'ELEVATE_EOF'
 set -e
 sudo mkdir -p /root/.ssh
 for f in /home/*/.ssh/authorized_keys; do
@@ -77,7 +85,11 @@ sudo sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/nul
 sudo chown -R root:root /root/.ssh
 sudo chmod 700 /root/.ssh
 sudo chmod 600 /root/.ssh/authorized_keys
+sudo mkdir -p /etc/ssh/sshd_config.d
+echo "PermitRootLogin prohibit-password" | sudo tee /etc/ssh/sshd_config.d/01-permitrootlogin.conf >/dev/null
+sudo systemctl reload ssh 2>/dev/null || sudo service ssh reload 2>/dev/null || true
 ELEVATE_EOF
+fi
 
 if ! ssh -i "${HOST_KEY_FILE}" ${SSH_OPTS} "root@${JUMPSTART_IP}" true 2>/dev/null; then
     echo "[ERROR] Falló la elevación o el acceso directo por SSH como root al Jumpstart."
