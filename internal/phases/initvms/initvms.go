@@ -121,9 +121,10 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 
 	// Check disk space
 	dir := filepath.Clean(p.cfg.VM.StorageDir)
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create storage dir %s: %w", dir, err)
 	}
+	_ = os.Chmod(dir, 0755)
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err == nil && stat.Bsize > 0 {
 		freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
@@ -351,6 +352,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	if err := libvirt.CreateISO(ctx, seedISO, autoinstallDir, "cidata"); err != nil {
 		return fmt.Errorf("failed to create seed ISO: %w", err)
 	}
+	_ = os.Chmod(seedISO, 0644)
 	logging.Success("Cloud-init seed ISO created: %s", seedISO)
 
 	// Find Ubuntu 24.04 ISO
@@ -366,6 +368,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	if err := libvirt.CreateDisk(ctx, diskPath, p.cfg.Nodes.Jumpstart.DiskGB, "qcow2"); err != nil {
 		return fmt.Errorf("failed to create jumpstart disk: %w", err)
 	}
+	_ = os.Chmod(diskPath, 0666)
 
 	// Determine networks (always internal + main, optionally WAN)
 	nets := []libvirt.NetworkOpt{
