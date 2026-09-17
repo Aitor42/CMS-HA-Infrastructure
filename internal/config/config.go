@@ -283,11 +283,15 @@ func (c *Config) MainNodes() []NodeSpec {
 func (c *Config) HotdeskSpecs() []NodeSpec {
 	var nodes []NodeSpec
 	for i := 1; i <= c.Nodes.Hotdesks.Count; i++ {
+		lastOctet := 200 + i
+		if c.Nodes.Hotdesks.BaseIPOctet > 0 && c.Nodes.Hotdesks.BaseIPOctet != 201 {
+			lastOctet = c.Nodes.Hotdesks.BaseIPOctet + i - 1
+		}
 		nodes = append(nodes, NodeSpec{
-			Name:         fmt.Sprintf("hotdesk%d", i),
-			IP:           fmt.Sprintf("192.168.20.%d", c.Nodes.Hotdesks.BaseIPOctet+i),
-			FQDN:         fmt.Sprintf("hotdesk%d.main.local", i),
-			MAC:          fmt.Sprintf("52:54:00:10:02:%02x", 100+i), // generated mac
+			Name:         fmt.Sprintf("main-hotdesk%d", i),
+			IP:           fmt.Sprintf("192.168.20.%d", lastOctet),
+			FQDN:         fmt.Sprintf("main-hotdesk%d.main.local", i),
+			MAC:          fmt.Sprintf("52:54:00:10:02:%02x", lastOctet),
 			RAMInstallMB: c.Nodes.Hotdesks.RAMInstallMB,
 			RAMFinalMB:   c.Nodes.Hotdesks.RAMFinalMB,
 			VCPUs:        c.Nodes.Hotdesks.VCPUs,

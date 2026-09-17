@@ -222,13 +222,23 @@ func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
 	steps := []string{
 		`add-apt-repository -y universe 2>/dev/null || true && apt-get update -qq`,
 		
-		`if ! grep -q "cobbler/cobbler" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
-    wget -qO - https://download.opensuse.org/repositories/home:/cobbler:/cobbler/xUbuntu_24.04/Release.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/cobbler.gpg
-    echo "deb http://download.opensuse.org/repositories/home:/cobbler:/cobbler/xUbuntu_24.04/ /" > /etc/apt/sources.list.d/cobbler.list
-    apt-get update -qq || true
+		`COBBLER_REPO_24="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_24.04"
+COBBLER_REPO_22="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_22.04"
+if ! grep -q "systemsmanagement.*cobbler" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+    curl -fsSL "${COBBLER_REPO_24}/Release.key" 2>/dev/null | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/cobbler.gpg 2>/dev/null || true
+    if curl -sf --max-time 15 "${COBBLER_REPO_24}/Release" >/dev/null 2>&1; then
+        echo "deb [signed-by=/etc/apt/trusted.gpg.d/cobbler.gpg] ${COBBLER_REPO_24}/ /" > /etc/apt/sources.list.d/cobbler.list
+        apt-get update -qq 2>/dev/null || true
+    fi
+    if ! apt-cache show cobbler >/dev/null 2>&1; then
+        echo "deb [trusted=yes] ${COBBLER_REPO_22}/ /" > /etc/apt/sources.list.d/cobbler.list
+        apt-get update -qq 2>/dev/null || true
+    fi
 fi`,
 		
-		`DEBIAN_FRONTEND=noninteractive apt-get install -y cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe shim-signed grub-efi-amd64-signed syslinux-common curl wget rsync`,
+		`DEBIAN_FRONTEND=noninteractive apt-get install -y cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe shim-signed grub-efi-amd64-signed syslinux-common curl wget rsync || {
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe syslinux-common curl wget rsync
+}`,
 		
 		`if ! python3 -c "import django" &>/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip 2>/dev/null || true

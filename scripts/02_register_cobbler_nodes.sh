@@ -82,6 +82,7 @@ for ENTRY in "\${NODES[@]}"; do
         --interface=ens3 \\
         --static=1 \\
         --netboot-enabled=true \\
+        --server="\${COBBLER_SERVER_IP}" \\
         --kernel-options="autoinstall ds=nocloud-net;s=http://\${COBBLER_SERVER_IP}/cblr/svc/op/autoinstall/system/\${NAME}/ netboot=nfs nfsroot=\${COBBLER_SERVER_IP}:/var/www/cobbler/distro_mirror/ubuntu-24.04 boot=casper ip=dhcp" \\
         --autoinstall-meta="hostname=\${NAME}"
 

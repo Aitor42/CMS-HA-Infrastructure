@@ -521,7 +521,7 @@ func (p *Phase) createClientVM(ctx context.Context, node config.NodeDetail, vmDi
 	disks := []libvirt.DiskOpt{{Path: diskPath, SizeGB: node.DiskGB}}
 	disks = append(disks, extraDisks...)
 
-	return p.lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
+	err := p.lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
 		Name:          node.Name,
 		RAM:           node.RAMInstallMB,
 		VCPUs:         node.VCPUs,
@@ -533,6 +533,14 @@ func (p *Phase) createClientVM(ctx context.Context, node config.NodeDetail, vmDi
 		NoAutoConsole: true,
 		Wait:          0,
 	})
+	if err != nil {
+		return err
+	}
+	_ = os.Chmod(diskPath, 0666)
+	for _, ed := range extraDisks {
+		_ = os.Chmod(ed.Path, 0666)
+	}
+	return nil
 }
 
 // cleanup destroys all VMs and networks.

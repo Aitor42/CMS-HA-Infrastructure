@@ -56,8 +56,8 @@ func (p *Phase) Run(ctx context.Context) error {
 
 		logging.Info("Registering node %s...", node.Name)
 		scriptBuilder.WriteString(fmt.Sprintf("cobbler system remove --name=%s 2>/dev/null || true\n", node.Name))
-		scriptBuilder.WriteString(fmt.Sprintf("cobbler system add --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
-			node.Name, node.FQDN, node.IP, mac, kernelOpts, node.Name))
+		scriptBuilder.WriteString(fmt.Sprintf("cobbler system add --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --server=%s --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
+			node.Name, node.FQDN, node.IP, mac, cobblerServerIP, kernelOpts, node.Name))
 	}
 	
 	logging.Info("Synchronizing Cobbler...")

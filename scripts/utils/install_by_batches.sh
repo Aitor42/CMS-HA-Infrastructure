@@ -61,9 +61,10 @@ get_ip() {
         "main-lb") echo "192.168.20.100" ;;
         "main-cms1") echo "192.168.20.101" ;;
         "main-cms2") echo "192.168.20.102" ;;
-        "main-hotdesk1") echo "192.168.20.201" ;;
-        "main-hotdesk2") echo "192.168.20.202" ;;
-        "main-hotdesk3") echo "192.168.20.203" ;;
+        main-hotdesk*)
+            local idx="${name#main-hotdesk}"
+            echo "192.168.20.$((200 + idx))"
+            ;;
         *) echo "" ;;
     esac
 }
@@ -168,6 +169,9 @@ crear_vm() {
         --wait=0 \
         "${extra_args[@]}"
 
+    chmod 666 "$VM_DIR/$nombre.qcow2" 2>/dev/null || true
+    chmod 666 "$VM_DIR/${nombre}-drbd.qcow2" 2>/dev/null || true
+
     success "  [✓] VM $nombre creada y arrancada en modo PXE"
 }
 
@@ -247,6 +251,7 @@ procesar_grupo() {
                     --os-variant=ubuntu24.04 \
                     --noautoconsole \
                     --wait=0
+                chmod 666 "$VM_DIR/ufw-router.qcow2" 2>/dev/null || true
                 success "  [✓] VM ufw-router creada en modo PXE"
             fi
         else
@@ -312,23 +317,26 @@ GRUPO4=(
     "main-cms2|3072|1|4|52:54:00:10:02:66|main||1024"
 )
 
-GRUPO5=(
-    "main-hotdesk1|3072|1|3|52:54:00:10:02:c9|main||768"
-    "main-hotdesk2|3072|1|3|52:54:00:10:02:ca|main||768"
-    "main-hotdesk3|3072|1|3|52:54:00:10:02:cb|main||768"
-)
+GRUPO5=()
+for i in $(seq 1 "${NUM_HOTDESKS}"); do
+    ip_last_octet=$((200 + i))
+    hex_id=$(printf '%02x' "$ip_last_octet")
+    GRUPO5+=("main-hotdesk${i}|3072|1|3|52:54:00:10:02:${hex_id}|main||768")
+done
 
 echo "=========================================================================="
 echo "    Instalación secuencial por lotes de VMs (CMS Infrastructure)         "
 echo "=========================================================================="
-info "Se mantendrá activa la VM jumpstart y se instalarán las demás en 5 grupos."
+info "Se mantendrá activa la VM jumpstart y se instalarán las demás en grupos."
 info "RAM total requerida por grupo activo: ~9-11 GB."
 
 procesar_grupo "1" "Infraestructura Base (Router, Monitor, Storage)" "${GRUPO1[@]}"
 procesar_grupo "2" "Nodos Maestros y Balanceador (Master1, Master2, LB)" "${GRUPO2[@]}"
 procesar_grupo "3" "Nodos Workers (Worker1, Worker2)" "${GRUPO3[@]}"
 procesar_grupo "4" "Servidores CMS (CMS1, CMS2)" "${GRUPO4[@]}"
-procesar_grupo "5" "Puestos de Trabajo (Hotdesks 1-3)" "${GRUPO5[@]}"
+if [ "${NUM_HOTDESKS}" -gt 0 ]; then
+    procesar_grupo "5" "Puestos de Trabajo (Hotdesks 1-${NUM_HOTDESKS})" "${GRUPO5[@]}"
+fi
 
 echo -e "\n=========================================================================="
 success "¡Proceso de instalación finalizado para todos los lotes de VMs!"

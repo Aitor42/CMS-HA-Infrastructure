@@ -326,9 +326,7 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--extra-args", opts.ExtraArgs)
 	}
 
-	if opts.Wait != 0 {
-		args = append(args, "--wait", strconv.Itoa(opts.Wait))
-	}
+	args = append(args, "--wait", strconv.Itoa(opts.Wait))
 
 	if opts.NoAutoConsole {
 		args = append(args, "--noautoconsole")
