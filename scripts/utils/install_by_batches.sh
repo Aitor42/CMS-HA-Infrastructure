@@ -321,7 +321,7 @@ GRUPO5=()
 for i in $(seq 1 "${NUM_HOTDESKS}"); do
     ip_last_octet=$((200 + i))
     hex_id=$(printf '%02x' "$ip_last_octet")
-    GRUPO5+=("main-hotdesk${i}|3072|1|3|52:54:00:10:02:${hex_id}|main||768")
+    GRUPO5+=("main-hotdesk${i}|3072|1|4|52:54:00:10:02:${hex_id}|main||768")
 done
 
 echo "=========================================================================="

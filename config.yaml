@@ -132,7 +132,7 @@ nodes:
     ram_install_mb: 3072
     ram_final_mb: 768
     vcpus: 1
-    disk_gb: 3
+    disk_gb: 4
     base_ip_octet: 201
 
 database:
