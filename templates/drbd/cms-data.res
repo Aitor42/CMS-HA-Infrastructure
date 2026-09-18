@@ -1,3 +1,5 @@
+{{- $m1 := index .Nodes.Masters 0 -}}
+{{- $m2 := index .Nodes.Masters 1 -}}
 resource cms_data {
   protocol C;
 
@@ -22,17 +24,17 @@ resource cms_data {
     resync-rate 100M;
   }
 
-  on internal-master1 {
+  on {{ $m1.FQDN }} {{ $m1.Name }} {
     device /dev/drbd0;
     disk /dev/vdb;
-    address 192.168.10.11:7788;
+    address {{ $m1.IP }}:7788;
     meta-disk internal;
   }
 
-  on internal-master2 {
+  on {{ $m2.FQDN }} {{ $m2.Name }} {
     device /dev/drbd0;
     disk /dev/vdb;
-    address 192.168.10.12:7788;
+    address {{ $m2.IP }}:7788;
     meta-disk internal;
   }
 }
