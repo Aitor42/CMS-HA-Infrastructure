@@ -52,6 +52,9 @@ func (p *Phase) Run(ctx context.Context) error {
 	for _, m := range p.cfg.Nodes.Masters { exporterIPs = append(exporterIPs, m.IP) }
 	for _, w := range p.cfg.Nodes.Workers { exporterIPs = append(exporterIPs, w.IP) }
 	for _, c := range p.cfg.Nodes.CMSFrontends { exporterIPs = append(exporterIPs, c.IP) }
+	if p.cfg.Nodes.Storage.IP != "" {
+		exporterIPs = append(exporterIPs, p.cfg.Nodes.Storage.IP)
+	}
 	exporterIPs = append(exporterIPs, p.cfg.Nodes.LB.IP)
 	exporterIPs = append(exporterIPs, p.cfg.Nodes.Router.IP)
 	

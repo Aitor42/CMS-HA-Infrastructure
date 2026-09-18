@@ -82,7 +82,10 @@ func (p *Phase) Run(ctx context.Context) error {
 		p.pool.RunCommand(cleanupCtx, routerIP, "rm -f /tmp/nat.rules")
 	}()
 
-	injectCmd := `grep -q "*nat" /etc/ufw/before.rules || sed -i -e '/\*filter/r /tmp/nat.rules' -e '1N' /etc/ufw/before.rules`
+	injectCmd := `sed -i '/^# NAT Rules/,/^COMMIT/{/^COMMIT/d; d}' /etc/ufw/before.rules && ` +
+		`sed -i '/^\*nat/,/^COMMIT/{/^COMMIT/d; d}' /etc/ufw/before.rules && ` +
+		`awk '/^\*filter/{while((getline line < "/tmp/nat.rules") > 0) print line} {print}' /etc/ufw/before.rules > /tmp/before.rules.new && ` +
+		`mv /tmp/before.rules.new /etc/ufw/before.rules`
 	if _, _, _, err := p.pool.RunCommand(ctx, routerIP, injectCmd); err != nil {
 		return fmt.Errorf("failed to inject NAT rules: %w", err)
 	}
