@@ -159,6 +159,7 @@ class role::cms_frontend {
       --skip-email \
       --allow-root \
       --path=/var/www/html',
+    onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
     unless  => '/usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
     require => [
       Exec['wpcli-install'],
@@ -173,6 +174,7 @@ class role::cms_frontend {
 
   exec { 'wordpress-rewrite-structure':
     command => '/usr/local/bin/wp rewrite structure \'/%postname%/\' --hard --allow-root --path=/var/www/html',
+    onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
     unless  => '/usr/local/bin/wp rewrite list --allow-root --path=/var/www/html 2>/dev/null | grep -q "postname"',
     require => Exec['wordpress-core-install'],
     user    => 'root',

@@ -61,7 +61,7 @@ set -euo pipefail
 # Crear el grupo y usuario para el servicio puppet
 echo "[+] Creando grupo y usuario puppet si no existen..."
 getent group puppet >/dev/null || groupadd -r puppet
-getent passwd puppet >/dev/null || useradd -r -g puppet -d /opt/puppetlabs/server/data/puppetserver -s /usr/sbin/nologin -c "puppet server" puppet
+getent passwd puppet >/dev/null || useradd -r -g puppet -d /var/lib/puppet -s /bin/false -c "puppet server" puppet
 
 mkdir -p /usr/share/puppet/modules/
 
@@ -75,48 +75,37 @@ for i in $(seq 1 30); do
     sleep 2
 done
 
-echo "[+] Instalando Puppet Server..."
+echo "[+] Instalando Puppet Server y Agent..."
 wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
 dpkg -i /tmp/puppet8-release-noble.deb || true
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 # Solventar posibles dependencias rotas de antemano
 apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -f -y
-apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -y puppetserver
+apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -y puppet-agent puppetserver
 
 # Enlazar las librerías de Puppet con el entorno JRuby embebido en el servidor
 echo "[+] Vinculando librerías de Puppet para JRuby..."
-mkdir -p /usr/lib/ruby/vendor_ruby
-for item in /opt/puppetlabs/puppet/lib/ruby/vendor_ruby/*; do
-    name=\$(basename "\$item")
-    rm -rf "/usr/lib/ruby/vendor_ruby/\$name"
-    ln -sf "\$item" "/usr/lib/ruby/vendor_ruby/\$name"
-done
+mkdir -p /usr/lib/puppetserver/ruby/vendor_ruby
+if [ -d /opt/puppetlabs/puppet/lib/ruby/vendor_ruby ]; then
+    for item in /opt/puppetlabs/puppet/lib/ruby/vendor_ruby/*; do
+        name=\$(basename "\$item")
+        rm -rf "/usr/lib/puppetserver/ruby/vendor_ruby/\$name"
+        ln -sf "\$item" "/usr/lib/puppetserver/ruby/vendor_ruby/\$name"
+    done
+fi
+ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
 
 # Crear estructuras de carpetas y enlaces simbólicos de compatibilidad
 echo "[+] Creando enlaces de configuración de Puppet..."
-mkdir -p /etc/puppetlabs/puppet
-rm -rf /etc/puppet/code
-ln -sf /etc/puppetlabs/code /etc/puppet/code
+mkdir -p /etc/puppetlabs/code /etc/puppetlabs/puppet /etc/puppetlabs/puppetserver /var/lib/puppet
+[ -e /etc/puppet/code ] || ln -sf /etc/puppetlabs/code /etc/puppet/code
 ln -sf /etc/puppetlabs/puppet/puppet.conf /etc/puppet/puppet.conf
 ln -sf /etc/puppetlabs/puppet/autosign.conf /etc/puppet/autosign.conf
 
-if [ -L /etc/puppetlabs/puppet/ssl ]; then
-    target=\$(readlink /etc/puppetlabs/puppet/ssl || true)
-    backup="/tmp/puppet-ssl-backup.\$\$"
-    mkdir -p "\$backup"
-    if [ -n "\$target" ] && [ -d "\$target" ]; then
-        cp -a "\$target"/. "\$backup"/ 2>/dev/null || true
-    fi
-    rm -f /etc/puppetlabs/puppet/ssl
-    mkdir -p /etc/puppetlabs/puppet/ssl
-    cp -a "\$backup"/. /etc/puppetlabs/puppet/ssl/ 2>/dev/null || true
-    rm -rf "\$backup"
-else
-    mkdir -p /etc/puppetlabs/puppet/ssl
-fi
-rm -rf /etc/puppet/ssl
-ln -s /etc/puppetlabs/puppet/ssl /etc/puppet/ssl
+[ -e /var/lib/puppet/ssl ] || ln -sf /etc/puppet/ssl /var/lib/puppet/ssl
+[ -e /etc/puppetlabs/puppet/ssl ] || ln -sf /etc/puppet/ssl /etc/puppetlabs/puppet/ssl
+[ -e /etc/puppetlabs/puppetserver/puppetserver ] || ln -sf /etc/puppet/puppetserver /etc/puppetlabs/puppetserver/puppetserver
 
 # Asegurar permisos correctos sobre el directorio de trabajo de Puppet
 echo "[+] Configurando permisos de directorios de Puppet..."

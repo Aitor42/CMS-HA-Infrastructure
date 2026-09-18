@@ -164,7 +164,11 @@ func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) erro
 	sb.WriteString("127.0.0.1 localhost\n")
 	for _, n := range nodes {
 		if n.IP != "" && n.FQDN != "" {
-			sb.WriteString(fmt.Sprintf("%s %s %s\n", n.IP, n.FQDN, n.Name))
+			if n.Name == "jumpstart" {
+				sb.WriteString(fmt.Sprintf("%s %s %s puppet\n", n.IP, n.FQDN, n.Name))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s %s %s\n", n.IP, n.FQDN, n.Name))
+			}
 		}
 	}
 	hostsContent := sb.String()

@@ -62,6 +62,9 @@ class role::base {
       127.0.0.1       localhost
       127.0.1.1       ${facts['networking']['fqdn']} ${facts['networking']['hostname']}
 
+      # Perimeter router and firewall
+      192.168.10.1    ufw-router.internal.local ufw-router
+
       # Jumpstart / Puppet Server
       192.168.10.10   jumpstart.internal.local jumpstart puppet
 

@@ -56,7 +56,12 @@ func (p *Phase) Run(ctx context.Context) error {
 	wanIface, _, _, err := p.pool.RunCommand(ctx, routerIP, wanCmd)
 	wanIface = strings.TrimSpace(wanIface)
 	if err != nil || wanIface == "" {
-		wanIface = "enp2s0" // fallback
+		// Fallback: detect interface carrying default gateway
+		defIface, _, _, _ := p.pool.RunCommand(ctx, routerIP, "ip route show default | awk '{print $5}' | head -n1")
+		wanIface = strings.TrimSpace(defIface)
+		if wanIface == "" {
+			wanIface = "enp3s0"
+		}
 	}
 	
 	logging.Info("Uploading and injecting NAT rules...")
