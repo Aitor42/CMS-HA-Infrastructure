@@ -116,7 +116,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	
 	logging.Info("Labeling Master 1 with DRBD primary status...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite", master1.Name))
+	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", master1.FQDN, master1.Name))
 	if err != nil {
 		logging.Warn("Failed to label node: %v", err)
 	}
