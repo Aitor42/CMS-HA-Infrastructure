@@ -259,7 +259,7 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 		concurrency = len(nodes)
 	}
 
-	logging.Info(fmt.Sprintf("Running first catalog in parallel across %d nodes (concurrency limit: %d)...", len(nodes), concurrency))
+	logging.Info("Running first catalog in parallel across %d nodes (concurrency limit: %d)...", len(nodes), concurrency)
 
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
@@ -272,7 +272,7 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			logging.Info(fmt.Sprintf("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP))
+			logging.Info("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP)
 
 			// Stop background daemon to avoid catalog run lock contention
 			p.pool.RunCommand(ctx, spec.IP, "systemctl stop puppet 2>/dev/null || true")
@@ -293,7 +293,7 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 			// Self-healing: if SSL certificate does not match private key, revoke and purge
 			combinedOutput := stdout + " " + stderr
 			if code != 0 && strings.Contains(combinedOutput, "does not match its private key") {
-				logging.Warn(fmt.Sprintf("Certificate mismatch detected on %s (%s). Performing self-healing SSL reset...", spec.Name, spec.FQDN))
+				logging.Warn("Certificate mismatch detected on %s (%s). Performing self-healing SSL reset...", spec.Name, spec.FQDN)
 				p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("puppetserver ca clean --certname %s 2>/dev/null || true", spec.FQDN))
 				p.pool.RunCommand(ctx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl")
 				// Retry agent run
@@ -305,7 +305,7 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 				errs = append(errs, fmt.Sprintf("%s (%s): exit %d: %v\nSTDOUT: %s\nSTDERR: %s", spec.Name, spec.IP, code, err, strings.TrimSpace(stdout), strings.TrimSpace(stderr)))
 				mu.Unlock()
 			} else {
-				logging.Success(fmt.Sprintf("Node %s converged successfully", spec.Name))
+				logging.Success("Node %s converged successfully", spec.Name)
 			}
 		}(node)
 	}
