@@ -82,9 +82,9 @@ func (t *Traffic) Run(ctx context.Context) error {
 		}
 	} else if t.opts.Mode == "internal" {
 		if len(t.cfg.Nodes.CMSFrontends) > 0 && t.cfg.Nodes.CMSFrontends[0].IP != "" {
-			baseURL = fmt.Sprintf("https://%s", t.cfg.Nodes.CMSFrontends[0].IP)
+			baseURL = fmt.Sprintf("http://%s", t.cfg.Nodes.CMSFrontends[0].IP)
 		} else {
-			baseURL = fmt.Sprintf("https://%s", getPrefix(t.cfg.Network.Internal.CIDR)+"20")
+			baseURL = fmt.Sprintf("http://%s", getPrefix(t.cfg.Network.Internal.CIDR)+"20")
 		}
 	} else {
 		if t.cfg.Nodes.LB.IP != "" {
@@ -124,6 +124,7 @@ func (t *Traffic) Run(ctx context.Context) error {
 		path := getRandomPath(wpPaths)
 		reqURL := baseURL + path
 		req, _ := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		req.Host = "cms.fake-enterprise.com"
 		resp, err := client.Do(req)
 		if err != nil {
 			if t.opts.Verbose {
@@ -189,6 +190,7 @@ func (t *Traffic) Run(ctx context.Context) error {
 		"pwd": {"password"},
 	}
 	req, _ := http.NewRequestWithContext(ctx, "POST", formURL, strings.NewReader(formData.Encode()))
+	req.Host = "cms.fake-enterprise.com"
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := client.Do(req)
 	if err == nil {
@@ -227,6 +229,7 @@ func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseUR
 					if err != nil {
 						continue
 					}
+					req.Host = "cms.fake-enterprise.com"
 					
 					start := time.Now()
 					resp, err := client.Do(req)

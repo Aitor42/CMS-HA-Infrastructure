@@ -13,14 +13,14 @@ var trafficCmd = &cobra.Command{
         cfg, err := loadConfig()
         if err != nil { handleError(err); return }
         
-        external, _ := cmd.Flags().GetBool("external")
+        internal, _ := cmd.Flags().GetBool("internal")
         target, _ := cmd.Flags().GetString("target")
         duration, _ := cmd.Flags().GetInt("duration")
         concurrency, _ := cmd.Flags().GetInt("concurrency")
         withDB, _ := cmd.Flags().GetBool("with-db")
         
-        mode := "internal"
-        if external { mode = "external" }
+        mode := "external"
+        if internal { mode = "internal" }
         opts := traffic.Options{Mode: mode, TargetIP: target, Duration: duration, Concurrency: concurrency, WithDB: withDB, Verbose: verbose}
         t := traffic.New(cfg, opts)
         if err := t.Run(cmd.Context()); err != nil { handleError(err) }
