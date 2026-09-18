@@ -66,34 +66,47 @@ On the hypervisor terminal, run the Go CLI (or legacy scripts) to create virtual
 
 Run the command that automates the creation and installation of client nodes in sequential batches:
 ```bash
+# Go CLI:
 ./cms-ha vm install-batches
+
 # (Legacy v1: bash scripts/utils/install_by_batches.sh)
 ```
-**Instructions during execution:**
-*   The orchestrator creates VMs for each batch with high RAM (3-4 GB) so the Ubuntu installer does not suffer OOM.
-*   Once a batch's VMs finish installation and boot the OS, the command shuts down the batch VMs, reduces their RAM to production profile (512 MB - 1024 MB), and restarts them before moving to the next batch.
+**Key Operational Decisions During Batch Provisioning:**
+*   **Installation RAM Allocation:** VMs are spawned with 3–4 GB RAM so the Subiquity installer does not trigger Linux kernel OOM killer events.
+*   **Production Disk Sizing:** The web frontends (`main-cms1`, `main-cms2`) and load balancer (`main-lb`) are provisioned with **8 GB virtual disks** (upgraded from earlier 4 GB baseline) to provide ample room for Apache, PHP 8.3 modules, WordPress core files, Nginx logs, and OS kernel updates without risk of root partition exhaustion.
+*   **Automated Memory Shrinking:** Once a batch finishes OS installation, its memory is adjusted down to production footprint (512 MB – 1024 MB):
+    ```bash
+    ./cms-ha vm shrink
+    # (Legacy v1: bash scripts/utils/shrink_vms_ram.sh)
+    ```
+*   **Boot Order Hardening:** To ensure rebooted VMs boot directly from disk instead of re-entering PXE bootstrap loops:
+    ```bash
+    ./cms-ha vm fix-boot-order
+    # (Legacy v1: bash scripts/utils/fix_boot_order.sh)
+    ```
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
 
 ![PXE Installation](pxe-installation.png)
 
-
 ### Step 3: Service and Application Deployment
-Once all VMs are installed, running, and RAM-reduced to optimal production values, run the orchestrator to install Puppet, K3s cluster, Nginx load balancer, per-node firewalling, and DRBD replication:
+Once all VMs are running and adjusted to production profiles, run the deployment orchestrator:
 ```bash
+# Go CLI:
 ./cms-ha deploy --skip-vm-create
+
 # (Or Makefile: make deploy-resume)
 # (Legacy v1: ./deploy_all.sh --skip-vm-create)
 ```
-This script handles:
-1. Installing Puppet Agent and configuring the Puppet CA on all nodes.
-2. Deploying the K3s HA cluster and registering nodes.
-3. Launching WordPress and configuring Apache on the web frontend nodes.
-4. Deploying Nginx as the load balancer.
-5. Initialising DRBD replication for the MariaDB data directory.
-6. Applying UFW firewall policies.
-7. Installing and starting the monitoring stack.
-8. Deploying the internal Certificate Authority (step-ca).
+
+**Orchestration Logic & Concurrency Design:**
+1. **Jumpstart Prerequisite Enforcement:** Automatically applies `role::jumpstart` first to ensure Puppet Server (8140), DNS (53), Cobbler (25151), DHCP (67), and TFTP (69) are active and accepting connections before clients run.
+2. **Parallel Puppet Catalog Convergence:** In the Go CLI, client nodes run against a **bounded worker semaphore pool (concurrency: 4)** with automated SSL self-healing, reducing execution time from >7 minutes down to ~90 seconds while protecting the Puppet master from thread starvation.
+3. **Synchronous DRBD Block Replication:** DRBD Protocol C volume is initialized, primary status promoted, formatted with ext4, and mounted at `/mnt/data/mariadb` on `internal-master1`.
+4. **K3s HA Cluster & Pod Affinity:** Control plane nodes form an embedded etcd quorum; `internal-master1` is labeled with `drbd-status=primary` using dual FQDN/short hostname resolution, allowing `mariadb-0` to mount storage safely.
+5. **Sequential CMS Convergence:** Web frontends (`main-cms1`, `main-cms2`) are converged sequentially to prevent concurrency deadlocks in MariaDB while creating WordPress tables.
+6. **Perimeter Firewall & Routing:** Router detects dynamic WAN interface by MAC (`enp3s0`), clears stale tables, and injects clean `*nat` forwarding rules before `*filter` in `/etc/ufw/before.rules`.
+7. **Cluster Observability & PKI:** Exporters, Prometheus, Grafana, and Smallstep CA certificates converge in parallel across all cluster nodes.
 
 ---
 
@@ -118,14 +131,59 @@ curl -sk https://192.168.20.100/ | grep -i "wordpress"
 ```
 
 ### 3.4 Full Infrastructure Health Check
-To perform a comprehensive, automated validation of all infrastructure phases, run the verification command on the hypervisor:
+
+The health check validates all infrastructure phases. The Go CLI executes these checks concurrently using the SSH connection pool in ~1.5 seconds:
+
 ```bash
-./cms-ha verify
+# Go CLI (parallel execution across all phases):
+./cms-ha verify all
+
 # (Or Makefile: make verify)
 # (Legacy v1: bash scripts/utils/verify_all.sh)
 ```
 
-Below is the expected output of a successful run where all services and configurations are operational:
+**Go CLI Concurrent Verification Output:**
+```text
+ℹ Starting phase: Infrastructure Verification
+✓ Phase 00 - Libvirt VMs & Networks: [PASS] (12 running VMs)
+✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 11)
+✓ Phase 02 - Puppet Server & Certs: [PASS] (Certs: 13)
+✓ Phase 03 - Nginx & Apache & SSL: [PASS]
+✓ Phase 04 - K3s & MariaDB Pod: [PASS]
+✓ Phase 05 - Prometheus & Grafana: [PASS]
+✓ Phase 06 - Router UFW & IP Forward: [PASS]
+✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
+✓ Completed phase: Infrastructure Verification in 1.52s
+```
+
+### 3.5 Real-Time SSH Connectivity Matrix
+
+To instantly inspect the state and SSH reachability of all provisioned virtual machines:
+
+```bash
+./cms-ha status ssh
+```
+
+```text
+VM NAME              IP              STATE      SSH       
+------------------------------------------------------------
+ufw-router           192.168.10.1    running    OK        
+jumpstart            192.168.10.10   running    OK        
+internal-master1     192.168.10.11   running    OK        
+internal-master2     192.168.10.12   running    OK        
+internal-worker1     192.168.10.13   running    OK        
+internal-worker2     192.168.10.14   running    OK        
+internal-storage     192.168.10.15   running    OK        
+internal-monitor     192.168.10.20   running    OK        
+main-lb              192.168.20.100  running    OK        
+main-cms1            192.168.20.101  running    OK        
+main-cms2            192.168.20.102  running    OK        
+main-hotdesk1        192.168.20.201  running    OK        
+```
+
+### 3.6 Legacy Verification Output (`verify_all.sh`)
+
+For environments running the legacy Bash toolchain:
 
 ```text
 =========================================================
@@ -536,4 +594,75 @@ scp $SSH_OPTS root@$MASTER2_IP:/tmp/pause-3.6.tar /tmp/pause-3.6.tar 2>/dev/null
 # Import on the affected node (example: master1)
 scp $SSH_OPTS /tmp/pause-3.6.tar root@$MASTER1_IP:/tmp/pause-3.6.tar
 ssh $SSH_OPTS root@$MASTER1_IP 'ctr -n k8s.io images import /tmp/pause-3.6.tar'
+```
+
+#### Puppet SSL Certificate Mismatch (`certificate signature failure`)
+
+Symptom: `puppet agent -t` fails with:
+```text
+Error: certificate verify failed [certificate signature failure for /CN=internal-master1.internal.local]
+```
+Cause: The node was reprovisioned or the Puppet Server CA regenerated certificates, causing an SSL serial mismatch.
+
+Automated Solution:
+The Go CLI (`cms-ha phase setup-puppet`) automatically detects this condition, revokes the stale certificate on the master, deletes client SSL caches, and generates a fresh CSR:
+```bash
+./cms-ha phase setup-puppet
+```
+
+Manual Solution:
+```bash
+# 1. Clean certificate on Jumpstart
+ssh root@192.168.10.10 "/opt/puppetlabs/bin/puppetserver ca clean --certname <NODE_FQDN>"
+
+# 2. Reset SSL state and request fresh certificate on client node
+ssh root@<NODE_IP> "rm -rf /etc/puppetlabs/puppet/ssl && /opt/puppetlabs/bin/puppet agent -t || [ \$? -eq 2 ]"
+```
+
+#### DRBD Hostname Mismatch & Kubernetes Node Affinity
+
+Symptom:
+`drbdadm status` reports:
+```text
+'cms_data' not defined in your config (for this host)
+```
+or MariaDB pod stays in `Pending` state with message:
+```text
+0/4 nodes are available: 4 node(s) didn't match Pod's node affinity/selector.
+```
+
+Cause:
+DRBD evaluates the local hostname against `uname -n` (which returns the FQDN e.g., `internal-master1.internal.local`). If the config only specifies the short hostname, DRBD rejects the resource. Likewise, Kubernetes node names match the FQDN.
+
+Solution:
+Ensure the DRBD template references both FQDN and short hostname:
+```text
+on internal-master1.internal.local internal-master1 {
+    node-id 0;
+    ...
+}
+```
+And ensure Kubernetes is labeled using the active primary node:
+```bash
+kubectl label node internal-master1.internal.local drbd-status=primary --overwrite 2>/dev/null || \
+kubectl label node internal-master1 drbd-status=primary --overwrite
+```
+
+#### Router NAT Rules Inactive or Stale
+
+Symptom:
+Client network nodes cannot access the internet (HTTP/HTTPS downloads fail), or external traffic on port 80/443 fails to reach the load balancer (`192.168.20.100`).
+
+Cause:
+The `*nat` block in `/etc/ufw/before.rules` must appear *before* the `*filter` section and reference the correct dynamic WAN interface.
+
+Solution:
+Run the idempotent UFW phase:
+```bash
+./cms-ha phase setup-ufw
+```
+
+Manual Verification:
+```bash
+ssh root@192.168.10.1 "ufw status verbose && grep -A 10 '^\*nat' /etc/ufw/before.rules"
 ```

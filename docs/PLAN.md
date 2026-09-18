@@ -69,16 +69,16 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 | Hostname | IP | Network | Role | RAM | Disk | MAC |
 |:---------|:---|:--------|:-----|:----|:-----|:----|
-| main-lb | 192.168.20.100 | main | Load balancer (Nginx reverse proxy) | 512 MB | 4 GB | 52:54:00:10:02:64 |
-| main-cms1 | 192.168.20.101 | main | CMS frontend (WordPress + Apache) | 512 MB | 4 GB | 52:54:00:10:02:65 |
-| main-cms2 | 192.168.20.102 | main | CMS frontend (WordPress + Apache) | 512 MB | 4 GB | 52:54:00:10:02:66 |
+| main-lb | 192.168.20.100 | main | Load balancer (Nginx reverse proxy) | 512 MB | 8 GB | 52:54:00:10:02:64 |
+| main-cms1 | 192.168.20.101 | main | CMS frontend (WordPress + Apache) | 512 MB | 8 GB | 52:54:00:10:02:65 |
+| main-cms2 | 192.168.20.102 | main | CMS frontend (WordPress + Apache) | 512 MB | 8 GB | 52:54:00:10:02:66 |
 | main-hotdesk1 | 192.168.20.201 | main | Hot-desk workstation (dynamic) | 768 MB | 3 GB | 52:54:00:10:02:c9 |
 | main-hotdesk2 | 192.168.20.202 | main | Hot-desk workstation (dynamic) | 768 MB | 3 GB | 52:54:00:10:02:ca |
 | main-hotdesk3 | 192.168.20.203 | main | Hot-desk workstation (dynamic) | 768 MB | 3 GB | 52:54:00:10:02:cb |
 | ... | ... | ... | ... | ... | ... | ... |
 | main-hotdesk8 | 192.168.20.208 | main | Hot-desk workstation (dynamic) | 512 MB | 3 GB | 52:54:00:10:02:d0 |
 
-**Total:** 1 router + 1 jumpstart + 6 internal nodes + 3 fixed main nodes + N hot-desks (default 3, dynamically scalable up to 8).
+**Total:** 1 router + 1 jumpstart + 6 internal nodes + 3 fixed main nodes + N hot-desks (default 1 to 3, dynamically scalable up to 8).
 
 ---
 
@@ -86,6 +86,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 | Technology | Version | Role in the Project |
 |:-----------|:--------|:--------------------|
+| **Go CLI (`cms-ha`)**| 1.22+ | Unified CLI orchestrator, connection pooling & concurrency manager |
 | **Cobbler** | 3.3.x | Zero-touch bare-metal provisioning (PXE + autoinstall) |
 | **Puppet** | 8.x | Idempotent configuration management (server + agents) |
 | **Nginx** | 1.24.x | Reverse proxy load balancing with health checks |
@@ -102,7 +103,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 ## Project Phases & Deployment Mapping
 
-The project structure is split between the **Project Milestones** (which correspond to the design phases documented in `docs/phases/PHASE-XX-descriptive-name.md`) and the **Technical Execution Sequence** implemented by the `deploy_all.sh` orchestrator script.
+The project structure is split between the **Project Milestones** (which correspond to the design phases documented in `docs/phases/PHASE-XX-descriptive-name.md`) and the **Technical Execution Sequence** implemented across both orchestrator engines (`cms-ha deploy` and `deploy_all.sh`).
 
 ### 1. Project Milestones (Design Phases)
 
@@ -121,24 +122,24 @@ The project structure is split between the **Project Milestones** (which corresp
 | **10** | TrafficMix and End-to-End Tests | Automated load testing & verification checks | [Phase 10](phases/PHASE-10-traffic-testing.md) |
 | **11** | Final Documentation | Project manuals, baseline & diagram validation | [Phase 11](phases/PHASE-11-final-documentation.md) |
 
-### 2. Technical Execution Sequence (`deploy_all.sh`)
+### 2. Dual Technical Execution Sequence
 
-When launching `./deploy_all.sh`, the orchestrator executes the automation scripts in a sequential, dependency-aware logical order:
+The deployment can be executed end-to-end via either engine, preserving identical dependency ordering:
 
-| Step | Script | Description | Milestone Mapping |
-|:---:|:---|:---|:---:|
-| **00a** | `00_init_vms.sh --jumpstart-only` | Virtual networks creation and Jumpstart node provisioning | Phase 00 |
-| **01** | `01_setup_cobbler.sh` | Cobbler configuration (PXE, DHCP, TFTP, DNS) on Jumpstart | Phase 01 |
-| **01.5**| `02_register_cobbler_nodes.sh` | Registration of all target nodes and MAC bindings in Cobbler | Phase 01 |
-| **00b** | `00_init_vms.sh --nodes-only` | Unattended PXE installation of all client nodes (e.g. via `scripts/utils/install_by_batches.sh`) | Phase 00 |
-| **01.8**| `03_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
-| **02** | `04_setup_puppet.sh` | Puppet Server deployment and Agent convergence | Phase 01, Phase 09 |
-| **03** | `05_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
-| **04** | `06_setup_kubernetes.sh` | K3s HA clustering & MariaDB deployment on DRBD storage | Phase 03 |
-| **05** | `07_setup_nginx_wordpress.sh` | Nginx Load Balancer and WordPress frontends configuration | Phase 05 |
-| **06** | `08_setup_monitoring.sh` | Prometheus monitoring, exporters, Grafana & alerts | Phase 07, Phase 08 |
-| **07** | `09_setup_ufw.sh` | Perimeter routing (router) & per-node firewall policies | Phase 04, Phase 06 |
-| **08** | `10_setup_internal_ca.sh` | Step-CA PKI deployment, TLS cert issuance and trust sync | Phase 04 |
+| Phase | Go CLI (v2) | Bash Script (v1) | Description | Milestone Mapping |
+|:---:|:---|:---|:---|:---:|
+| **00a** | `cms-ha phase init-vms --jumpstart-only` | `00_init_vms.sh --jumpstart-only` | Virtual networks creation and Jumpstart node provisioning | Phase 00 |
+| **01** | `cms-ha phase setup-cobbler` | `01_setup_cobbler.sh` | Cobbler configuration (PXE, DHCP, TFTP, DNS) on Jumpstart | Phase 01 |
+| **01.5**| `cms-ha phase register-nodes` | `02_register_cobbler_nodes.sh` | Registration of all target nodes and MAC bindings in Cobbler | Phase 01 |
+| **00b** | `cms-ha vm install-batches` | `00_init_vms.sh --nodes-only` | Unattended PXE installation of all client nodes | Phase 00 |
+| **01.8**| `cms-ha phase repair-ssh` | `03_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
+| **02** | `cms-ha phase setup-puppet` | `04_setup_puppet.sh` | Parallel Puppet catalog execution (worker pool) | Phase 01, Phase 09 |
+| **03** | `cms-ha phase setup-drbd` | `05_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
+| **04** | `cms-ha phase setup-kubernetes` | `06_setup_kubernetes.sh` | K3s HA clustering & MariaDB deployment on DRBD storage | Phase 03 |
+| **05** | `cms-ha phase setup-nginx-wordpress` | `07_setup_nginx_wordpress.sh` | Nginx Load Balancer and WordPress frontends configuration | Phase 05 |
+| **06** | `cms-ha phase setup-monitoring` | `08_setup_monitoring.sh` | Prometheus monitoring, exporters, Grafana & alerts | Phase 07, Phase 08 |
+| **07** | `cms-ha phase setup-ufw` | `09_setup_ufw.sh` | Perimeter routing (router) & per-node firewall policies | Phase 04, Phase 06 |
+| **08** | `cms-ha phase setup-ca` | `10_setup_internal_ca.sh` | Step-CA PKI deployment, TLS cert issuance and trust sync | Phase 04 |
 
 ---
 

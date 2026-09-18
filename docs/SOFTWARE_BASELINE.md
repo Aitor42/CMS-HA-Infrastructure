@@ -33,6 +33,7 @@ In a virtualised environment, device firmware selection is critical for compatib
 
 | Software | Version / Release | Function | Key Dependencies | Source URL | Node(s) |
 |:---------|:------------------|:---------|:-----------------|:-----------|:--------|
+| **cms-ha (Go CLI)** | 1.22+ | Unified infrastructure orchestrator & CLI | Cobra, Viper, age (X25519), slog | [GitHub Repo](https://github.com/Aitor42/CMS-HA-Infrastructure) | Hypervisor Host |
 | **Cobbler** | 3.3.7 | Zero-touch bare-metal provisioning | Python 3.12, Apache2, pyyaml, django | [Cobbler Project](https://cobbler.github.io/) | `jumpstart` |
 | **Puppet Server** | 8.4.0 | Central configuration management server | OpenJDK 17, Ruby, openssl | [Puppet Server](https://www.puppet.com/) | `jumpstart` |
 | **Puppet Agent** | 8.4.0 | Local configuration enforcement client | OpenSSL, libc6 | [Puppet Agent](https://www.puppet.com/) | All nodes except router |
