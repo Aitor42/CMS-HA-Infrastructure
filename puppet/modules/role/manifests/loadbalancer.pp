@@ -10,7 +10,7 @@ class role::loadbalancer {
   # ---------------------------------------------------------------------------
   # PACKAGES
   # ---------------------------------------------------------------------------
-  package { ['nginx', 'openssl']:
+  package { ['nginx', 'openssl', 'prometheus-nginx-exporter']:
     ensure => installed,
   }
 
@@ -64,10 +64,30 @@ class role::loadbalancer {
     before      => Service['nginx'],
   }
 
+  file { '/etc/nginx/conf.d/stub_status.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "server {\n    listen 127.0.0.1:8080;\n    location /stub_status {\n        stub_status on;\n        allow 127.0.0.1;\n        deny all;\n    }\n    location /nginx_status {\n        stub_status on;\n        allow 127.0.0.1;\n        deny all;\n    }\n}\n",
+    require => Package['nginx'],
+    notify  => Service['nginx'],
+  }
+
   service { 'nginx':
     ensure  => running,
     enable  => true,
     require => Package['nginx'],
+  }
+
+  service { 'prometheus-nginx-exporter':
+    ensure  => running,
+    enable  => true,
+    require => [
+      Package['prometheus-nginx-exporter'],
+      Service['nginx'],
+      File['/etc/nginx/conf.d/stub_status.conf'],
+    ],
   }
 
   # ---------------------------------------------------------------------------

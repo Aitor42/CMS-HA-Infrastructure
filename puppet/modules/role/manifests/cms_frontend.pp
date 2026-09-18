@@ -22,6 +22,7 @@ class role::cms_frontend {
     'wget',
     'tar',
     'curl',
+    'prometheus-apache-exporter',
   ]:
     ensure => installed,
   }
@@ -68,6 +69,33 @@ class role::cms_frontend {
     ensure  => running,
     enable  => true,
     require => Package['apache2'],
+  }
+
+  file { '/etc/apache2/conf-available/server-status.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "<Location /server-status>\n    SetHandler server-status\n    Require local\n    RewriteEngine Off\n</Location>\n",
+    require => Package['apache2'],
+    notify  => Service['apache2'],
+  }
+
+  exec { 'apache-enable-server-status':
+    command => '/usr/sbin/a2enconf server-status',
+    unless  => '/usr/bin/test -L /etc/apache2/conf-enabled/server-status.conf',
+    require => File['/etc/apache2/conf-available/server-status.conf'],
+    notify  => Service['apache2'],
+  }
+
+  service { 'prometheus-apache-exporter':
+    ensure  => running,
+    enable  => true,
+    require => [
+      Package['prometheus-apache-exporter'],
+      Service['apache2'],
+      Exec['apache-enable-server-status'],
+    ],
   }
 
   # ---------------------------------------------------------------------------

@@ -16,6 +16,51 @@ class role::k3s_master {
   }
 
   # ---------------------------------------------------------------------------
+  # MYSQLD EXPORTER — Pre-configure config before installing package
+  # ---------------------------------------------------------------------------
+  file { '/etc/mysql':
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+  }
+
+  file { '/etc/mysql/exporter.cnf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "[client]\nuser=exporter\npassword=exporter_password\nhost=127.0.0.1\nport=30306\n",
+    require => File['/etc/mysql'],
+  }
+
+  file { '/etc/default/prometheus-mysqld-exporter':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "ARGS=\"--config.my-cnf=/etc/mysql/exporter.cnf\"\n",
+  }
+
+  package { 'prometheus-mysqld-exporter':
+    ensure  => installed,
+    require => [
+      File['/etc/mysql/exporter.cnf'],
+      File['/etc/default/prometheus-mysqld-exporter'],
+    ],
+  }
+
+  service { 'prometheus-mysqld-exporter':
+    ensure    => running,
+    enable    => true,
+    subscribe => [
+      File['/etc/mysql/exporter.cnf'],
+      File['/etc/default/prometheus-mysqld-exporter'],
+    ],
+    require   => Package['prometheus-mysqld-exporter'],
+  }
+
+  # ---------------------------------------------------------------------------
   # UFW — K3s control-plane firewall rules
   # ---------------------------------------------------------------------------
 

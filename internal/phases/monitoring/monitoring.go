@@ -103,6 +103,11 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("prometheus API test failed: %w", err)
 	}
 	
+	logging.Info("Checking Prometheus scrape targets health...")
+	if out, _, _, err := p.pool.RunCommand(ctx, monitorIP, `curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"up"' | wc -l`); err == nil {
+		logging.Info("Prometheus active targets reporting UP: %s", strings.TrimSpace(out))
+	}
+	
 	logging.Success("Monitoring Setup completed successfully.")
 	return nil
 }

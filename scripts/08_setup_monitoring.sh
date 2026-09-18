@@ -71,6 +71,24 @@ for NODE_NAME in "${!NODE_PIDS[@]}"; do
 done
 
 echo ""
+echo "[+] Syncing K3s bearer token for kubelet metrics..."
+K3S_TOKEN=$(ssh ${SSH_OPTS} root@"${MASTER1_IP}" '
+    kubectl create serviceaccount prometheus -n kube-system 2>/dev/null || true
+    kubectl create clusterrolebinding prometheus --clusterrole=cluster-admin --serviceaccount=kube-system:prometheus 2>/dev/null || true
+    kubectl create token prometheus -n kube-system --duration=87600h 2>/dev/null || true
+' 2>/dev/null || true)
+
+if [ -n "$K3S_TOKEN" ]; then
+    ssh ${SSH_OPTS} root@"${MONITOR_IP}" "
+        echo '${K3S_TOKEN}' > /etc/prometheus/k3s.token
+        chmod 600 /etc/prometheus/k3s.token
+        chown prometheus:prometheus /etc/prometheus/k3s.token
+        systemctl reload prometheus
+    "
+    echo "  [OK] K3s token synced to internal-monitor."
+fi
+
+echo ""
 echo ">>> Verifying monitoring services <<<"
 
 # Prometheus
