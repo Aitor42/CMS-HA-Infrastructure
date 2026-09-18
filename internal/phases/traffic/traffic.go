@@ -55,9 +55,9 @@ func New(cfg *config.Config, opts Options) *Traffic {
 
 var wpPaths = []string{
 	"/", "/wp-login.php", "/?s=test", "/?s=empresa", "/?s=proyecto",
-	"/?p=1", "/wp-admin/", "/wp-cron.php", "/xmlrpc.php",
+	"/hello-world/", "/sample-page/", "/wp-cron.php", "/wp-json/",
 	"/wp-json/wp/v2/posts", "/wp-json/wp/v2/pages", "/wp-json/wp/v2/users",
-	"/feed/", "/wp-content/themes/", "/favicon.ico", "/?cat=1", "/?author=1",
+	"/feed/", "/?s=ha",
 }
 
 func getPrefix(cidr string) string {

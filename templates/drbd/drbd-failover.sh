@@ -23,10 +23,6 @@ case "${1:-status}" in
       exit 1
     fi
 
-    # Stop K3s to avoid mount point locking issues
-    echo "  [+] Stopping K3s temporarily..."
-    systemctl stop k3s || true
-
     # Promote device to Primary
     drbdadm primary "$RESOURCE"
     echo "  ✔ Node promoted to Primary"
@@ -43,18 +39,18 @@ case "${1:-status}" in
     # Label local node in Kubernetes as active primary and remove label from peer
     if command -v kubectl &>/dev/null; then
       echo "  [+] Updating availability labels in Kubernetes..."
-      HOSTNAME_K8S=$(hostname)
-      OTHER_NODE="internal-master2"
-      if [[ "$HOSTNAME_K8S" == "internal-master2" ]]; then
-        OTHER_NODE="internal-master1"
+      LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
+      PEER_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v "$LOCAL_NODE" | grep "master" | head -n 1 || true)
+      kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite || true
+      if [ -n "$PEER_NODE" ]; then
+        kubectl label node "$PEER_NODE" drbd-status- 2>/dev/null || true
       fi
-      kubectl label node "$HOSTNAME_K8S" drbd-status=primary --overwrite || true
-      kubectl label node "$OTHER_NODE" drbd-status- 2>/dev/null || true
-    fi
 
-    # Start Kubernetes again
-    echo "  [+] Restarting K3s..."
-    systemctl start k3s || true
+      # Trigger pod reschedule to the new Primary node
+      echo "  [+] Ensuring MariaDB runs on new Primary..."
+      kubectl delete pod mariadb-0 -n cms 2>/dev/null || true
+      kubectl scale statefulset mariadb -n cms --replicas=1 2>/dev/null || true
+    fi
 
     echo "  ✔ Failover complete. This node is now the Primary."
     ;;
@@ -62,9 +58,15 @@ case "${1:-status}" in
   demote)
     echo "[FAILOVER] Demoting local node to Secondary..."
 
-    # Stop K3s to release open file descriptors on the volume
-    echo "  [+] Stopping K3s..."
-    systemctl stop k3s || true
+    # Scale down MariaDB pod before unmounting to release storage locks
+    if command -v kubectl &>/dev/null; then
+      echo "  [+] Scaling down MariaDB pod..."
+      kubectl scale statefulset mariadb -n cms --replicas=0 2>/dev/null || true
+      sleep 3
+      echo "  [+] Removing Kubernetes labels..."
+      LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
+      kubectl label node "$LOCAL_NODE" drbd-status- 2>/dev/null || true
+    fi
 
     # Unmount the volume
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
@@ -72,19 +74,9 @@ case "${1:-status}" in
       echo "  ✔ Volume unmounted from $MOUNT_POINT"
     fi
 
-    # Remove node label from the cluster
-    if command -v kubectl &>/dev/null; then
-      echo "  [+] Removing Kubernetes labels..."
-      kubectl label node $(hostname) drbd-status- 2>/dev/null || true
-    fi
-
     # Degrade resource to Secondary
     drbdadm secondary "$RESOURCE"
     echo "  ✔ Resource degraded to Secondary"
-
-    # Restart Kubernetes
-    echo "  [+] Restarting K3s..."
-    systemctl start k3s || true
     ;;
 
   status)

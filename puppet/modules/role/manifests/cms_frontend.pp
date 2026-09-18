@@ -153,6 +153,12 @@ class role::cms_frontend {
     require => Exec['wordpress-config-create'],
   }
 
+  exec { 'wordpress-config-ssl-reverse-proxy':
+    command => '/bin/sed -i "/<?php/a if (isset(\$_SERVER[\'HTTP_X_FORWARDED_PROTO\']) && \$_SERVER[\'HTTP_X_FORWARDED_PROTO\'] === \'https\') { \$_SERVER[\'HTTPS\'] = \'on\'; }" /var/www/html/wp-config.php',
+    unless  => '/usr/bin/grep -q "HTTP_X_FORWARDED_PROTO" /var/www/html/wp-config.php',
+    require => Exec['wordpress-config-create'],
+  }
+
   # Deploy .htaccess for clean URL rewriting
   file { '/var/www/html/.htaccess':
     ensure  => file,
@@ -195,6 +201,7 @@ class role::cms_frontend {
       Exec['wordpress-config-db-user'],
       Exec['wordpress-config-db-pass'],
       Exec['wordpress-config-db-name'],
+      Exec['wordpress-config-ssl-reverse-proxy'],
     ],
     user    => 'root',
     timeout => 120,
