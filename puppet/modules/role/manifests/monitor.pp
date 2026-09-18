@@ -44,8 +44,8 @@ class role::monitor {
   }
 
   exec { 'grafana-add-gpg-key':
-    command => '/usr/bin/curl -fsSL https://apt.grafana.com/gpg.key | /usr/bin/gpg --dearmor -o /usr/share/keyrings/grafana.gpg',
-    creates => '/usr/share/keyrings/grafana.gpg',
+    command => '/usr/bin/curl -fsSL https://apt.grafana.com/gpg.key | /usr/bin/gpg --dearmor --yes -o /usr/share/keyrings/grafana.gpg',
+    unless  => '/usr/bin/test -s /usr/share/keyrings/grafana.gpg',
     require => [Package['curl'], Package['gnupg']],
   }
 
@@ -60,8 +60,9 @@ class role::monitor {
   }
 
   exec { 'grafana-apt-update':
-    command     => '/usr/bin/apt-get update',
-    refreshonly => true,
+    command => '/usr/bin/apt-get update',
+    unless  => '/usr/bin/dpkg -s grafana >/dev/null 2>&1',
+    require => File['/etc/apt/sources.list.d/grafana.list'],
   }
 
   package { 'grafana':

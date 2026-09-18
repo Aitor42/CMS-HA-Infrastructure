@@ -99,7 +99,7 @@ nodes:
     ram_install_mb: 3072
     ram_final_mb: 1024
     vcpus: 1
-    disk_gb: 4
+    disk_gb: 10
   lb:
     name: "main-lb"
     ip: "192.168.20.100"
@@ -108,7 +108,7 @@ nodes:
     ram_install_mb: 3072
     ram_final_mb: 768
     vcpus: 1
-    disk_gb: 4
+    disk_gb: 8
   cms_frontends:
     - name: "main-cms1"
       ip: "192.168.20.101"
@@ -117,7 +117,7 @@ nodes:
       ram_install_mb: 3072
       ram_final_mb: 1024
       vcpus: 1
-      disk_gb: 4
+      disk_gb: 8
     - name: "main-cms2"
       ip: "192.168.20.102"
       fqdn: "main-cms2.main.local"
@@ -125,14 +125,14 @@ nodes:
       ram_install_mb: 3072
       ram_final_mb: 1024
       vcpus: 1
-      disk_gb: 4
+      disk_gb: 8
   hotdesks:
     count: 3
     max: 8
     ram_install_mb: 3072
     ram_final_mb: 768
     vcpus: 1
-    disk_gb: 4
+    disk_gb: 10
     base_ip_octet: 201
 
 database:

@@ -45,7 +45,7 @@ node /^internal-storage/ {
 }
 
 node /^jumpstart/ {
-  include role::base
+  include role::jumpstart
 }
 
 # Catch-all for any unclassified node

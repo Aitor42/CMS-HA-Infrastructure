@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
@@ -44,6 +47,9 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := p.uploadPuppetCode(ctx, jumpstartIP); err != nil {
 		return fmt.Errorf("upload puppet code: %w", err)
 	}
+
+	logging.Info("Applying Puppet catalog on Jumpstart...")
+	p.pool.RunCommand(ctx, jumpstartIP, "/opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local || [ $? -eq 2 ]")
 
 	agentNodes := p.getAgentNodes()
 
@@ -200,7 +206,7 @@ func (p *Phase) installAgents(ctx context.Context, nodes []config.NodeSpec) erro
 					dpkg -i /tmp/puppet8-release-noble.deb || true
 					apt-get update
 				fi
-				dpkg -s puppet-agent >/dev/null 2>&1 || apt-get install -y puppet-agent
+				dpkg -s puppet-agent >/dev/null 2>&1 || apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -y puppet-agent
 				
 				ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
 				grep -q "jumpstart.internal.local" /etc/hosts || echo "%s jumpstart.internal.local jumpstart puppet" >> /etc/hosts
@@ -215,7 +221,6 @@ certname = %s
 EOF_PUPPET
 
 				systemctl enable puppet || true
-				/opt/puppetlabs/bin/puppet ssl submit_request 2>/dev/null || /opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local --waitforcert 10 2>/dev/null || true
 			`, jumpstartIP, nodeSpec.FQDN)
 
 			_, _, code, err := pool.RunCommand(ctx, nodeSpec.IP, cmd)
@@ -241,24 +246,72 @@ EOF_PUPPET
 
 func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) error {
 	var errs []string
-	for _, node := range nodes {
-		logging.Info(fmt.Sprintf("Applying Puppet catalog on %s (%s)...", node.Name, node.IP))
-		cmd := `
-			/opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local
-			code=$?
-			if [ $code -eq 0 ] || [ $code -eq 2 ]; then
-				systemctl start puppet || true
-				exit 0
-			fi
-			exit $code
-		`
-		stdout, stderr, code, err := p.pool.RunCommand(ctx, node.IP, cmd)
-		if err != nil || code != 0 {
-			errs = append(errs, fmt.Sprintf("%s (%s): exit %d: %v\nSTDOUT: %s\nSTDERR: %s", node.Name, node.IP, code, err, strings.TrimSpace(stdout), strings.TrimSpace(stderr)))
-		} else {
-			logging.Success(fmt.Sprintf("Node %s converged successfully", node.Name))
+	var mu sync.Mutex
+	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
+
+	concurrency := 4
+	if envC := os.Getenv("PUPPET_CONCURRENCY"); envC != "" {
+		if c, err := strconv.Atoi(envC); err == nil && c > 0 {
+			concurrency = c
 		}
 	}
+	if concurrency > len(nodes) {
+		concurrency = len(nodes)
+	}
+
+	logging.Info(fmt.Sprintf("Running first catalog in parallel across %d nodes (concurrency limit: %d)...", len(nodes), concurrency))
+
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for _, n := range nodes {
+		node := n
+		wg.Add(1)
+		go func(spec config.NodeSpec) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			logging.Info(fmt.Sprintf("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP))
+
+			// Stop background daemon to avoid catalog run lock contention
+			p.pool.RunCommand(ctx, spec.IP, "systemctl stop puppet 2>/dev/null || true")
+
+			cmd := `
+				/opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local
+				code=$?
+				if [ $code -eq 0 ] || [ $code -eq 2 ]; then
+					systemctl start puppet || true
+					exit 0
+				fi
+				exit $code
+			`
+			nodeCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			defer cancel()
+			stdout, stderr, code, err := p.pool.RunCommand(nodeCtx, spec.IP, cmd)
+
+			// Self-healing: if SSL certificate does not match private key, revoke and purge
+			combinedOutput := stdout + " " + stderr
+			if code != 0 && strings.Contains(combinedOutput, "does not match its private key") {
+				logging.Warn(fmt.Sprintf("Certificate mismatch detected on %s (%s). Performing self-healing SSL reset...", spec.Name, spec.FQDN))
+				p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("puppetserver ca clean --certname %s 2>/dev/null || true", spec.FQDN))
+				p.pool.RunCommand(ctx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl")
+				// Retry agent run
+				stdout, stderr, code, err = p.pool.RunCommand(nodeCtx, spec.IP, cmd)
+			}
+
+			if err != nil || code != 0 {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("%s (%s): exit %d: %v\nSTDOUT: %s\nSTDERR: %s", spec.Name, spec.IP, code, err, strings.TrimSpace(stdout), strings.TrimSpace(stderr)))
+				mu.Unlock()
+			} else {
+				logging.Success(fmt.Sprintf("Node %s converged successfully", spec.Name))
+			}
+		}(node)
+	}
+
+	wg.Wait()
+
 	if len(errs) > 0 {
 		return fmt.Errorf("failed catalog run on some nodes:\n%s", strings.Join(errs, "\n"))
 	}

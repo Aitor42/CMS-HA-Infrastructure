@@ -94,11 +94,11 @@ class role::base {
   }
 
   # ---------------------------------------------------------------------------
-  # SWAP — 1 GB swapfile (safety net on memory-constrained hosts)
+  # SWAP — 512 MB swapfile (safety net on memory-constrained hosts)
   # ---------------------------------------------------------------------------
   exec { 'create-swapfile':
-    command => '/usr/bin/fallocate -l 1G /swapfile && /usr/bin/chmod 600 /swapfile && /usr/sbin/mkswap /swapfile',
-    creates => '/swapfile',
+    command => '/bin/rm -f /swapfile && /usr/bin/fallocate -l 512M /swapfile && /usr/bin/chmod 600 /swapfile && /usr/sbin/mkswap /swapfile',
+    unless  => '/usr/sbin/swaplabel /swapfile 2>/dev/null',
   }
 
   mount { 'swap':

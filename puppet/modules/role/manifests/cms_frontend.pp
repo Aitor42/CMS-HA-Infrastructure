@@ -74,8 +74,8 @@ class role::cms_frontend {
   # WORDPRESS — Download and extract (idempotent via creates guard)
   # ---------------------------------------------------------------------------
   exec { 'wordpress-download':
-    command => '/usr/bin/wget -q --tries=3 -O /tmp/wordpress-latest.tar.gz https://wordpress.org/latest.tar.gz',
-    creates => '/tmp/wordpress-latest.tar.gz',
+    command => '/bin/rm -f /tmp/wordpress-latest.tar.gz && /usr/bin/wget -q --tries=3 -O /tmp/wordpress-latest.tar.gz https://wordpress.org/latest.tar.gz',
+    unless  => '/bin/tar -tzf /tmp/wordpress-latest.tar.gz >/dev/null 2>&1',
     require => Package['wget'],
   }
 
@@ -142,7 +142,7 @@ class role::cms_frontend {
     command => '/usr/bin/wget -q -O /usr/local/bin/wp \
       https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
       && /bin/chmod +x /usr/local/bin/wp',
-    creates => '/usr/local/bin/wp',
+    unless  => '/usr/bin/test -s /usr/local/bin/wp && /usr/bin/test -x /usr/local/bin/wp',
     require => Package['wget'],
   }
 
@@ -160,7 +160,7 @@ class role::cms_frontend {
       --allow-root \
       --path=/var/www/html',
     onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
-    unless  => '/usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
+    unless  => '/usr/bin/test -x /usr/local/bin/wp && /usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
     require => [
       Exec['wpcli-install'],
       Exec['wordpress-config-db-host'],
@@ -175,7 +175,7 @@ class role::cms_frontend {
   exec { 'wordpress-rewrite-structure':
     command => '/usr/local/bin/wp rewrite structure \'/%postname%/\' --hard --allow-root --path=/var/www/html',
     onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
-    unless  => '/usr/local/bin/wp rewrite list --allow-root --path=/var/www/html 2>/dev/null | grep -q "postname"',
+    unless  => '/usr/bin/test -x /usr/local/bin/wp && /usr/local/bin/wp rewrite list --allow-root --path=/var/www/html 2>/dev/null | grep -q "postname"',
     require => Exec['wordpress-core-install'],
     user    => 'root',
   }

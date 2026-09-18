@@ -60,11 +60,6 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("failed propagating SSH keys: %w", err)
 	}
 	
-	logging.Info("Cleaning Puppet CA...")
-	if err := p.cleanPuppetCA(ctx, allNodes); err != nil {
-		logging.Warn("Failed cleaning Puppet CA: %v", err)
-	}
-	
 	logging.Success("SSH repair phase completed successfully")
 	return nil
 }
@@ -243,26 +238,5 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 			return res.Err
 		}
 	}
-	return nil
-}
-
-func (p *Phase) cleanPuppetCA(ctx context.Context, nodes []config.NodeSpec) error {
-	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
-	if jumpstartIP != "" {
-		p.pool.RunCommand(ctx, jumpstartIP, "puppetserver ca clean --all 2>/dev/null || true")
-	}
-	
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
-	for _, n := range nodes {
-		nodeIP := n.IP
-		if nodeIP == "" || nodeIP == jumpstartIP {
-			continue
-		}
-		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
-			pool.RunCommand(c, nodeIP, "find /etc/puppet /etc/puppetlabs -name '*.pem' -delete 2>/dev/null || true")
-			return nil
-		}
-	}
-	p.pool.RunParallelFunc(ctx, tasks)
 	return nil
 }

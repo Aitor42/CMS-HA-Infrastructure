@@ -52,6 +52,13 @@ class role::router {
     require => Exec['ufw-enable'],
   }
 
+  # Allow Internal network → Internet (WAN)
+  exec { 'ufw-route-internal-to-wan':
+    command => '/usr/sbin/ufw route allow from 192.168.10.0/24 to any comment "Internal -> Internet"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.10.0/24.*FWD.*Anywhere"',
+    require => Exec['ufw-enable'],
+  }
+
   # Allow Internal ↔ Main bidirectional routing
   exec { 'ufw-route-internal-to-main':
     command => '/usr/sbin/ufw route allow from 192.168.10.0/24 to 192.168.20.0/24 comment "Internal -> Main"',
