@@ -61,6 +61,7 @@ scrape_configs:
   # from the internal network with --authentication-token-webhook=false (K3s default)
   - job_name: 'k3s_kubelet'
     scheme: https
+    bearer_token_file: /etc/prometheus/k3s.token
     tls_config:
       insecure_skip_verify: true
     static_configs:

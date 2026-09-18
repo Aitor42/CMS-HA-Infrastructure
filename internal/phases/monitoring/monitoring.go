@@ -65,6 +65,19 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 	}
 	
+	logging.Info("Syncing K3s bearer token for kubelet metrics...")
+	if len(p.cfg.Nodes.Masters) > 0 && p.cfg.Nodes.Masters[0].IP != "" {
+		masterIP := p.cfg.Nodes.Masters[0].IP
+		tokCmd := `kubectl create serviceaccount prometheus -n kube-system 2>/dev/null || true; ` +
+			`kubectl create clusterrolebinding prometheus --clusterrole=cluster-admin --serviceaccount=kube-system:prometheus 2>/dev/null || true; ` +
+			`kubectl create token prometheus -n kube-system --duration=87600h 2>/dev/null || true`
+		if tok, _, _, err := p.pool.RunCommand(ctx, masterIP, tokCmd); err == nil && strings.TrimSpace(tok) != "" {
+			token := strings.TrimSpace(tok)
+			_ = p.pool.CopyContent(ctx, monitorIP, []byte(token+"\n"), "/etc/prometheus/k3s.token", 0600)
+			p.pool.RunCommand(ctx, monitorIP, "chown prometheus:prometheus /etc/prometheus/k3s.token && systemctl reload prometheus")
+		}
+	}
+
 	logging.Info("Verifying Prometheus and Grafana services...")
 	verifyCmd := "systemctl is-active prometheus && systemctl is-active grafana-server"
 	err = retry.Do(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func() error {
