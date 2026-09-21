@@ -147,15 +147,31 @@ fi
 		}
 	}
 
-	logging.Info("Deploying DRBD failover script...")
+	logging.Info("Deploying DRBD failover script and watchdog daemon...")
 	scriptContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
 	if err != nil {
 		return fmt.Errorf("failed to read drbd-failover.sh template: %w", err)
 	}
+	watchdogContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-watchdog.sh")
+	if err != nil {
+		return fmt.Errorf("failed to read drbd-watchdog.sh template: %w", err)
+	}
+	watchdogServiceContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover-watchdog.service")
+	if err != nil {
+		return fmt.Errorf("failed to read drbd-failover-watchdog.service template: %w", err)
+	}
+
 	for _, ip := range []string{master1.IP, master2.IP} {
 		if err := p.pool.CopyContent(ctx, ip, []byte(scriptContent), "/usr/local/bin/drbd-failover.sh", 0755); err != nil {
 			return fmt.Errorf("failed to deploy failover script to %s: %w", ip, err)
 		}
+		if err := p.pool.CopyContent(ctx, ip, []byte(watchdogContent), "/usr/local/bin/drbd-watchdog.sh", 0755); err != nil {
+			return fmt.Errorf("failed to deploy watchdog script to %s: %w", ip, err)
+		}
+		if err := p.pool.CopyContent(ctx, ip, []byte(watchdogServiceContent), "/etc/systemd/system/drbd-failover-watchdog.service", 0644); err != nil {
+			return fmt.Errorf("failed to deploy watchdog service to %s: %w", ip, err)
+		}
+		p.pool.RunCommand(ctx, ip, "systemctl daemon-reload && systemctl enable --now drbd-failover-watchdog.service && systemctl enable drbd.service")
 	}
 
 	logging.Info("Deploying DRBD boot-time service and tmpfiles on Master 1...")

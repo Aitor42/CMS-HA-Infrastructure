@@ -36,7 +36,7 @@ The project provides two production-grade execution pathways maintaining feature
 | **Idempotent Configuration** | Puppet 8 agent/server model with role-based manifests & auto SSL self-healing |
 | **HA Clustering** | K3s (lightweight Kubernetes) with 2 server nodes (etcd embedded) + 2 agent nodes |
 | **Synchronous Block Replication** | DRBD 9 Protocol C between master nodes for zero data loss with dynamic node affinity |
-| **Automated Failover** | DRBD promotion scripts + Kubernetes pod migration + chaos testing suite |
+| **Automated Failover** | Autonomous DRBD watchdog daemon (`drbd-failover-watchdog.service`) + gateway quorum verification + Kubernetes pod migration + chaos testing suite |
 | **Load Balancing** | Nginx reverse proxy with health checks across 2 WordPress/Apache frontends |
 | **Full-stack Observability** | Prometheus + Grafana + Alertmanager with 10 alert rules & dynamic scrape targets |
 | **Defense in Depth** | UFW perimeter firewall + dynamic WAN MAC detection + per-node iptables rules + network segmentation |
@@ -394,8 +394,8 @@ Automated failover tests validate the HA design under real failure conditions:
 
 | Test | Simulated Failure | Validated Behaviour |
 |:-----|:------------------|:-------------------|
-| DRBD Master Failover | Primary master node shutdown | Secondary promotes, MariaDB pod migrates, CMS stays online |
-| CMS Frontend Failover | WordPress node shutdown | Nginx routes traffic to surviving frontend |
+| DRBD Master Failover | Primary master node shutdown | Watchdog detects failure (15s), promotes Secondary, migrates MariaDB pod, CMS stays online |
+| CMS Frontend Failover | WordPress node shutdown | Nginx routes traffic to surviving frontend with zero downtime |
 | K3s Worker Failover | Worker node shutdown | Pods reschedule to remaining worker |
 
 ---

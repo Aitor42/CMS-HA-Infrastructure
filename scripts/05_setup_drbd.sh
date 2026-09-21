@@ -166,16 +166,27 @@ EOF_TMPFILES
 PRIMARY_SETUP
 
 # ==============================================================================
-# 4. DEPLOY FAILOVER SCRIPT ON BOTH MASTERS
+# 4. DEPLOY FAILOVER SCRIPT AND WATCHDOG DAEMON ON BOTH MASTERS
 # ==============================================================================
-echo "[+] Deploying failover script on both master nodes..."
+echo "[+] Deploying failover script and watchdog daemon on both master nodes..."
 
 for NODE in "$NODE1_IP" "$NODE2_IP"; do
-  echo "    → Installing failover script on $NODE..."
+  echo "    → Installing failover utilities on $NODE..."
   scp $SSH_OPTS "${TEMPLATES_DIR}/drbd/drbd-failover.sh" \
       root@"$NODE":/usr/local/bin/drbd-failover.sh
-  ssh $SSH_OPTS root@"$NODE" "chmod +x /usr/local/bin/drbd-failover.sh"
-  echo "  ✔ Failover script installed at /usr/local/bin/drbd-failover.sh"
+  scp $SSH_OPTS "${TEMPLATES_DIR}/drbd/drbd-watchdog.sh" \
+      root@"$NODE":/usr/local/bin/drbd-watchdog.sh
+  scp $SSH_OPTS "${TEMPLATES_DIR}/drbd/drbd-failover-watchdog.service" \
+      root@"$NODE":/etc/systemd/system/drbd-failover-watchdog.service
+
+  ssh $SSH_OPTS root@"$NODE" bash -s <<'WATCHDOG_SETUP'
+    chmod +x /usr/local/bin/drbd-failover.sh
+    chmod +x /usr/local/bin/drbd-watchdog.sh
+    systemctl daemon-reload
+    systemctl enable drbd.service
+    systemctl enable --now drbd-failover-watchdog.service
+WATCHDOG_SETUP
+  echo "  ✔ Failover script & watchdog service active on $NODE"
 done
 
 # ==============================================================================

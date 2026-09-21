@@ -534,6 +534,54 @@ Mounted in the StatefulSet as `/etc/mysql/conf.d/custom.cnf`.
 ssh root@192.168.10.11 'kubectl get configmap mariadb-config -n cms'
 ```
 
+#### e) Automatic DRBD Failover Watchdog (`drbd-failover-watchdog.service`)
+
+Location: `/etc/systemd/system/drbd-failover-watchdog.service` and `/usr/local/bin/drbd-watchdog.sh` (active on both `internal-master1` and `internal-master2`).
+
+```ini
+[Unit]
+Description=DRBD Automatic Failover Watchdog Daemon
+After=network-online.target drbd.service
+Wants=network-online.target drbd.service
+Before=k3s.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/drbd-watchdog.sh
+Restart=always
+RestartSec=3
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Functionality & High Availability Guarantees:**
+- **Continuous Health Polling:** Evaluates DRBD replication status and peer node responsiveness every 5 seconds.
+- **Anti-Split-Brain Quorum Verification:**
+  - *Default Gateway Reachability (`192.168.10.1`):* If the local node cannot reach the gateway, failover is suppressed to prevent split-brain during network partition events where the local node is isolated.
+  - *Peer Heartbeat (ICMP):* Verifies the peer master node is completely unreachable before taking action, avoiding failovers during transient DRBD replication reconnections.
+  - *Debounce Strike Counter:* Requires 3 consecutive failed checks (15 seconds) before triggering failover promotion.
+- **Autonomous Recovery Actions:**
+  - Invokes `/usr/local/bin/drbd-failover.sh promote` on the healthy node.
+  - Promotes DRBD resource `cms_data` to Primary.
+  - Mounts `/dev/drbd0` on `/mnt/data/mariadb`.
+  - Reassigns Kubernetes label `drbd-status=primary` to the local node.
+  - Triggers reschedule of the MariaDB StatefulSet pod to the active storage node.
+- **Autonomous Recovery & Split-Brain Healing:**
+  - When the offline master node powers back on, DRBD kernel handlers (`after-sb-1pri discard-secondary`) automatically resynchronize block differences.
+  - The watchdog on the Secondary master node ensures `/mnt/data/mariadb` is unmounted and clears any stale `drbd-status=primary` labels from Kubernetes.
+
+```bash
+# Check watchdog daemon status on any master node
+systemctl status drbd-failover-watchdog.service
+
+# View watchdog real-time audit logs
+journalctl -u drbd-failover-watchdog.service -f
+```
+
 ### 8.4 Troubleshooting Common Issues After Boot
 
 #### MariaDB in `CrashLoopBackOff` with InnoDB Error

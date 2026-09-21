@@ -24,7 +24,7 @@ case "${1:-status}" in
     fi
 
     # Promote device to Primary
-    drbdadm primary "$RESOURCE"
+    drbdadm primary "$RESOURCE" || drbdadm primary --force "$RESOURCE"
     echo "  ✔ Node promoted to Primary"
 
     # Mount the replicated device
@@ -37,7 +37,8 @@ case "${1:-status}" in
     fi
 
     # Label local node in Kubernetes as active primary and remove label from peer
-    if command -v kubectl &>/dev/null; then
+    export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+    if command -v kubectl &>/dev/null && [ -f "$KUBECONFIG" ]; then
       echo "  [+] Updating availability labels in Kubernetes..."
       LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
       PEER_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v "$LOCAL_NODE" | grep "master" | head -n 1 || true)

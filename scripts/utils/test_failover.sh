@@ -161,11 +161,10 @@ test_drbd_failover() {
   # Wait for the VM to actually stop so the cluster detects the failure
   sleep 10
 
-  # Step 3: Trigger DRBD failover promotion on master2
-  info "[3/7] Promoting internal-master2 to DRBD Primary via failover script..."
-  ssh ${SSH_OPTS} root@"${MASTER2_IP}" '/usr/local/bin/drbd-failover.sh promote' 2>/dev/null || true
+  # Step 3: Wait for automatic DRBD watchdog failover on master2
+  info "[3/7] Waiting for automatic DRBD watchdog failover on master2 (no manual intervention)..."
 
-  info "Waiting for internal-master2 to report DRBD Primary (timeout: ${TIMEOUT_DRBD}s)..."
+  info "Waiting for internal-master2 watchdog to promote DRBD to Primary (timeout: ${TIMEOUT_DRBD}s)..."
   local elapsed=0
   local drbd_promoted=false
 

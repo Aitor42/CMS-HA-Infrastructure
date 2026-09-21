@@ -35,6 +35,14 @@
   - To prevent MariaDB from running on nodes without the mounted DRBD storage, `nodeSelector: drbd-status: primary` is configured in `mariadb-statefulset.yaml`.
   - The script `06_setup_kubernetes.sh` automatically labels `internal-master1` with `drbd-status=primary`.
   - The local failover script (`/usr/local/bin/drbd-failover.sh`) dynamically reassigns this label during promotion and demotion, causing Kubernetes to automatically move the MariaDB pod to the active master node.
+- **Automated Failover Watchdog (`drbd-failover-watchdog.service`):**
+  - Continuous background daemon (`/usr/local/bin/drbd-watchdog.sh`) running on both control plane masters.
+  - **Quorum & Anti-Split-Brain Safeguards:**
+    1. *Gateway Ping Check:* Verifies reachability of the default gateway (`192.168.10.1`). If the gateway is unreachable, failover is suppressed to prevent split-brain under network isolation.
+    2. *Peer Heartbeat Check:* Pings the peer master before taking action, avoiding false positives during transient replication interruptions.
+    3. *Debounce Strike Threshold:* Requires 3 consecutive failed checks (15s timeout) before triggering promotion.
+    4. *Autonomous Orchestration:* Automatically promotes DRBD, mounts the partition, updates Kubernetes node affinity labels, and reschedules the MariaDB StatefulSet.
+    5. *Automatic Split-Brain Auto-healing:* Upon node recovery, DRBD kernel handlers (`after-sb-1pri discard-secondary`) automatically resynchronize outdated blocks without human intervention.
 - **Exposure:** ClusterIP (3306) + NodePort (30306) for access from the main network.
 - **Database:** `wordpress`
 - **User:** `wp_user` with GRANT ALL on `wordpress`.
@@ -49,10 +57,11 @@ The manifests are located in `kubernetes/`:
 - `mariadb-service.yaml` — ClusterIP and NodePort services
 - `init-db-job.yaml` — Database initialization Job
 
-### Associated Scripts
+### Associated Scripts & Daemons
 
-- `scripts/06_setup_kubernetes.sh` — K3s installation, node labeling, and MariaDB deployment.
-- `scripts/05_setup_drbd.sh` — Configuration and installation of DRBD on the master nodes and generation of the `/usr/local/bin/drbd-failover.sh` script.
+- `scripts/06_setup_kubernetes.sh` / `internal/phases/kubernetes/kubernetes.go` — K3s installation, node labeling, and MariaDB deployment.
+- `scripts/05_setup_drbd.sh` / `internal/phases/drbd/drbd.go` — DRBD configuration, initial Primary bootstrap, failover utility (`/usr/local/bin/drbd-failover.sh`), and watchdog service (`/etc/systemd/system/drbd-failover-watchdog.service`).
+- `scripts/utils/test_failover.sh` — Automated chaos engineering test suite validating unattended master, frontend, and worker node failover.
 
 ### Verification
 
