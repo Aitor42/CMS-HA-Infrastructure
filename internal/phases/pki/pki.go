@@ -144,7 +144,12 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 		}
 	}
 	
-	p.pool.RunParallel(ctx, allIPs, "update-ca-certificates")
+	updateRes := p.pool.RunParallel(ctx, allIPs, "update-ca-certificates")
+	for _, r := range updateRes {
+		if r.Err != nil || r.ExitCode != 0 {
+			return fmt.Errorf("failed to update CA certificates on %s (exit %d): %w", r.Host, r.ExitCode, r.Err)
+		}
+	}
 	
 	logging.Success("PKI Setup completed successfully.")
 	return nil
