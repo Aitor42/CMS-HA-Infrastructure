@@ -84,7 +84,7 @@ func (t *Traffic) Run(ctx context.Context) error {
 		if len(t.cfg.Nodes.CMSFrontends) > 0 && t.cfg.Nodes.CMSFrontends[0].IP != "" {
 			baseURL = fmt.Sprintf("http://%s", t.cfg.Nodes.CMSFrontends[0].IP)
 		} else {
-			baseURL = fmt.Sprintf("http://%s", getPrefix(t.cfg.Network.Internal.CIDR)+"20")
+			baseURL = fmt.Sprintf("http://%s", getPrefix(t.cfg.Network.Main.CIDR)+"101")
 		}
 	} else {
 		if t.cfg.Nodes.LB.IP != "" {
