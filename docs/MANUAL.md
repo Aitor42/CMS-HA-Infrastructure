@@ -233,8 +233,10 @@ For environments running the legacy Bash toolchain:
 [OK] SSL certificate exists on main-lb
 [OK] Apache2 CMS active on 192.168.20.101
 [OK] WordPress installed on 192.168.20.101
+[OK] NFS uploads volume mounted on 192.168.20.101
 [OK] Apache2 CMS active on 192.168.20.102
 [OK] WordPress installed on 192.168.20.102
+[OK] NFS uploads volume mounted on 192.168.20.102
 
 [INFO] === Phase 04: K3s HA Cluster ===
 [OK] kubectl operational on internal-master1
@@ -339,10 +341,18 @@ To perform a manual backup:
 mysqldump -h 192.168.10.11 -P 30306 -u root -pmysqlrootpass wordpress | gzip > backup_wordpress.sql.gz
 ```
 
-### 6.2 WordPress File Backup
-Back up the `/var/www/html/` directory on the frontend nodes:
+### 6.2 WordPress Media and File Backups
+Uploaded media (`wp-content/uploads`) is centrally stored on the NFS server `internal-storage` at `/srv/nfs/wp-uploads` and mounted across both frontend nodes.
+
+To back up the shared uploads volume:
 ```bash
-tar -czf wp-files-backup.tar.gz /var/www/html/
+# On internal-storage (192.168.10.15):
+tar -czf wp-uploads-backup.tar.gz /srv/nfs/wp-uploads/
+```
+
+To back up application files on either frontend node:
+```bash
+tar -czf wp-files-backup.tar.gz --exclude='wp-content/uploads' /var/www/html/
 ```
 
 ---

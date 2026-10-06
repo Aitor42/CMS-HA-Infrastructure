@@ -5,10 +5,20 @@
 - [x] Configure and provision Load Balancer in the `main` network.
 - [x] Configure 2 HTTP/S servers as CMS frontends.
 - [x] Connect the Load Balancer to the CMS servers.
+- [x] Configure shared persistence for WordPress uploads via NFS.
 
 ---
 
 ## Technical Implementation
+
+### Shared Persistence — NFS Storage (internal-storage: 192.168.10.15)
+
+- **Software:** `nfs-kernel-server` (storage node), `nfs-common` (CMS frontend nodes)
+- **Export directory:** `/srv/nfs/wp-uploads` (owner: `www-data:www-data`, mode: `0775`)
+- **Mount target on CMS frontends:** `/var/www/html/wp-content/uploads/`
+- **Mount options:** `_netdev,auto,nofail,rw,soft,timeo=50,retrans=3`
+- **Network routing:** Routed across subnets from `192.168.20.0/24` to `192.168.10.15:2049` via `ufw-router`.
+- **Result:** 100% HA symmetry in the web tier. Uploads written by either CMS node are immediately accessible to both nodes without data drift.
 
 ### Nginx Load Balancer (main-lb: 192.168.20.100)
 
@@ -70,4 +80,11 @@ curl -s http://192.168.20.102/ | grep -i wordpress
 
 # Verify complete end-to-end load balancing (HTTPS)
 curl -sk https://192.168.20.100/
+
+# Verify NFS export on internal-storage
+ssh root@192.168.10.15 "exportfs -v && systemctl is-active nfs-kernel-server"
+
+# Verify shared uploads mount on CMS frontends
+ssh root@192.168.20.101 "mountpoint -q /var/www/html/wp-content/uploads && echo 'CMS1 NFS mounted'"
+ssh root@192.168.20.102 "mountpoint -q /var/www/html/wp-content/uploads && echo 'CMS2 NFS mounted'"
 ```

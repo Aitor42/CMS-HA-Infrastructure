@@ -25,7 +25,7 @@ Each node has UFW configured with:
 | **internal-master1** | 22, 6443, 30306, 9100, 9104, 7788 | SSH, K3s API, MariaDB NodePort, exporters, DRBD |
 | **internal-master2** | 22, 6443, 9100, 7788 | SSH, K3s API, node_exporter, DRBD |
 | **internal-worker1/2** | 22, 9100, 10250 | SSH, node_exporter, kubelet |
-| **internal-storage** | 22, 9100 | SSH, node_exporter |
+| **internal-storage** | 22, 111, 2049, 9100 | SSH, RPCbind, NFS (from Main subnet), node_exporter |
 | **main-lb** | 22, 80, 443, 9100, 9113 | SSH, HTTP, HTTPS, node_exporter, nginx_exporter |
 | **main-cms1/2** | 22, 80, 9100, 9117 | SSH, Apache, node_exporter, apache_exporter |
 
