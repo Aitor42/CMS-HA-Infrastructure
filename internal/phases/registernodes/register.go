@@ -32,6 +32,8 @@ func (p *Phase) Run(ctx context.Context) error {
 	var scriptBuilder strings.Builder
 	scriptBuilder.WriteString("set -e\n")
 
+	mainPrefix := getPrefix(p.cfg.Network.Main.CIDR)
+
 	for _, node := range p.cfg.AllNodes() {
 		if node.Name == p.cfg.Nodes.Jumpstart.Name || node.Name == "" {
 			continue
@@ -43,11 +45,11 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 
 		cobblerServerIP := jumpIP
-		if strings.HasPrefix(node.IP, "192.168.20.") {
+		if strings.HasPrefix(node.IP, mainPrefix) {
 			if p.cfg.Nodes.Jumpstart.IPMain != "" {
 				cobblerServerIP = p.cfg.Nodes.Jumpstart.IPMain
 			} else {
-				cobblerServerIP = "192.168.20.10"
+				cobblerServerIP = mainPrefix + "10"
 			}
 		}
 
@@ -69,4 +71,12 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	logging.Success("Nodes registered successfully")
 	return nil
+}
+
+func getPrefix(cidr string) string {
+	parts := strings.Split(cidr, ".")
+	if len(parts) >= 3 {
+		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
+	}
+	return "192.168.20."
 }
