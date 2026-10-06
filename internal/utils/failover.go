@@ -31,14 +31,6 @@ func NewFailoverTester(cfg *config.Config, s *ssh.Pool, l *libvirt.Client) *Fail
 	return &FailoverTester{cfg: cfg, ssh: s, libvirt: l}
 }
 
-func getPrefix(cidr string) string {
-	parts := strings.Split(cidr, ".")
-	if len(parts) >= 3 {
-		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
-	}
-	return "192.168.10."
-}
-
 // Run executes the failover scenarios.
 func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 	timer := logging.PhaseStart("Failover Chaos Engineering Tests")
