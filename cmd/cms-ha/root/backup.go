@@ -56,8 +56,16 @@ func init() {
             if dbPass == "" {
                 dbPass = "WpS3cur3P4ss!"
             }
+            podCmd := "kubectl get pod -n cms -l app=mariadb --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'"
+            podName, _, code, err := pool.RunCommand(ctx, masterIP, podCmd)
+            podName = strings.TrimSpace(podName)
+            if err != nil || code != 0 || podName == "" {
+                handleError(fmt.Errorf("no running MariaDB pod found in namespace cms on %s (exit %d): %v", masterIP, code, err))
+                return
+            }
+
             b64Pass := base64.StdEncoding.EncodeToString([]byte(dbPass))
-            backupCmdStr := fmt.Sprintf(`kubectl exec -n cms $(kubectl get pod -n cms -l app=mariadb -o jsonpath='{.items[0].metadata.name}') -- sh -c 'MYSQL_PWD="$(echo "%s" | base64 -d)" mysqldump --single-transaction --quick -u%s %s'`, b64Pass, dbUser, dbName)
+            backupCmdStr := fmt.Sprintf(`kubectl exec -n cms %s -- sh -c 'MYSQL_PWD="$(echo "%s" | base64 -d)" mysqldump --single-transaction --quick -u%s %s'`, podName, b64Pass, dbUser, dbName)
             stdout, stderr, code, err := pool.RunCommand(ctx, masterIP, backupCmdStr)
             if err != nil || code != 0 {
                 handleError(fmt.Errorf("mysqldump failed on %s (exit %d): %v\nStderr: %s", masterIP, code, err, stderr))
