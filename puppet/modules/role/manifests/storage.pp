@@ -67,14 +67,14 @@ class role::storage {
   # UFW — Firewall rules for NFS
   # ---------------------------------------------------------------------------
   exec { 'ufw-storage-nfs':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 2049 proto tcp comment "NFS from Main subnet"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2049/tcp.*192.168.20.0/24"',
+    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 2049 comment "NFS from Main subnet"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2049.*192.168.20.0/24"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-storage-rpcbind':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 111 proto tcp comment "RPCbind from Main subnet"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "111/tcp.*192.168.20.0/24"',
+    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 111 comment "RPCbind from Main subnet"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "111.*192.168.20.0/24"',
     require => Exec['ufw-enable'],
   }
 }

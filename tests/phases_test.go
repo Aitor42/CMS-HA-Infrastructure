@@ -164,7 +164,9 @@ func TestPhases_NFSStorageManifests(t *testing.T) {
 		"/var/www/html/wp-content/uploads",
 		"192.168.10.15:/srv/nfs/wp-uploads",
 		"fstype  => 'nfs'",
+		"nfsvers=4",
 		"Mount['/var/www/html/wp-content/uploads']",
+		"Exec['mount-wp-uploads']",
 	} {
 		if !strings.Contains(cmsContent, expected) {
 			t.Errorf("expected cms_frontend.pp to contain %q", expected)

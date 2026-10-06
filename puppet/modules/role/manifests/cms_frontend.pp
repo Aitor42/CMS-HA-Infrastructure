@@ -182,14 +182,21 @@ class role::cms_frontend {
   }
 
   mount { '/var/www/html/wp-content/uploads':
-    ensure  => mounted,
+    ensure  => present,
     device  => '192.168.10.15:/srv/nfs/wp-uploads',
     fstype  => 'nfs',
-    options => '_netdev,auto,nofail,rw,soft,timeo=50,retrans=3',
+    options => '_netdev,auto,nofail,rw,soft,timeo=50,retrans=3,nfsvers=4',
     require => [
       Package['nfs-common'],
       File['/var/www/html/wp-content/uploads'],
     ],
+  }
+
+  exec { 'mount-wp-uploads':
+    command => '/bin/mount /var/www/html/wp-content/uploads',
+    onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.15/2049\" 2>/dev/null"',
+    unless  => '/bin/mountpoint -q /var/www/html/wp-content/uploads',
+    require => Mount['/var/www/html/wp-content/uploads'],
   }
 
   # ---------------------------------------------------------------------------
@@ -226,6 +233,7 @@ class role::cms_frontend {
       Exec['wordpress-config-db-name'],
       Exec['wordpress-config-ssl-reverse-proxy'],
       Mount['/var/www/html/wp-content/uploads'],
+      Exec['mount-wp-uploads'],
     ],
     user    => 'root',
     timeout => 120,
