@@ -223,6 +223,35 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 	return &c, nil
 }
 
+// Validate performs structural and semantic checks on the configuration.
+func (c *Config) Validate() error {
+	if c.VM.StorageDir == "" {
+		return fmt.Errorf("vm.storage_dir is required")
+	}
+	if c.Network.Internal.CIDR == "" {
+		return fmt.Errorf("network.internal.cidr is required")
+	}
+	if c.Network.Main.CIDR == "" {
+		return fmt.Errorf("network.main.cidr is required")
+	}
+	if c.Nodes.Router.IP == "" {
+		return fmt.Errorf("nodes.router.ip is required")
+	}
+	if c.Nodes.Jumpstart.IP == "" {
+		return fmt.Errorf("nodes.jumpstart.ip is required")
+	}
+	if len(c.Nodes.Masters) < 2 {
+		return fmt.Errorf("at least 2 master nodes are required for HA (got %d)", len(c.Nodes.Masters))
+	}
+	if c.Nodes.LB.IP == "" {
+		return fmt.Errorf("nodes.lb.ip is required")
+	}
+	if len(c.Nodes.CMSFrontends) < 1 {
+		return fmt.Errorf("at least 1 CMS frontend node is required")
+	}
+	return nil
+}
+
 func toSpec(n NodeDetail, fallbackIP string) NodeSpec {
 	ip := n.IP
 	if ip == "" {

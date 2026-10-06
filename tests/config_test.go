@@ -213,3 +213,102 @@ func TestConfig_SecretsEncryption(t *testing.T) {
 		t.Fatalf("expected decrypted value %q, got %q", secret, decrypted)
 	}
 }
+
+func TestConfig_Validate(t *testing.T) {
+	validCfg := func() *config.Config {
+		return &config.Config{
+			VM: config.VMConfig{
+				StorageDir: "/var/lib/libvirt/images",
+			},
+			Network: config.NetworkConfig{
+				Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
+				Main:     config.NetworkDetail{CIDR: "192.168.20.0/24"},
+			},
+			Nodes: config.NodesConfig{
+				Router:    config.NodeDetail{Name: "ufw-router", IP: "192.168.10.1"},
+				Jumpstart: config.NodeDetail{Name: "jumpstart", IP: "192.168.10.10"},
+				Masters: []config.NodeDetail{
+					{Name: "master1", IP: "192.168.10.11"},
+					{Name: "master2", IP: "192.168.10.12"},
+				},
+				LB: config.NodeDetail{Name: "lb", IP: "192.168.20.100"},
+				CMSFrontends: []config.NodeDetail{
+					{Name: "cms1", IP: "192.168.20.101"},
+				},
+			},
+		}
+	}
+
+	t.Run("valid configuration passes", func(t *testing.T) {
+		cfg := validCfg()
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected valid config to pass, got: %v", err)
+		}
+	})
+
+	t.Run("missing storage_dir", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.StorageDir = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for empty storage_dir")
+		}
+	})
+
+	t.Run("missing internal CIDR", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.CIDR = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing internal CIDR")
+		}
+	})
+
+	t.Run("missing main CIDR", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.CIDR = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing main CIDR")
+		}
+	})
+
+	t.Run("missing router IP", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Router.IP = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing router IP")
+		}
+	})
+
+	t.Run("missing jumpstart IP", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Jumpstart.IP = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing jumpstart IP")
+		}
+	})
+
+	t.Run("insufficient masters for HA", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters = []config.NodeDetail{
+			{Name: "master1", IP: "192.168.10.11"},
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for <2 masters")
+		}
+	})
+
+	t.Run("missing LB IP", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.LB.IP = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing LB IP")
+		}
+	})
+
+	t.Run("missing CMS frontends", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.CMSFrontends = nil
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing CMS frontends")
+		}
+	})
+}
