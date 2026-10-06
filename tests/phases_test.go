@@ -1,6 +1,8 @@
 package tests
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -109,3 +111,64 @@ func TestPhases_TrafficGenerator(t *testing.T) {
 		t.Fatal("expected non-nil traffic generator")
 	}
 }
+
+func TestPhases_NFSStorageManifests(t *testing.T) {
+	// Verify role::storage manifest exists and contains critical configurations
+	storageManifest, err := os.ReadFile("../puppet/modules/role/manifests/storage.pp")
+	if err != nil {
+		// Fallback for execution from repo root
+		storageManifest, err = os.ReadFile("puppet/modules/role/manifests/storage.pp")
+	}
+	if err != nil {
+		t.Fatalf("failed to read storage.pp: %v", err)
+	}
+	storageContent := string(storageManifest)
+	for _, expected := range []string{
+		"class role::storage",
+		"nfs-kernel-server",
+		"/srv/nfs/wp-uploads",
+		"/etc/exports",
+		"exportfs -ra",
+		"2049",
+		"111",
+	} {
+		if !strings.Contains(storageContent, expected) {
+			t.Errorf("expected storage.pp to contain %q", expected)
+		}
+	}
+
+	// Verify site.pp classifies internal-storage with role::storage
+	siteManifest, err := os.ReadFile("../puppet/manifests/site.pp")
+	if err != nil {
+		siteManifest, err = os.ReadFile("puppet/manifests/site.pp")
+	}
+	if err != nil {
+		t.Fatalf("failed to read site.pp: %v", err)
+	}
+	siteContent := string(siteManifest)
+	if !strings.Contains(siteContent, "include role::storage") {
+		t.Errorf("expected site.pp to include role::storage for internal-storage")
+	}
+
+	// Verify cms_frontend.pp configures nfs-common and wp-content/uploads mount
+	cmsManifest, err := os.ReadFile("../puppet/modules/role/manifests/cms_frontend.pp")
+	if err != nil {
+		cmsManifest, err = os.ReadFile("puppet/modules/role/manifests/cms_frontend.pp")
+	}
+	if err != nil {
+		t.Fatalf("failed to read cms_frontend.pp: %v", err)
+	}
+	cmsContent := string(cmsManifest)
+	for _, expected := range []string{
+		"'nfs-common'",
+		"/var/www/html/wp-content/uploads",
+		"192.168.10.15:/srv/nfs/wp-uploads",
+		"fstype  => 'nfs'",
+		"Mount['/var/www/html/wp-content/uploads']",
+	} {
+		if !strings.Contains(cmsContent, expected) {
+			t.Errorf("expected cms_frontend.pp to contain %q", expected)
+		}
+	}
+}
+
