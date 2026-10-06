@@ -41,6 +41,9 @@ run_puppet() {
     fi
 }
 
+# Storage node (NFS server for WordPress shared uploads)
+run_puppet "$STORAGE_IP" "internal-storage"
+
 # Load balancer
 run_puppet "$LB_IP"   "main-lb"
 
@@ -51,16 +54,23 @@ run_puppet "$CMS2_IP" "main-cms2"
 echo ""
 echo ">>> Verifying service state <<<"
 
+# NFS server check on Storage node
+echo "[+] NFS kernel server check on internal-storage..."
+ssh ${SSH_OPTS} root@"$STORAGE_IP" 'systemctl is-active nfs-kernel-server' && \
+    echo "  [OK] NFS kernel server active on internal-storage."
+
 # Nginx sanity check on LB
 echo "[+] Nginx config test on main-lb..."
 ssh ${SSH_OPTS} root@"$LB_IP" 'nginx -t && systemctl is-active nginx' && \
     echo "  [OK] Nginx active and config valid."
 
-# Apache check on CMS nodes
+# Apache and NFS mount check on CMS nodes
 for CMS_IP in "$CMS1_IP" "$CMS2_IP"; do
-    echo "[+] Apache check on $CMS_IP..."
+    echo "[+] Apache and NFS check on $CMS_IP..."
     ssh ${SSH_OPTS} root@"$CMS_IP" 'apache2ctl -t 2>&1 | grep -q "Syntax OK" && systemctl is-active apache2' && \
         echo "  [OK] Apache active on $CMS_IP."
+    ssh ${SSH_OPTS} root@"$CMS_IP" 'mountpoint -q /var/www/html/wp-content/uploads' && \
+        echo "  [OK] NFS uploads volume mounted on $CMS_IP."
 done
 
 # HTTPS reachability through load balancer

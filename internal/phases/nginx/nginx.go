@@ -37,6 +37,14 @@ func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 	
+	if p.cfg.Nodes.Storage.IP != "" {
+		logging.Info("Converging Storage node %s (%s) for NFS shared persistence...", p.cfg.Nodes.Storage.Name, p.cfg.Nodes.Storage.IP)
+		_, _, code, err := p.pool.RunCommand(ctx, p.cfg.Nodes.Storage.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
+		if code != 0 && code != 2 {
+			return fmt.Errorf("puppet agent failed on storage %s (exit code %d): %v", p.cfg.Nodes.Storage.IP, code, err)
+		}
+	}
+
 	logging.Info("Running Puppet agent on LB node...")
 	_, _, code, err := p.pool.RunCommand(ctx, p.cfg.Nodes.LB.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
 	if code != 0 && code != 2 {
@@ -71,6 +79,21 @@ func (p *Phase) Run(ctx context.Context) error {
 	for _, r := range resApache {
 		if r.Err != nil || r.ExitCode != 0 {
 			return fmt.Errorf("apache verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
+		}
+	}
+
+	if p.cfg.Nodes.Storage.IP != "" {
+		logging.Info("Verifying NFS server export on Storage node...")
+		if _, _, _, err := p.pool.RunCommand(ctx, p.cfg.Nodes.Storage.IP, "systemctl is-active nfs-kernel-server"); err != nil {
+			return fmt.Errorf("nfs-kernel-server verification failed on storage node: %w", err)
+		}
+	}
+
+	logging.Info("Verifying shared NFS uploads mount on CMS nodes in parallel...")
+	resMount := p.pool.RunParallel(ctx, cmsIPs, "mountpoint -q /var/www/html/wp-content/uploads")
+	for _, r := range resMount {
+		if r.Err != nil || r.ExitCode != 0 {
+			return fmt.Errorf("nfs mount verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
 		}
 	}
 	

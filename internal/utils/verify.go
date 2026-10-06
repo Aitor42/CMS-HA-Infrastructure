@@ -152,9 +152,9 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 			cmsIPs = append(cmsIPs, cms.IP)
 		}
 	}
-	resApache := v.ssh.RunParallel(ctx, cmsIPs, "systemctl is-active apache2")
+	resApache := v.ssh.RunParallel(ctx, cmsIPs, "systemctl is-active apache2 && mountpoint -q /var/www/html/wp-content/uploads")
 	for _, r := range resApache {
-		if r.Err != nil || strings.TrimSpace(r.Output) != "active" {
+		if r.Err != nil || r.ExitCode != 0 {
 			pass = false
 		}
 	}
