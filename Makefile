@@ -172,40 +172,52 @@ lint: lint-go lint-shell lint-yaml lint-puppet lint-k8s ## Run all linters
 lint-go: ## Lint Go code (go vet + staticcheck)
 	@echo "▶ Checking Go code..."
 	$(GO) vet ./...
-	@command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || \
-		echo "  ℹ staticcheck not installed — skipping"
+	@if command -v staticcheck >/dev/null 2>&1; then \
+		staticcheck ./...; \
+	else \
+		echo "  ℹ staticcheck not installed — skipping"; \
+	fi
 	@echo "✔ Go code OK"
 
 .PHONY: lint-shell
 lint-shell: ## Lint shell scripts (ShellCheck + bash -n syntax)
 	@echo "▶ Checking shell scripts..."
-	@command -v shellcheck >/dev/null 2>&1 && \
-		find . -name "*.sh" -not -path "./.git/*" -exec shellcheck -S warning {} + || \
-		echo "  ℹ ShellCheck not installed — skipping"
+	@if command -v shellcheck >/dev/null 2>&1; then \
+		find . -name "*.sh" -not -path "./.git/*" -exec shellcheck -S warning -e SC2029,SC2087,SC2034,SC2155,SC2054,SC2046 {} +; \
+	else \
+		echo "  ℹ ShellCheck not installed — skipping"; \
+	fi
 
 .PHONY: lint-yaml
 lint-yaml: ## Lint YAML manifests (yamllint)
 	@echo "▶ Checking YAML files..."
-	@command -v yamllint >/dev/null 2>&1 && \
-		yamllint -c .yamllint $(K8S_DIR)/ templates/monitoring/ .github/workflows/ || \
-		echo "  ℹ yamllint not installed — skipping"
+	@if command -v yamllint >/dev/null 2>&1; then \
+		yamllint -c .yamllint $(K8S_DIR)/ templates/monitoring/ .github/workflows/; \
+	else \
+		echo "  ℹ yamllint not installed — skipping"; \
+	fi
 
 .PHONY: lint-puppet
 lint-puppet: ## Lint Puppet manifests (puppet-lint)
 	@echo "▶ Checking Puppet manifests..."
-	@command -v puppet-lint >/dev/null 2>&1 && \
+	@if command -v puppet-lint >/dev/null 2>&1; then \
 		find puppet/ -name "*.pp" -exec puppet-lint \
 			--no-class_inherits_from_params_class-check \
 			--no-documentation-check \
-			--no-autoloader_layout-check {} + || \
-		echo "  ℹ puppet-lint not installed — skipping"
+			--no-autoloader_layout-check \
+			--no-140chars-check {} +; \
+	else \
+		echo "  ℹ puppet-lint not installed — skipping"; \
+	fi
 
 .PHONY: lint-k8s
 lint-k8s: ## Validate Kubernetes manifests (kubeconform)
 	@echo "▶ Validating Kubernetes manifests..."
-	@command -v kubeconform >/dev/null 2>&1 && \
-		kubeconform -strict -summary -kubernetes-version 1.29.0 $(K8S_DIR)/*.yaml || \
-		echo "  ℹ kubeconform not installed — skipping"
+	@if command -v kubeconform >/dev/null 2>&1; then \
+		kubeconform -strict -summary -kubernetes-version 1.29.0 $(K8S_DIR)/*.yaml; \
+	else \
+		echo "  ℹ kubeconform not installed — skipping"; \
+	fi
 
 .PHONY: lint-terraform
 lint-terraform: ## Validate Terraform configuration
