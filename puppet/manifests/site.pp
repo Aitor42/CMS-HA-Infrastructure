@@ -39,9 +39,9 @@ node /^main-hotdesk/ {
   include role::hotdesk
 }
 
-# Storage and Jumpstart: base config only (services managed by other means)
+# Centralised NFS storage server for shared WordPress uploads
 node /^internal-storage/ {
-  include role::base
+  include role::storage
 }
 
 node /^jumpstart/ {

@@ -23,6 +23,7 @@ class role::cms_frontend {
     'tar',
     'curl',
     'prometheus-apache-exporter',
+    'nfs-common',
   ]:
     ensure => installed,
   }
@@ -170,6 +171,28 @@ class role::cms_frontend {
   }
 
   # ---------------------------------------------------------------------------
+  # SHARED STORAGE — NFS mount for WordPress uploads (centralised persistence)
+  # ---------------------------------------------------------------------------
+  file { '/var/www/html/wp-content/uploads':
+    ensure  => directory,
+    owner   => 'www-data',
+    group   => 'www-data',
+    mode    => '0775',
+    require => Exec['wordpress-deploy'],
+  }
+
+  mount { '/var/www/html/wp-content/uploads':
+    ensure  => mounted,
+    device  => '192.168.10.15:/srv/nfs/wp-uploads',
+    fstype  => 'nfs',
+    options => '_netdev,auto,nofail,rw,soft,timeo=50,retrans=3',
+    require => [
+      Package['nfs-common'],
+      File['/var/www/html/wp-content/uploads'],
+    ],
+  }
+
+  # ---------------------------------------------------------------------------
   # WP-CLI — WordPress command-line interface (idempotent install)
   # ---------------------------------------------------------------------------
   exec { 'wpcli-install':
@@ -202,6 +225,7 @@ class role::cms_frontend {
       Exec['wordpress-config-db-pass'],
       Exec['wordpress-config-db-name'],
       Exec['wordpress-config-ssl-reverse-proxy'],
+      Mount['/var/www/html/wp-content/uploads'],
     ],
     user    => 'root',
     timeout => 120,
