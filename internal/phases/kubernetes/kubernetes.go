@@ -216,6 +216,10 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 		return nil
 	})
+	if err != nil {
+		p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -rf %s", manifestsDir))
+		return fmt.Errorf("init-wordpress-db job did not complete: %w", err)
+	}
 	
 	logging.Info("Cleaning up temporary manifests...")
 	p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -rf %s", manifestsDir))
