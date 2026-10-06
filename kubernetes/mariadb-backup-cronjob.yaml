@@ -68,6 +68,13 @@ spec:
 
                   echo "[$(date)] Starting MariaDB backup..."
 
+                  # Check available space on backup volume (require at least 50MB free)
+                  AVAIL_KB=$(df -P /backups | awk 'NR==2 {print $4}')
+                  if [ "${AVAIL_KB}" -lt 51200 ]; then
+                    echo "[ERROR] Insufficient disk space on /backups (${AVAIL_KB} KB available, >= 51200 KB required)"
+                    exit 1
+                  fi
+
                   # Dump the wordpress database, compress, and write to the backup volume
                   mysqldump \
                     --host=mariadb.cms.svc.cluster.local \
@@ -99,6 +106,9 @@ spec:
                   echo ""
                   echo "=== Current backups ==="
                   ls -lh /backups/wordpress-*.sql.gz 2>/dev/null || echo "(none)"
+                  echo ""
+                  echo "=== Backup volume usage ==="
+                  df -h /backups
               resources:
                 requests:
                   memory: "128Mi"
