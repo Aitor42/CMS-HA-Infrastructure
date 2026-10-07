@@ -3,39 +3,25 @@ package logging
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
-	"sync"
-	"sync/atomic"
 	"time"
-
-	"github.com/fatih/color"
-)
-
-var (
-	verbose  atomic.Bool
-	loggerMu sync.RWMutex
-	logger   *slog.Logger
 )
 
 func init() {
 	SetVerbose(false)
 }
 
-// SetVerbose sets the verbosity level for logging.
+// SetVerbose sets the verbosity level for internal structured logging (slog).
+// User-facing messages (Info/Success/Warn/Error) always print exactly once.
 func SetVerbose(v bool) {
-	verbose.Store(v)
 	level := slog.LevelInfo
 	if v {
 		level = slog.LevelDebug
 	}
-	opts := &slog.HandlerOptions{
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
-	}
-	l := slog.New(slog.NewTextHandler(os.Stdout, opts))
-	loggerMu.Lock()
-	logger = l
-	loggerMu.Unlock()
-	slog.SetDefault(l)
+	})))
 }
 
 // FormatMsg formats a message if format arguments are provided.
@@ -46,54 +32,38 @@ func FormatMsg(msg string, args ...any) string {
 	return msg
 }
 
-func getLogger() *slog.Logger {
-	loggerMu.RLock()
-	defer loggerMu.RUnlock()
-	return logger
-}
-
 // Info prints an info message in cyan.
+// Every user-facing message is printed exactly once, no matter the verbosity:
+// verbose mode only lowers the slog level used by internal structured logs.
 func Info(msg string, args ...any) {
-	formatted := FormatMsg(msg, args...)
-	fmt.Print(color.CyanString("ℹ ") + formatted + "\n")
-	if verbose.Load() {
-		if l := getLogger(); l != nil {
-			l.Info(formatted)
-		}
-	}
+	fmt.Print(cyan("ℹ ") + FormatMsg(msg, args...) + "\n")
 }
 
 // Success prints a success message in green.
 func Success(msg string, args ...any) {
-	formatted := FormatMsg(msg, args...)
-	fmt.Print(color.GreenString("✓ ") + formatted + "\n")
-	if verbose.Load() {
-		if l := getLogger(); l != nil {
-			l.Info(formatted)
-		}
-	}
+	fmt.Print(green("✓ ") + FormatMsg(msg, args...) + "\n")
 }
 
 // Warn prints a warning message in yellow.
 func Warn(msg string, args ...any) {
-	formatted := FormatMsg(msg, args...)
-	fmt.Print(color.YellowString("⚠ ") + formatted + "\n")
-	if verbose.Load() {
-		if l := getLogger(); l != nil {
-			l.Warn(formatted)
-		}
-	}
+	fmt.Print(yellow("⚠ ") + FormatMsg(msg, args...) + "\n")
 }
 
-// Error prints an error message in red.
+// Error prints an error message in red. Errors go to stderr so that they are
+// separated from command output in pipelines and in CI logs.
 func Error(msg string, args ...any) {
-	formatted := FormatMsg(msg, args...)
-	fmt.Print(color.RedString("✗ ") + formatted + "\n")
-	if verbose.Load() {
-		if l := getLogger(); l != nil {
-			l.Error(formatted)
-		}
+	_, _ = fmt.Fprintln(os.Stderr, red("✗ ")+FormatMsg(msg, args...))
+}
+
+// Debug records an internal diagnostic message through slog. It is only emitted
+// in verbose mode (SetVerbose(true) lowers the level to Debug); user-facing
+// progress must use Info/Success/Warn/Error so it always prints.
+func Debug(msg string, args ...any) {
+	if len(args) > 0 {
+		slog.Debug(fmt.Sprintf(msg, args...))
+		return
 	}
+	slog.Debug(msg)
 }
 
 // PhaseTimer measures and prints the duration of a phase.
