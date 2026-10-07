@@ -1,26 +1,32 @@
 package traffic
 
 import (
+	"bytes"
 	"context"
-	crand "crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"database/sql"
 	"fmt"
-	"math/big"
-	"net/http"
-	"net/url"
+	"net"
 	"os"
-	"path/filepath"
-	"sort"
+	"os/exec"
+	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
+	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/container"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
+)
+
+const (
+	// k6ScriptPath is the embedded k6 profile executed against the CMS.
+	k6ScriptPath = "templates/traffic/cms-smoke.js"
+	// hostCACertPath is the lab root CA installed by the PKI phase on the
+	// hypervisor. When present it is mounted into the k6 container so TLS is
+	// verified instead of skipped.
+	hostCACertPath = "/usr/local/share/ca-certificates/cms_root_ca.crt"
+	// containerCACert is the mount point of the root CA inside the container.
+	containerCACert = "/certs/cms_root_ca.crt"
 )
 
 // Options configuration for the traffic test.
