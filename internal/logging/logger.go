@@ -83,11 +83,34 @@ func PhaseStart(name string) *PhaseTimer {
 
 // End finishes the phase timer and prints the duration.
 func (t *PhaseTimer) End() {
-	duration := time.Since(t.start)
-	Success("Completed phase: %s in %v", t.name, duration)
+	Success("Completed phase: %s in %s", t.name, FormatDuration(time.Since(t.start)))
 }
 
-// ProgressLine prints an inline progress message, overwriting the current line.
-func ProgressLine(format string, args ...any) {
-	fmt.Printf("\r\033[K"+format, args...)
+// FormatDuration renders a duration in human units with at most two decimal
+// places (time.Duration.String prints all 9 available digits): "1h 2m 3.45s",
+// "1m 9.00s", "12.34s" or "215.4ms" depending on the magnitude.
+func FormatDuration(d time.Duration) string {
+	switch {
+	case d < time.Millisecond:
+		return fmt.Sprintf("%.2fµs", float64(d.Nanoseconds())/1000)
+	case d < time.Second:
+		return fmt.Sprintf("%.1fms", float64(d.Nanoseconds())/1e6)
+	}
+
+	// Round once to hundredths of a second and derive every unit from that, so
+	// the seconds field can never print as "60.00" (e.g. 59m 59.999s).
+	totalCS := int64(math.Round(d.Seconds() * 100))
+	hours := totalCS / 360000
+	minutes := (totalCS % 360000) / 6000
+	seconds := (totalCS % 6000) / 100
+	centis := totalCS % 100
+
+	switch {
+	case hours > 0:
+		return fmt.Sprintf("%dh %dm %d.%02ds", hours, minutes, seconds, centis)
+	case minutes > 0:
+		return fmt.Sprintf("%dm %d.%02ds", minutes, seconds, centis)
+	default:
+		return fmt.Sprintf("%d.%02ds", seconds, centis)
+	}
 }
