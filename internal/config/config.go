@@ -2,13 +2,17 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 // ExpandPath expands environment variables and tilde (~) prefix in file paths.
@@ -154,18 +158,17 @@ func Load(path string) (*Config, error) {
 // LoadWithKey loads configuration from the given path using a specified age key file.
 func LoadWithKey(path string, keyPath string) (*Config, error) {
 	path = ExpandPath(path)
-	v := viper.New()
-	v.SetConfigFile(path)
-	
-	if err := v.ReadInConfig(); err != nil {
+
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
-	
+
 	var c Config
-	if err := v.Unmarshal(&c); err != nil {
+	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
-	
+
 	c.VM.StorageDir = ExpandPath(c.VM.StorageDir)
 	c.SSH.PrivateKey = ExpandPath(c.SSH.PrivateKey)
 
@@ -173,9 +176,11 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 	if envHotdesks := os.Getenv("NUM_HOTDESKS"); envHotdesks != "" {
 		if val, err := strconv.Atoi(envHotdesks); err == nil && val > 0 {
 			c.Nodes.Hotdesks.Count = val
+		} else {
+			slog.Warn("ignoring invalid NUM_HOTDESKS value", "value", envHotdesks)
 		}
 	}
-	
+
 	resolvedKeyPath := keyPath
 	if resolvedKeyPath == "" {
 		defaultKey := ExpandPath("${HOME}/.config/cms-ha/age.key")
