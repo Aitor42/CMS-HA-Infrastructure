@@ -775,7 +775,21 @@ func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duratio
 	}
 }
 
-// WaitForAptLock waits for unattended-upgrades, dpkg or cloud-init to release apt locks on the target host.
+// AptLockWaitSnippet is the shared shell preamble that waits for
+// unattended-upgrades, dpkg or cloud-init to release apt locks before apt
+// operations; callers embed it at the top of their install scripts.
+const AptLockWaitSnippet = `cloud-init status --wait 2>/dev/null || true
+for i in {1..30}; do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+        break
+    fi
+    sleep 2
+done
+`
+
+// WaitForAptLock waits for unattended-upgrades, dpkg or cloud-init to release
+// apt locks on the target host. Fails (exit 1) if no lock is released in
+// time, instead of falsely reporting success.
 func (p *Pool) WaitForAptLock(ctx context.Context, host string) error {
 	waitScript := `
 cloud-init status --wait 2>/dev/null || true
@@ -785,36 +799,11 @@ for i in {1..60}; do
     fi
     sleep 2
 done
+echo "apt lock still held after 120s (unattended-upgrades/dpkg?)" >&2
+exit 1
 `
 	_, err := p.RunScript(ctx, host, waitScript)
 	return err
-}
-
-// RunCommandWithRetry runs a command and retries upon non-zero exit code or network failure.
-func (p *Pool) RunCommandWithRetry(ctx context.Context, host, cmd string, maxRetries int, delay time.Duration) (string, string, int, error) {
-	var stdout, stderr string
-	var code int
-	var err error
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return stdout, stderr, code, err
-		}
-		stdout, stderr, code, err = p.RunCommand(ctx, host, cmd)
-		if err == nil && code == 0 {
-			return stdout, stderr, code, nil
-		}
-		if attempt < maxRetries {
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return stdout, stderr, code, ctx.Err()
-			case <-timer.C:
-			}
-		}
-	}
-	return stdout, stderr, code, err
 }
 
 // Close closes all connections in the pool.
