@@ -420,31 +420,28 @@ func (p *Pool) CopyFile(ctx context.Context, host, localPath, remotePath string)
 		return fmt.Errorf("failed to stat local file %s: %w", localPath, err)
 	}
 
-	client, err := p.getClient(host)
+	src, err := os.Open(filepath.Clean(localPath))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
 	}
+	defer src.Close()
 
-	sftpClient, err := sftp.NewClient(client)
-	if err != nil {
-		p.invalidateClient(host)
-		client, err = p.getClient(host)
-		if err != nil {
-			return err
-		}
-		sftpClient, err = sftp.NewClient(client)
-		if err != nil {
-			return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
-		}
-	}
-	defer sftpClient.Close()
-
-	return copyFileWithSFTP(ctx, sftpClient, localPath, remotePath, info.Mode())
+	return p.writeRemoteFile(ctx, host, src, remotePath, info.Mode())
 }
 
 // WithSFTP opens an SFTP client and executes fn, allowing multiple file transfers
 // to reuse a single SFTP session and avoid repeated subsystem negotiation roundtrips.
+//
+// Note: when the pool uses a non-root deploy account, SFTP can only write where
+// that account has permission (e.g. /tmp). Use CopyContent/CopyFile for
+// root-owned destinations, which elevate transparently.
 func (p *Pool) WithSFTP(ctx context.Context, host string, fn func(sftpClient *sftp.Client) error) error {
+	return p.withSFTPClient(ctx, host, fn)
+}
+
+// withSFTPClient dials (retrying once on a stale connection) and runs fn with a
+// fresh SFTP session.
+func (p *Pool) withSFTPClient(ctx context.Context, host string, fn func(sftpClient *sftp.Client) error) error {
 	client, err := p.getClient(host)
 	if err != nil {
 		return err
@@ -463,6 +460,10 @@ func (p *Pool) WithSFTP(ctx context.Context, host string, fn func(sftpClient *sf
 		}
 	}
 	defer sftpClient.Close()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	return fn(sftpClient)
 }
@@ -615,19 +616,23 @@ func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, e
 	}
 	defer file.Close()
 
-	var buf bytes.Buffer
-	_, err = io.Copy(&buf, file)
+	// Cap the read: remote logs can be huge and unbounded io.Copy would
+	// exhaust memory when the caller expects a config-like file.
+	data, err := io.ReadAll(io.LimitReader(file, maxRemoteFileRead+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read remote file %s: %w", remotePath, err)
 	}
+	if len(data) > maxRemoteFileRead {
+		return nil, fmt.Errorf("remote file %s exceeds the %d MiB read limit", remotePath, maxRemoteFileRead>>20)
+	}
 
-	return buf.Bytes(), nil
+	return data, nil
 }
 
 // WaitForSSH polls until SSH connection succeeds using adaptive backoff (starting at 1s up to 5s).
 func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duration) error {
 	slog.Info("waiting for ssh to become available", "host", host, "timeout", timeout)
-	
+
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
