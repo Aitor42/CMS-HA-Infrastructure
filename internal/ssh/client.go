@@ -122,6 +122,29 @@ func NewPoolWithOptions(keyPath string, opts Options) (*Pool, error) {
 	return p, nil
 }
 
+// elevated reports whether commands must be run through sudo (any non-root
+// deploy account).
+func (p *Pool) elevated() bool {
+	return p.user != "" && p.user != "root"
+}
+
+// remoteCommand wraps cmd so it runs as root when the pool uses a non-root
+// deploy account. `-n` makes sudo fail fast instead of blocking on a password
+// prompt, and `-H` sets HOME to the target user's home so root-owned paths
+// (kubeconfig, .step, ...) resolve correctly.
+func (p *Pool) remoteCommand(cmd string) string {
+	if !p.elevated() {
+		return cmd
+	}
+	return "sudo -n -H bash -c " + shellQuote(cmd)
+}
+
+// shellQuote wraps s in single quotes, escaping embedded single quotes, so it
+// can be safely embedded in a `bash -c '...'` invocation.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func (p *Pool) initKey() error {
 	keyBytes, err := os.ReadFile(p.keyPath)
 	if err != nil {
@@ -134,13 +157,98 @@ func (p *Pool) initKey() error {
 	}
 
 	p.config = &ssh.ClientConfig{
-		User: "root",
+		User: p.user,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // #nosec G106 -- ephemeral VM provisioning across internal private network
+		HostKeyCallback: p.verifyHostKey,
 		Timeout:         p.connectTimeout,
 	}
+	return nil
+}
+
+// verifyHostKey implements trust-on-first-use (TOFU): a host key seen for the
+// first time is pinned (and persisted to known_hosts), while a key that differs
+// from the pinned one is rejected to defeat man-in-the-middle attacks.
+func (p *Pool) verifyHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	p.knownHostsMu.Lock()
+	defer p.knownHostsMu.Unlock()
+
+	if p.knownHostsCallback == nil {
+		cb, err := p.loadKnownHostsCallback()
+		if err != nil {
+			return err
+		}
+		p.knownHostsCallback = cb
+	}
+
+	err := p.knownHostsCallback(hostname, remote, key)
+	if err == nil {
+		return nil
+	}
+
+	var keyErr *knownhosts.KeyError
+	if errors.As(err, &keyErr) && len(keyErr.Want) == 0 {
+		// Unknown host: this is the first time we see its key.
+		return p.trustHostKey(hostname, remote, key)
+	}
+	// Known host with a different key (or a malformed store): fail closed.
+	return fmt.Errorf("SSH host key verification failed for %s: %w", hostname, err)
+}
+
+// loadKnownHostsCallback builds a verifier from the on-disk store. When the
+// file does not exist yet every host is reported as unknown (first contact).
+func (p *Pool) loadKnownHostsCallback() (ssh.HostKeyCallback, error) {
+	if p.knownHostsPath == "" {
+		return func(string, net.Addr, ssh.PublicKey) error { return &knownhosts.KeyError{} }, nil
+	}
+	if _, err := os.Stat(p.knownHostsPath); err != nil {
+		if os.IsNotExist(err) {
+			return func(string, net.Addr, ssh.PublicKey) error { return &knownhosts.KeyError{} }, nil
+		}
+		return nil, fmt.Errorf("failed to stat known_hosts %s: %w", p.knownHostsPath, err)
+	}
+	cb, err := knownhosts.New(p.knownHostsPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load known_hosts %s: %w", p.knownHostsPath, err)
+	}
+	return cb, nil
+}
+
+// trustHostKey accepts a newly discovered host key. When a store is configured
+// it persists and pins the key (0600) so later connections verify it; without a
+// store every connection is trusted as first contact.
+func (p *Pool) trustHostKey(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	addr := hostname
+	if remote != nil {
+		addr = remote.String()
+	}
+	normalized := knownhosts.Normalize(addr)
+	line := knownhosts.Line([]string{normalized}, key)
+
+	if p.knownHostsPath != "" {
+		if err := os.MkdirAll(filepath.Dir(p.knownHostsPath), 0o700); err != nil {
+			return fmt.Errorf("failed to create known_hosts directory: %w", err)
+		}
+		f, err := os.OpenFile(p.knownHostsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("failed to open known_hosts %s: %w", p.knownHostsPath, err)
+		}
+		_, werr := fmt.Fprintln(f, line)
+		cerr := f.Close()
+		if werr != nil {
+			return fmt.Errorf("failed to persist host key for %s: %w", hostname, werr)
+		}
+		if cerr != nil {
+			return fmt.Errorf("failed to close known_hosts %s: %w", p.knownHostsPath, cerr)
+		}
+		if cb, err := knownhosts.New(p.knownHostsPath); err == nil {
+			p.knownHostsCallback = cb
+		}
+	}
+
+	slog.Warn("trusting SSH host key on first use (TOFU)",
+		"host", hostname, "fingerprint", ssh.FingerprintSHA256(key))
 	return nil
 }
 
