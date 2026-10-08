@@ -340,28 +340,40 @@ func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.R
 		p.invalidateClient(host)
 		client, err = p.getClient(host)
 		if err != nil {
-			return "", "", -1, err
+			return "", -1, err
 		}
 		session, err = client.NewSession()
 		if err != nil {
-			return "", "", -1, fmt.Errorf("failed to create session on %s: %w", host, err)
+			return "", -1, fmt.Errorf("failed to create session on %s: %w", host, err)
 		}
 	}
 	defer session.Close()
 
-	var stdoutBuf, stderrBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
+	var stderrBuf cappedBuffer
+	session.Stdout = dst
 	session.Stderr = &stderrBuf
+	if stdin != nil {
+		session.Stdin = stdin
+	}
 
 	done := make(chan error, 1)
 	go func() {
-		done <- session.Run(cmd)
+		done <- session.Run(p.remoteCommand(cmd))
 	}()
 
 	select {
 	case <-ctx.Done():
-		session.Signal(ssh.SIGKILL)
-		return "", "", -1, ctx.Err()
+		_ = session.Signal(ssh.SIGKILL)
+		_ = session.Close()
+		// Wait for the writer to finish, bounded: some remotes ignore the
+		// kill signal and the caller would otherwise hang forever.
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+		// Preserve the captured stderr: it often explains why the command
+		// hung before the context was cancelled.
+		return stderrBuf.String(), -1, ctx.Err()
 	case err := <-done:
 		exitCode := 0
 		if err != nil {
@@ -371,26 +383,29 @@ func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.R
 				exitCode = -1
 			}
 		}
-		return stdoutBuf.String(), stderrBuf.String(), exitCode, err
+		return stderrBuf.String(), exitCode, err
 	}
 }
 
 // RunScript creates a temporary script, executes it, and cleans it up.
 func (p *Pool) RunScript(ctx context.Context, host, script string) (string, error) {
-	tmpPath := fmt.Sprintf("/tmp/script_%d.sh", time.Now().UnixNano())
+	// Random name: a predictable path would let a local user pre-create a
+	// symlink to a sensitive file before the SFTP write lands.
+	var nameSuffix [12]byte
+	if _, err := crand.Read(nameSuffix[:]); err != nil {
+		return "", fmt.Errorf("generate script name: %w", err)
+	}
+	tmpPath := fmt.Sprintf("/tmp/script_%s.sh", hex.EncodeToString(nameSuffix[:]))
 
 	err := p.CopyContent(ctx, host, []byte(script), tmpPath, 0700)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload script to %s: %w", host, err)
 	}
-	defer func() {
-		// Clean up
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		p.RunCommand(cleanupCtx, host, "rm -f "+tmpPath)
-	}()
 
-	stdout, stderr, exitCode, err := p.RunCommand(ctx, host, "bash "+tmpPath)
+	// The remote shell deletes its own temporary script on exit (EXIT trap), so
+	// no separate cleanup session is needed. An EXIT trap does not override the
+	// exit status of the wrapped script, so failure detection is unchanged.
+	stdout, stderr, exitCode, err := p.RunCommand(ctx, host, "trap 'rm -f "+tmpPath+"' EXIT; bash "+tmpPath)
 	if err != nil || exitCode != 0 {
 		return stdout, fmt.Errorf("script execution failed on %s (exit %d): %v\nStderr: %s", host, exitCode, err, stderr)
 	}
