@@ -1,36 +1,115 @@
 package ssh
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // Pool manages a thread-safe pool of SSH connections to multiple hosts.
 type Pool struct {
 	mu             sync.Mutex
 	keyPath        string
+	user           string
+	knownHostsPath string
 	clients        map[string]*ssh.Client
 	config         *ssh.ClientConfig
 	connectTimeout time.Duration
+	// knownHostsMu guards knownHostsCallback. It is deliberately separate from
+	// mu so host-key verification (which does disk I/O) never serializes
+	// connection setup across parallel handshakes.
+	knownHostsMu sync.Mutex
+	// knownHostsCallback verifies (and pins on first contact) host keys.
+	knownHostsCallback ssh.HostKeyCallback
+	// evicted holds clients removed from the pool but potentially still in use
+	// by in-flight operations; they are definitively closed in Close(). Closing
+	// here instead would sever sessions of concurrent goroutines.
+	evicted []*ssh.Client
 }
 
-// NewPool initializes a new SSH connection pool using the provided private key.
+// Options configures an SSH connection pool.
+type Options struct {
+	// User is the non-root deploy account. Empty defaults to "root" (legacy).
+	User string
+	// KnownHostsFile is the TOFU known_hosts database. Empty disables host-key
+	// pinning entirely: every connection is treated as first contact.
+	KnownHostsFile string
+	// ConnectTimeout bounds the TCP connect and handshake.
+	ConnectTimeout time.Duration
+}
+
+const maxCapturedStderr = 64 * 1024
+
+// maxRemoteFileRead caps SFTP reads and rejects larger files after a sudo `cat`
+// so a huge remote file cannot exhaust memory.
+const maxRemoteFileRead = 32 << 20 // 32 MiB
+
+type cappedBuffer struct {
+	bytes.Buffer
+	truncated bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	originalLength := len(p)
+	remaining := maxCapturedStderr - b.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+			b.truncated = true
+		}
+		_, _ = b.Buffer.Write(p)
+	} else if originalLength > 0 {
+		b.truncated = true
+	}
+	return originalLength, nil
+}
+
+func (b *cappedBuffer) String() string {
+	result := b.Buffer.String()
+	if b.truncated {
+		result += "\n[stderr truncated at 64 KiB]"
+	}
+	return result
+}
+
+// NewPool initializes a pool using the provided private key. It keeps the
+// historical signature (root user, no persistent host-key store); callers that
+// want the hardened non-root/TOFU behaviour use NewPoolWithOptions.
 func NewPool(keyPath string, connectTimeout time.Duration) (*Pool, error) {
+	return NewPoolWithOptions(keyPath, Options{ConnectTimeout: connectTimeout})
+}
+
+// NewPoolWithOptions initializes a new SSH connection pool using the provided
+// private key and options.
+func NewPoolWithOptions(keyPath string, opts Options) (*Pool, error) {
+	user := strings.TrimSpace(opts.User)
+	if user == "" {
+		user = "root"
+	}
+
 	p := &Pool{
 		keyPath:        keyPath,
+		user:           user,
+		knownHostsPath: opts.KnownHostsFile,
 		clients:        make(map[string]*ssh.Client),
-		connectTimeout: connectTimeout,
+		connectTimeout: opts.ConnectTimeout,
 	}
 
 	// If key file exists, initialize immediately
@@ -114,21 +193,37 @@ func (p *Pool) invalidateClient(host string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if client, ok := p.clients[host]; ok {
-		client.Close()
+		// Remove but do not close: another goroutine may still be using this
+		// connection. Definitive close happens in Close() to avoid cutting
+		// in-flight sessions of concurrent host tasks.
 		delete(p.clients, host)
+		p.evicted = append(p.evicted, client)
 	}
-}
-
-// Invalidate closes and removes any cached SSH connection to host.
-func (p *Pool) Invalidate(host string) {
-	p.invalidateClient(host)
 }
 
 // RunCommand executes a command remotely and captures output.
 func (p *Pool) RunCommand(ctx context.Context, host, cmd string) (string, string, int, error) {
+	var stdout bytes.Buffer
+	stderr, exitCode, err := p.RunCommandToWriter(ctx, host, cmd, &stdout)
+	return stdout.String(), stderr, exitCode, err
+}
+
+// RunCommandToWriter executes a remote command and streams stdout to dst.
+// Memory use stays bounded by SSH's internal buffers rather than output size.
+func (p *Pool) RunCommandToWriter(ctx context.Context, host, cmd string, dst io.Writer) (string, int, error) {
+	return p.RunCommandStdin(ctx, host, cmd, nil, dst)
+}
+
+// RunCommandStdin executes a remote command, optionally feeding stdin and
+// streaming stdout to dst. Privileged commands run through sudo when the pool
+// uses a non-root deploy account.
+func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.Reader, dst io.Writer) (string, int, error) {
+	if dst == nil {
+		return "", -1, fmt.Errorf("stdout writer cannot be nil")
+	}
 	client, err := p.getClient(host)
 	if err != nil {
-		return "", "", -1, err
+		return "", -1, err
 	}
 
 	session, err := client.NewSession()
@@ -495,4 +590,8 @@ func (p *Pool) Close() {
 		slog.Debug("closed ssh connection", "host", host)
 	}
 	p.clients = make(map[string]*ssh.Client)
+	for _, client := range p.evicted {
+		client.Close()
+	}
+	p.evicted = nil
 }
