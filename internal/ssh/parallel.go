@@ -6,8 +6,21 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// maxParallelHosts bounds how many hosts are processed concurrently, so a large
+// node list (e.g. many hotdesks) cannot open an unbounded number of SSH
+// sessions at once.
+const maxParallelHosts = 16
+
+func parallelLimit(n int) int {
+	if n < maxParallelHosts {
+		return n
+	}
+	return maxParallelHosts
+}
 
 // ParallelResult represents the outcome of an operation on a specific host.
 type ParallelResult struct {
@@ -25,26 +38,26 @@ func (p *Pool) RunParallel(ctx context.Context, hosts []string, cmd string) []Pa
 	}
 
 	var wg sync.WaitGroup
-	var mu sync.Mutex
+	var completed atomic.Int64
 	total := len(hosts)
-	completed := 0
+	sem := make(chan struct{}, parallelLimit(len(hosts)))
 
 	for i, host := range hosts {
 		wg.Add(1)
 		go func(idx int, h string) {
 			defer wg.Done()
+			sem <- struct{}{}
 			stdout, _, code, err := p.RunCommand(ctx, h, cmd)
+			<-sem
 
-			mu.Lock()
-			completed++
-			slog.Info("parallel task progress", "completed", completed, "total", total, "host", h)
+			// results[idx] is a distinct element per goroutine: no lock needed.
 			results[idx] = ParallelResult{
 				Host:     h,
 				Output:   stdout,
 				ExitCode: code,
 				Err:      err,
 			}
-			mu.Unlock()
+			slog.Info("parallel task progress", "completed", completed.Add(1), "total", total, "host", h)
 		}(i, host)
 	}
 
@@ -57,24 +70,26 @@ func (p *Pool) RunParallelFunc(ctx context.Context, tasks map[string]func(ctx co
 	var wg sync.WaitGroup
 	results := make([]ParallelResult, 0, len(tasks))
 	var mu sync.Mutex
+	var completed atomic.Int64
 
 	total := len(tasks)
-	completed := 0
+	sem := make(chan struct{}, parallelLimit(len(tasks)))
 
 	for host, taskFunc := range tasks {
 		wg.Add(1)
 		go func(h string, f func(context.Context, *Pool) error) {
 			defer wg.Done()
+			sem <- struct{}{}
 			err := f(ctx, p)
-			
+			<-sem
+
 			mu.Lock()
-			completed++
-			slog.Info("parallel task progress", "completed", completed, "total", total, "host", h)
 			results = append(results, ParallelResult{
 				Host: h,
 				Err:  err,
 			})
 			mu.Unlock()
+			slog.Info("parallel task progress", "completed", completed.Add(1), "total", total, "host", h)
 		}(host, taskFunc)
 	}
 
@@ -85,7 +100,7 @@ func (p *Pool) RunParallelFunc(ctx context.Context, tasks map[string]func(ctx co
 // WaitForAllSSH waits for all hosts to be SSH-reachable.
 func (p *Pool) WaitForAllSSH(ctx context.Context, hosts []string, timeout time.Duration) error {
 	tasks := make(map[string]func(ctx context.Context, pool *Pool) error)
-	
+
 	for _, host := range hosts {
 		h := host
 		tasks[h] = func(c context.Context, pool *Pool) error {
