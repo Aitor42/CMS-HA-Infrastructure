@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Client is a wrapper around virsh and virt-install CLI commands.
@@ -18,7 +19,6 @@ type Client struct {
 
 // DomainInfo holds information about a libvirt domain.
 type DomainInfo struct {
-	ID    string
 	Name  string
 	State string
 }
@@ -56,18 +56,24 @@ type VirtInstallOpts struct {
 	GraphicsNone  bool
 }
 
+// probeTimeout bounds the client's sudo/URI probe so an unreachable
+// qemu+ssh:// host does not hang CLI startup for minutes.
+const probeTimeout = 5 * time.Second
+
 // NewClient creates a new Client and auto-detects if sudo is needed.
 func NewClient(uri string) *Client {
 	useSudo := false
 	if _, err := exec.LookPath("virsh"); err == nil {
 		if uri == "qemu:///system" || strings.HasPrefix(uri, "qemu+ssh://root@") {
 			// Check if virsh works directly
-			if err := exec.Command("virsh", "-c", uri, "list").Run(); err != nil { // #nosec G204
+			probeCtx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+			if err := exec.CommandContext(probeCtx, "virsh", "-c", uri, "list").Run(); err != nil { // #nosec G204
 				// Only use sudo if sudo -n works non-interactively
-				if errSudo := exec.Command("sudo", "-n", "virsh", "-c", uri, "list").Run(); errSudo == nil { // #nosec G204
+				if errSudo := exec.CommandContext(probeCtx, "sudo", "-n", "virsh", "-c", uri, "list").Run(); errSudo == nil { // #nosec G204
 					useSudo = true
 				}
 			}
+			cancel()
 		}
 	}
 
@@ -90,9 +96,9 @@ func (c *Client) virsh(ctx context.Context, args ...string) ([]byte, error) {
 	}
 
 	cmd.Env = append(cmd.Environ(), "LIBVIRT_DEFAULT_URI="+c.URI)
-	
+
 	slog.Debug("executing virsh command", "args", cmdArgs)
-	
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("virsh command failed: %v, output: %s", err, string(out))
@@ -115,6 +121,35 @@ func (c *Client) DomainExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
+// DomainExistsChecked distinguishes an absent domain from a failed virsh query.
+func (c *Client) DomainExistsChecked(ctx context.Context, name string) (bool, error) {
+	out, err := c.virsh(ctx, "list", "--all", "--name")
+	if err != nil {
+		return false, err
+	}
+	for _, domain := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(domain) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// DomainStates returns a snapshot of every defined domain mapped to its state
+// with a single `virsh list --all` invocation, avoiding one `virsh domstate`
+// subprocess per VM.
+func (c *Client) DomainStates(ctx context.Context) (map[string]string, error) {
+	domains, err := c.ListAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	states := make(map[string]string, len(domains))
+	for _, d := range domains {
+		states[strings.TrimSpace(d.Name)] = strings.TrimSpace(d.State)
+	}
+	return states, nil
+}
+
 // Start starts a domain.
 func (c *Client) Start(ctx context.Context, name string) error {
 	_, err := c.virsh(ctx, "start", name)
@@ -124,6 +159,12 @@ func (c *Client) Start(ctx context.Context, name string) error {
 // Shutdown performs an ACPI shutdown of a domain.
 func (c *Client) Shutdown(ctx context.Context, name string) error {
 	_, err := c.virsh(ctx, "shutdown", name)
+	return err
+}
+
+// Resume resumes a paused domain so it can process an ACPI shutdown request.
+func (c *Client) Resume(ctx context.Context, name string) error {
+	_, err := c.virsh(ctx, "resume", name)
 	return err
 }
 
@@ -151,16 +192,6 @@ func (c *Client) SetMemory(ctx context.Context, name string, kib int64) error {
 	return err
 }
 
-// SetVCPUs sets the vCPU count for a domain.
-func (c *Client) SetVCPUs(ctx context.Context, name string, count int) error {
-	_, err := c.virsh(ctx, "setvcpus", name, fmt.Sprintf("%d", count), "--config", "--maximum")
-	if err != nil {
-		return err
-	}
-	_, err = c.virsh(ctx, "setvcpus", name, fmt.Sprintf("%d", count), "--config")
-	return err
-}
-
 // DumpXML dumps the XML configuration of a domain.
 func (c *Client) DumpXML(ctx context.Context, name string) (string, error) {
 	out, err := c.virsh(ctx, "dumpxml", name)
@@ -179,7 +210,7 @@ func (c *Client) ListAll(ctx context.Context) ([]DomainInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	lines := strings.Split(string(out), "\n")
 	var domains []DomainInfo
 	for i, line := range lines {
@@ -189,7 +220,6 @@ func (c *Client) ListAll(ctx context.Context) ([]DomainInfo, error) {
 		fields := strings.Fields(line)
 		if len(fields) >= 3 {
 			domains = append(domains, DomainInfo{
-				ID:    fields[0],
 				Name:  fields[1],
 				State: strings.Join(fields[2:], " "),
 			})
@@ -204,7 +234,7 @@ func (c *Client) ListRunning(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var running []string
 	for _, d := range domains {
 		if strings.EqualFold(strings.TrimSpace(d.State), "running") {
@@ -250,6 +280,20 @@ func (c *Client) NetExists(ctx context.Context, name string) bool {
 	return err == nil
 }
 
+// NetExistsChecked distinguishes an absent network from a failed virsh query.
+func (c *Client) NetExistsChecked(ctx context.Context, name string) (bool, error) {
+	out, err := c.virsh(ctx, "net-list", "--all", "--name")
+	if err != nil {
+		return false, err
+	}
+	for _, network := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(network) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // NetIsActive checks if a libvirt network is active.
 func (c *Client) NetIsActive(ctx context.Context, name string) bool {
 	out, err := c.virsh(ctx, "net-info", name)
@@ -270,8 +314,25 @@ func (c *Client) NetIsActive(ctx context.Context, name string) bool {
 
 // VirtInstall builds and executes a virt-install command.
 func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
+	// virt-install joins --disk/--network specs with commas; values containing
+	// one would silently corrupt the parsed options.
+	for i, d := range opts.Disks {
+		for field, v := range map[string]string{"path": d.Path, "format": d.Format, "bus": d.Bus, "device": d.Device} {
+			if strings.Contains(v, ",") {
+				return fmt.Errorf("disk %d: %s must not contain commas: %q", i+1, field, v)
+			}
+		}
+	}
+	for i, n := range opts.Networks {
+		for field, v := range map[string]string{"network": n.Network, "mac": n.Mac} {
+			if strings.Contains(v, ",") {
+				return fmt.Errorf("network %d: %s must not contain commas: %q", i+1, field, v)
+			}
+		}
+	}
+
 	args := []string{"--connect", c.URI, "--name", opts.Name, "--memory", fmt.Sprintf("%d", opts.RAM), "--vcpus", fmt.Sprintf("%d", opts.VCPUs)}
-	
+
 	if opts.OSVariant != "" {
 		args = append(args, "--os-variant", opts.OSVariant)
 	}
@@ -301,7 +362,7 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		}
 		args = append(args, "--disk", strings.Join(parts, ","))
 	}
-	
+
 	for _, n := range opts.Networks {
 		netArg := fmt.Sprintf("network=%s,model=virtio", n.Network)
 		if n.Mac != "" {
@@ -313,15 +374,15 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 	if opts.PXE && len(opts.BootOrder) == 0 {
 		args = append(args, "--pxe")
 	}
-	
+
 	if len(opts.BootOrder) > 0 {
 		args = append(args, "--boot", strings.Join(opts.BootOrder, ","))
 	}
-	
+
 	if opts.Location != "" {
 		args = append(args, "--location", opts.Location)
 	}
-	
+
 	if opts.ExtraArgs != "" {
 		args = append(args, "--extra-args", opts.ExtraArgs)
 	}
@@ -335,7 +396,7 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 	if opts.NoReboot {
 		args = append(args, "--noreboot")
 	}
-	
+
 	if opts.GraphicsNone {
 		args = append(args, "--graphics", "none")
 	}
@@ -347,19 +408,25 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 	} else {
 		cmd = exec.CommandContext(ctx, "virt-install", args...) // #nosec G204 -- virt-install command with structured arguments
 	}
-	
+
 	slog.Debug("executing virt-install", "args", args)
-	
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("virt-install failed: %v, output: %s", err, string(out))
 	}
-	
+
 	return nil
 }
 
 // CreateDisk runs qemu-img create.
 func CreateDisk(ctx context.Context, path string, sizeGB int, format string) error {
+	if path == "" {
+		return fmt.Errorf("disk path is required")
+	}
+	if format == "" {
+		return fmt.Errorf("disk format is required (use qcow2)")
+	}
 	args := []string{"create", "-f", format, path, fmt.Sprintf("%dG", sizeGB)}
 	cmd := exec.CommandContext(ctx, "qemu-img", args...) // #nosec G204 -- qemu-img command with validated options
 	out, err := cmd.CombinedOutput()
@@ -371,7 +438,14 @@ func CreateDisk(ctx context.Context, path string, sizeGB int, format string) err
 
 // CreateISO runs xorrisofs to create an ISO.
 func CreateISO(ctx context.Context, outputPath, sourceDir, volID string) error {
-	_ = os.Remove(outputPath)
+	if outputPath == "" || sourceDir == "" {
+		return fmt.Errorf("ISO output path and source directory are required")
+	}
+	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+		// Failing to clear the old output would make xorrisofs fail with a
+		// cryptic error; surface the real cause instead.
+		return fmt.Errorf("failed to remove previous ISO %s: %w", outputPath, err)
+	}
 	args := []string{"-o", outputPath, "-V", volID, "-R", "-J", sourceDir}
 	cmd := exec.CommandContext(ctx, "xorrisofs", args...) // #nosec G204 -- xorrisofs command with validated options
 	out, err := cmd.CombinedOutput()

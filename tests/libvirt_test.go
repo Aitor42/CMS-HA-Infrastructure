@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"context"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
@@ -48,7 +47,23 @@ func TestLibvirt_MockDomainOperations(t *testing.T) {
 		UseSudo: false,
 	}
 
-	ctx := context.Background()
-	_ = c.DomainExists(ctx, "nonexistent-vm-12345")
-	_ = c.NetExists(ctx, "nonexistent-net-12345")
+	ctx := t.Context()
+
+	if c.DomainExists(ctx, "nonexistent-vm-12345") {
+		t.Error("expected DomainExists=false for a nonexistent VM, got true")
+	}
+	if c.NetExists(ctx, "nonexistent-net-12345") {
+		t.Error("expected NetExists=false for a nonexistent network, got true")
+	}
+
+	// The checked variants must return (false, nil) for a cleanly
+	// nonexistent domain: RecreateFailedVMs/FixBootOrder rely on that to
+	// skip nodes instead of failing or destroying things.
+	exists, err := c.DomainExistsChecked(ctx, "nonexistent-vm-12345")
+	if err != nil {
+		t.Errorf("expected checked lookup of nonexistent VM to not error, got: %v", err)
+	}
+	if exists {
+		t.Error("expected DomainExistsChecked=false for a nonexistent VM, got true")
+	}
 }
