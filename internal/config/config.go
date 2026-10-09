@@ -35,106 +35,412 @@ func ExpandPath(path string) string {
 
 // Config represents the top-level configuration.
 type Config struct {
-	VM         VMConfig         `mapstructure:"vm"`
-	SSH        SSHConfig        `mapstructure:"ssh"`
-	Network    NetworkConfig    `mapstructure:"network"`
-	Nodes      NodesConfig      `mapstructure:"nodes"`
-	Database   DatabaseConfig   `mapstructure:"database"`
-	Monitoring MonitoringConfig `mapstructure:"monitoring"`
-	PKI        PKIConfig        `mapstructure:"pki"`
-	Deploy     DeployConfig     `mapstructure:"deploy"`
+	VM         VMConfig         `yaml:"vm"`
+	SSH        SSHConfig        `yaml:"ssh"`
+	Network    NetworkConfig    `yaml:"network"`
+	Nodes      NodesConfig      `yaml:"nodes"`
+	Database   DatabaseConfig   `yaml:"database"`
+	WordPress  WordPressConfig  `yaml:"wordpress"`
+	Monitoring MonitoringConfig `yaml:"monitoring"`
+	PKI        PKIConfig        `yaml:"pki"`
+	Deploy     DeployConfig     `yaml:"deploy"`
+	DRBD       DRBDConfig       `yaml:"drbd"`
+	Backup     BackupConfig     `yaml:"backup"`
+	Traffic    TrafficConfig    `yaml:"traffic"`
 }
 
 type VMConfig struct {
-	StorageDir string `mapstructure:"storage_dir"`
-	LibvirtURI string `mapstructure:"libvirt_uri"`
+	StorageDir string `yaml:"storage_dir"`
+	LibvirtURI string `yaml:"libvirt_uri"`
 }
 
 type SSHConfig struct {
-	PrivateKey     string        `mapstructure:"private_key"`
-	ConnectTimeout time.Duration `mapstructure:"connect_timeout"`
-	BatchMode      bool          `mapstructure:"batch_mode"`
+	// User is the non-root account the orchestrator logs in as. Privileged
+	// commands are elevated with `sudo -n`; empty falls back to "root" for
+	// backwards compatibility.
+	User string `yaml:"user"`
+	// KnownHostsFile is the TOFU database used to pin VM host keys.
+	KnownHostsFile string        `yaml:"known_hosts_file"`
+	PrivateKey     string        `yaml:"private_key"`
+	ConnectTimeout time.Duration `yaml:"connect_timeout"`
+	BatchMode      bool          `yaml:"batch_mode"`
+}
+
+// SSHUser returns the account used for every SSH connection. It defaults to
+// "root" so configurations predating the non-root deploy account keep working;
+// config.yaml sets "ubuntu" (the account created by the installers).
+func (c *Config) SSHUser() string {
+	if u := strings.TrimSpace(c.SSH.User); u != "" {
+		return u
+	}
+	return "root"
+}
+
+// SSHKnownHostsFile returns the TOFU known_hosts path, defaulting to
+// ~/.ssh/cms_known_hosts.
+func (c *Config) SSHKnownHostsFile() string {
+	if p := strings.TrimSpace(c.SSH.KnownHostsFile); p != "" {
+		return ExpandPath(p)
+	}
+	return ExpandPath("~/.ssh/cms_known_hosts")
 }
 
 type NetworkConfig struct {
-	Internal NetworkDetail `mapstructure:"internal"`
-	Main     NetworkDetail `mapstructure:"main"`
+	Internal NetworkDetail `yaml:"internal"`
+	Main     NetworkDetail `yaml:"main"`
 }
 
 type NetworkDetail struct {
-	CIDR    string `mapstructure:"cidr"`
-	Gateway string `mapstructure:"gateway"`
-	Domain  string `mapstructure:"domain"`
-	Bridge  string `mapstructure:"bridge"`
+	CIDR    string `yaml:"cidr"`
+	Gateway string `yaml:"gateway"`
+	Domain  string `yaml:"domain"`
+	Bridge  string `yaml:"bridge"`
+	// VIP is the keepalived floating address (main network only): the address
+	// clients use and the router DNATs to. Empty on the internal network.
+	VIP string `yaml:"vip"`
 }
 
 type NodesConfig struct {
-	Router       NodeDetail   `mapstructure:"router"`
-	Jumpstart    NodeDetail   `mapstructure:"jumpstart"`
-	Masters      []NodeDetail `mapstructure:"masters"`
-	Workers      []NodeDetail `mapstructure:"workers"`
-	Storage      NodeDetail   `mapstructure:"storage"`
-	Monitor      NodeDetail   `mapstructure:"monitor"`
-	LB           NodeDetail   `mapstructure:"lb"`
-	CMSFrontends []NodeDetail `mapstructure:"cms_frontends"`
-	Hotdesks     HotdesksConf `mapstructure:"hotdesks"`
+	Router       NodeDetail   `yaml:"router"`
+	Jumpstart    NodeDetail   `yaml:"jumpstart"`
+	Masters      []NodeDetail `yaml:"masters"`
+	Workers      []NodeDetail `yaml:"workers"`
+	Storage      NodeDetail   `yaml:"storage"`
+	Monitor      NodeDetail   `yaml:"monitor"`
+	LBs          []NodeDetail `yaml:"lbs"`
+	CMSFrontends []NodeDetail `yaml:"cms_frontends"`
+	Hotdesks     HotdesksConf `yaml:"hotdesks"`
 }
 
 type NodeDetail struct {
-	Name         string `mapstructure:"name"`
-	IP           string `mapstructure:"ip"`
-	IPMain       string `mapstructure:"ip_main"`
-	FQDN         string `mapstructure:"fqdn"`
-	MAC          string `mapstructure:"mac"`
-	MACInternal  string `mapstructure:"mac_internal"`
-	MACMain      string `mapstructure:"mac_main"`
-	MACWAN       string `mapstructure:"mac_wan"`
-	RAMInstallMB int    `mapstructure:"ram_install_mb"`
-	RAMFinalMB   int    `mapstructure:"ram_final_mb"`
-	VCPUs        int    `mapstructure:"vcpus"`
-	DiskGB       int    `mapstructure:"disk_gb"`
-	DRBDDiskGB   int    `mapstructure:"drbd_disk_gb"`
+	Name         string `yaml:"name"`
+	IP           string `yaml:"ip"`
+	IPMain       string `yaml:"ip_main"`
+	FQDN         string `yaml:"fqdn"`
+	MAC          string `yaml:"mac"`
+	MACInternal  string `yaml:"mac_internal"`
+	MACMain      string `yaml:"mac_main"`
+	MACWAN       string `yaml:"mac_wan"`
+	RAMInstallMB int    `yaml:"ram_install_mb"`
+	RAMFinalMB   int    `yaml:"ram_final_mb"`
+	VCPUs        int    `yaml:"vcpus"`
+	DiskGB       int    `yaml:"disk_gb"`
+	DRBDDiskGB   int    `yaml:"drbd_disk_gb"`
 }
 
 type HotdesksConf struct {
-	Count        int `mapstructure:"count"`
-	Max          int `mapstructure:"max"`
-	RAMInstallMB int `mapstructure:"ram_install_mb"`
-	RAMFinalMB   int `mapstructure:"ram_final_mb"`
-	VCPUs        int `mapstructure:"vcpus"`
-	DiskGB       int `mapstructure:"disk_gb"`
-	BaseIPOctet  int `mapstructure:"base_ip_octet"`
+	Count        int `yaml:"count"`
+	Max          int `yaml:"max"`
+	RAMInstallMB int `yaml:"ram_install_mb"`
+	RAMFinalMB   int `yaml:"ram_final_mb"`
+	VCPUs        int `yaml:"vcpus"`
+	DiskGB       int `yaml:"disk_gb"`
+	BaseIPOctet  int `yaml:"base_ip_octet"`
 }
 
 type DatabaseConfig struct {
-	Name         string `mapstructure:"name"`
-	User         string `mapstructure:"user"`
-	Password     string `mapstructure:"password"`
-	RootPassword string `mapstructure:"root_password"`
-	Port         int    `mapstructure:"port"`
+	Name             string `yaml:"name"`
+	User             string `yaml:"user"`
+	Password         string `yaml:"password"`
+	RootPassword     string `yaml:"root_password"`
+	ExporterPassword string `yaml:"exporter_password"`
+	Port             int    `yaml:"port"`
+}
+
+type WordPressConfig struct {
+	AdminPassword string `yaml:"admin_password"`
 }
 
 type MonitoringConfig struct {
-	Exporters ExportersConfig `mapstructure:"exporters"`
+	Exporters ExportersConfig `yaml:"exporters"`
 }
 
 type ExportersConfig struct {
-	NginxVersion  string `mapstructure:"nginx_version"`
-	ApacheVersion string `mapstructure:"apache_version"`
-	MysqldVersion string `mapstructure:"mysqld_version"`
+	NginxVersion  string `yaml:"nginx_version"`
+	ApacheVersion string `yaml:"apache_version"`
+	MysqldVersion string `yaml:"mysqld_version"`
 }
 
 type PKIConfig struct {
-	CAPort              int    `mapstructure:"ca_port"`
-	ProvisionerPassword string `mapstructure:"provisioner_password"`
-	StepVersion         string `mapstructure:"step_version"`
-	StepCAVersion       string `mapstructure:"step_ca_version"`
-	Domain              string `mapstructure:"domain"`
+	CAPort              int    `yaml:"ca_port"`
+	ProvisionerPassword string `yaml:"provisioner_password"`
+	StepVersion         string `yaml:"step_version"`
+	StepCAVersion       string `yaml:"step_ca_version"`
+	Domain              string `yaml:"domain"`
+	// CAName is the CA's common name (used by the verify phase to confirm the
+	// load-balancer certificate was issued by the internal CA, not self-signed).
+	CAName string `yaml:"ca_name"`
+	// CertDNSNames are the configured DNS SANs for the load-balancer
+	// certificate; when empty, LBTLSDNSNames falls back to a built-in default.
+	CertDNSNames []string `yaml:"cert_dns_names"`
+	// CertMinValidDays is the minimum remaining validity the verify phase
+	// requires on the LB certificate (renewal keeps it comfortably above it).
+	CertMinValidDays int `yaml:"cert_min_valid_days"`
+	// CertLifetimeHours is the requested lifetime of the LB certificate. It
+	// must exceed CertMinValidDays so the certificate is not "expired" the
+	// moment it is issued.
+	CertLifetimeHours int `yaml:"cert_lifetime_hours"`
+}
+
+// PKICommonName returns the CA common name used to assert that a certificate
+// was issued by the internal CA.
+func (c *Config) PKICommonName() string {
+	if c.PKI.CAName != "" {
+		return c.PKI.CAName
+	}
+	return "CMS Local CA"
+}
+
+// LBTLSDNSNames returns the configured LB certificate DNS SANs, falling back to
+// a built-in default when none are set.
+func (c *Config) LBTLSDNSNames() []string {
+	if len(c.PKI.CertDNSNames) > 0 {
+		return c.PKI.CertDNSNames
+	}
+	return []string{"cms.fake-enterprise.com"}
+}
+
+// LBTLSSANs returns every SAN for the load-balancer certificate: the DNS
+// names, the keepalived VIP and every balancer address. The VIP is what
+// clients and the router DNAT actually use, so it must be a SAN.
+func (c *Config) LBTLSSANs() []string {
+	sans := append([]string{}, c.LBTLSDNSNames()...)
+	if vip := c.LBVIP(); vip != "" {
+		sans = append(sans, vip)
+	}
+	for _, lb := range c.Nodes.LBs {
+		if lb.IP != "" {
+			sans = append(sans, lb.IP)
+		}
+	}
+	return sans
+}
+
+// LBTLSCertMinValidDays returns the minimum remaining validity (in days) the
+// verify phase requires on the LB certificate.
+func (c *Config) LBTLSCertMinValidDays() int {
+	if c.PKI.CertMinValidDays > 0 {
+		return c.PKI.CertMinValidDays
+	}
+	return 30
+}
+
+// LBTLSCertLifetimeHours returns the requested LB certificate lifetime.
+func (c *Config) LBTLSCertLifetimeHours() int {
+	if c.PKI.CertLifetimeHours > 0 {
+		return c.PKI.CertLifetimeHours
+	}
+	return 2160 // 90 days
 }
 
 type DeployConfig struct {
-	SSHTimeout   time.Duration `mapstructure:"ssh_timeout"`
-	StaggerDelay time.Duration `mapstructure:"stagger_delay"`
+	SSHTimeout   time.Duration `yaml:"ssh_timeout"`
+	StaggerDelay time.Duration `yaml:"stagger_delay"`
+}
+
+// DRBDConfig controls the DRBD cms_data resource, in particular STONITH
+// fencing: before a node promotes itself it must power off the failed peer at
+// the hypervisor so two nodes can never write the replicated volume.
+type DRBDConfig struct {
+	// Fencing requires a confirmed power-off of the peer before promoting.
+	// When false the watchdog falls back to the legacy best-effort ICMP
+	// heuristic, which cannot rule out split-brain; only use it for demos.
+	Fencing bool `yaml:"fencing"`
+	// FenceCommand powers off the peer. FenceStateCommand queries its state.
+	// Both are shell snippets in which the literal {domain} is replaced with
+	// the peer's libvirt domain name. Leave empty to auto-derive an SSH+virsh
+	// command against the hypervisor (FenceCommands does this).
+	FenceCommand      string `yaml:"fence_command"`
+	FenceStateCommand string `yaml:"fence_state_command"`
+}
+
+// HypervisorIP returns the libvirt host address on the internal network
+// (network base + .254), which is where initvms configures the host bridge.
+func (c *Config) HypervisorIP() string {
+	_, ipnet, err := net.ParseCIDR(c.Network.Internal.CIDR)
+	if err != nil {
+		return ""
+	}
+	ip := ipnet.IP.To4()
+	if ip == nil {
+		return ""
+	}
+	ip[3] = 254
+	return ip.String()
+}
+
+// FenceCommands returns the (power-off, state-query) fencing commands. When the
+// config leaves them empty it derives an SSH+virsh command against the
+// hypervisor as the current $USER; the literal "{domain}" placeholder is kept
+// for the caller to substitute.
+func (c *Config) FenceCommands() (off, state string) {
+	if c.DRBD.FenceCommand != "" && c.DRBD.FenceStateCommand != "" {
+		return c.DRBD.FenceCommand, c.DRBD.FenceStateCommand
+	}
+
+	host := c.HypervisorIP()
+	user := os.Getenv("USER")
+	if user == "" {
+		user = os.Getenv("LOGNAME")
+	}
+	if user == "" {
+		user = "root"
+	}
+	base := fmt.Sprintf(
+		"ssh -i /etc/drbd-fence/fence_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 %s@%s",
+		user, host,
+	)
+	return base + " sudo virsh destroy {domain}", base + " sudo virsh domstate {domain}"
+}
+
+// BackupConfig controls the off-DRBD backup target: an S3-compatible object
+// store (Garage) running as a container on the hypervisor, on a data volume
+// that is NOT the DRBD device, plus the daily dump/upload and the restore
+// drill. Engine "" disables the whole backup feature.
+type BackupConfig struct {
+	// Engine selects the object-store implementation. Only "garage" is
+	// supported today; "" disables backup provisioning entirely.
+	Engine string `yaml:"engine"`
+	// GarageVersion is the pinned image tag (e.g. "v2.4.1").
+	GarageVersion string `yaml:"garage_version"`
+	// DataDir is the hypervisor directory holding Garage data/metadata. It must
+	// live outside the DRBD device so a split-brain cannot take the copies.
+	DataDir string `yaml:"data_dir"`
+	// S3Port is the S3 API port exposed on the hypervisor's internal address.
+	S3Port int `yaml:"s3_port"`
+	// S3Region is advertised to S3 clients (any value works with Garage).
+	S3Region string `yaml:"s3_region"`
+	// Bucket receives the dumps.
+	Bucket string `yaml:"bucket"`
+	// AccessKey is the S3 access key id (not secret on its own).
+	AccessKey string `yaml:"access_key"`
+	// SecretKey is the S3 secret; store it age-encrypted like other secrets.
+	SecretKey string `yaml:"secret_key"`
+	// RetentionDays is how long objects are kept in the bucket and on the
+	// local staging volume.
+	RetentionDays int `yaml:"retention_days"`
+	// Schedule is the CronJob schedule for the dump+upload.
+	Schedule string `yaml:"schedule"`
+	// RestoreTestSchedule is the CronJob schedule for the restore drill.
+	RestoreTestSchedule string `yaml:"restore_test_schedule"`
+}
+
+// TrafficConfig configures the k6 load/smoke generator.
+type TrafficConfig struct {
+	// K6Version is the pinned grafana/k6 image tag (no floating tags).
+	K6Version string `yaml:"k6_version"`
+	// PrometheusRWURL, when set, streams k6 metrics to Prometheus through its
+	// remote-write endpoint (e.g. http://192.168.10.20:9090/api/v1/write).
+	PrometheusRWURL string `yaml:"prometheus_rw_url"`
+	// VHost is the HTTP Host header the CMS vhost expects.
+	VHost string `yaml:"vhost"`
+}
+
+// K6Image returns the pinned k6 container image.
+func (c *Config) K6Image() string {
+	version := c.Traffic.K6Version
+	if version == "" {
+		version = "0.55.0"
+	}
+	return "grafana/k6:" + version
+}
+
+// TrafficVHost returns the Host header used by the load profile.
+func (c *Config) TrafficVHost() string {
+	if v := strings.TrimSpace(c.Traffic.VHost); v != "" {
+		return v
+	}
+	return "cms.fake-enterprise.com"
+}
+
+// BackupEnabled reports whether the backup feature is configured.
+func (c *Config) BackupEnabled() bool { return c.Backup.Engine != "" }
+
+// BackupEngine returns the configured object-store engine (default "garage").
+func (c *Config) BackupEngine() string {
+	if c.Backup.Engine != "" {
+		return c.Backup.Engine
+	}
+	return "garage"
+}
+
+// GarageImage returns the pinned Garage container image.
+func (c *Config) GarageImage() string {
+	version := c.Backup.GarageVersion
+	if version == "" {
+		version = "v2.4.1"
+	}
+	return "dxflrs/garage:" + version
+}
+
+// BackupDataDir returns the hypervisor directory holding Garage data.
+func (c *Config) BackupDataDir() string {
+	if c.Backup.DataDir != "" {
+		return ExpandPath(c.Backup.DataDir)
+	}
+	return "/var/lib/cms-garage"
+}
+
+// BackupS3Endpoint returns the S3 endpoint reachable from the cluster nodes
+// (the hypervisor's internal address).
+func (c *Config) BackupS3Endpoint() string {
+	return fmt.Sprintf("http://%s:%d", c.HypervisorIP(), c.BackupS3Port())
+}
+
+// BackupS3Port returns the S3 API port (default 3900).
+func (c *Config) BackupS3Port() int {
+	if c.Backup.S3Port > 0 {
+		return c.Backup.S3Port
+	}
+	return 3900
+}
+
+// BackupS3Region returns the S3 region advertised to clients (default "garage").
+func (c *Config) BackupS3Region() string {
+	if c.Backup.S3Region != "" {
+		return c.Backup.S3Region
+	}
+	return "garage"
+}
+
+// BackupBucket returns the bucket that receives the dumps.
+func (c *Config) BackupBucket() string {
+	if c.Backup.Bucket != "" {
+		return c.Backup.Bucket
+	}
+	return "cms-backups"
+}
+
+// BackupAccessKey returns the S3 access key id.
+func (c *Config) BackupAccessKey() string {
+	if c.Backup.AccessKey != "" {
+		return c.Backup.AccessKey
+	}
+	return "GKcmshabackup0000000000"
+}
+
+// BackupRetentionDays returns the object retention window (default 7 days).
+func (c *Config) BackupRetentionDays() int {
+	if c.Backup.RetentionDays > 0 {
+		return c.Backup.RetentionDays
+	}
+	return 7
+}
+
+// BackupSchedule returns the dump+upload CronJob schedule.
+func (c *Config) BackupSchedule() string {
+	if c.Backup.Schedule != "" {
+		return c.Backup.Schedule
+	}
+	return "0 2 * * *"
+}
+
+// BackupRestoreTestSchedule returns the restore-drill CronJob schedule.
+func (c *Config) BackupRestoreTestSchedule() string {
+	if c.Backup.RestoreTestSchedule != "" {
+		return c.Backup.RestoreTestSchedule
+	}
+	return "30 3 * * *"
 }
 
 // NodeSpec is a flattened representation of a node
@@ -147,7 +453,6 @@ type NodeSpec struct {
 	RAMFinalMB   int
 	VCPUs        int
 	DiskGB       int
-	DRBDDiskGB   int
 }
 
 // Load loads the configuration from the given path using default age key location.
@@ -277,7 +582,6 @@ func toSpec(n NodeDetail, fallbackIP string) NodeSpec {
 		RAMFinalMB:   n.RAMFinalMB,
 		VCPUs:        n.VCPUs,
 		DiskGB:       n.DiskGB,
-		DRBDDiskGB:   n.DRBDDiskGB,
 	}
 }
 
@@ -305,7 +609,9 @@ func (c *Config) MainNodes() []NodeSpec {
 		js.MAC = c.Nodes.Jumpstart.MACMain
 		nodes = append(nodes, js)
 	}
-	nodes = append(nodes, toSpec(c.Nodes.LB, ""))
+	for _, lb := range c.Nodes.LBs {
+		nodes = append(nodes, toSpec(lb, ""))
+	}
 	for _, n := range c.Nodes.CMSFrontends {
 		nodes = append(nodes, toSpec(n, ""))
 	}
@@ -313,7 +619,8 @@ func (c *Config) MainNodes() []NodeSpec {
 	return nodes
 }
 
-// HotdeskSpecs generates dynamic hotdesk specs
+// HotdeskSpecs synthesises the hotdesk nodes from Nodes.Hotdesks.Count and
+// BaseIPOctet.
 func (c *Config) HotdeskSpecs() []NodeSpec {
 	var nodes []NodeSpec
 	for i := 1; i <= c.Nodes.Hotdesks.Count; i++ {
@@ -335,7 +642,33 @@ func (c *Config) HotdeskSpecs() []NodeSpec {
 	return nodes
 }
 
-// AllNodes returns a flat list of all nodes
+// PrefixFromCIDR returns the first three octets of an IPv4 CIDR plus the
+// trailing dot (e.g. "192.168.20."), so callers can compose static host IPs
+// in that range. Returns fallback for malformed CIDRs.
+func PrefixFromCIDR(cidr, fallback string) string {
+	parts := strings.Split(cidr, ".")
+	if len(parts) >= 3 {
+		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
+	}
+	return fallback
+}
+
+// PrimaryLB returns the first load balancer node (the keepalived MASTER
+// candidate). Returns a zero NodeDetail when none is configured.
+func (c *Config) PrimaryLB() NodeDetail {
+	if len(c.Nodes.LBs) == 0 {
+		return NodeDetail{}
+	}
+	return c.Nodes.LBs[0]
+}
+
+// LBVIP returns the keepalived floating address clients (and the router DNAT)
+// use to reach the CMS.
+func (c *Config) LBVIP() string {
+	return c.Network.Main.VIP
+}
+
+// AllNodes returns all nodes across both networks
 func (c *Config) AllNodes() []NodeSpec {
 	var all []NodeSpec
 	all = append(all, c.InternalNodes()...)
@@ -348,7 +681,8 @@ func (c *Config) AllNodes() []NodeSpec {
 	return all
 }
 
-// AllNodeIPs returns all IPs
+// AllNodeIPs returns every configured node IP, plus the jumpstart's
+// main-network address.
 func (c *Config) AllNodeIPs() []string {
 	var ips []string
 	for _, n := range c.AllNodes() {
@@ -362,13 +696,20 @@ func (c *Config) AllNodeIPs() []string {
 	return ips
 }
 
-// SSHOptions returns SSH option flags
+// SSHOptions returns the OpenSSH -o flags derived from the config, defaulting
+// ConnectTimeout to 10s when unset (OpenSSH treats 0 as "never time out").
 func (c *Config) SSHOptions() []string {
+	connectTimeout := int(c.SSH.ConnectTimeout.Seconds())
+	// OpenSSH treats -o ConnectTimeout=0 as "never time out"; use the same
+	// default as the CLI (10s) instead of an unbounded connect.
+	if connectTimeout <= 0 {
+		connectTimeout = 10
+	}
 	opts := []string{
 		"-i", c.SSH.PrivateKey,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", fmt.Sprintf("ConnectTimeout=%d", int(c.SSH.ConnectTimeout.Seconds())),
+		"-o", fmt.Sprintf("ConnectTimeout=%d", connectTimeout),
 	}
 	if c.SSH.BatchMode {
 		opts = append(opts, "-o", "BatchMode=yes")

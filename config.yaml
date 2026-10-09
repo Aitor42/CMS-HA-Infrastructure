@@ -6,6 +6,12 @@ vm:
   libvirt_uri: "qemu:///system"
 
 ssh:
+  # Non-root deploy account created by every installer (Cobbler autoinstall and
+  # cloud-init). Privileged remote commands are elevated with `sudo -n`; direct
+  # root logins are disabled (`PermitRootLogin no`).
+  user: "ubuntu"
+  # TOFU database where VM host keys are pinned on first contact.
+  known_hosts_file: "${HOME}/.ssh/cms_known_hosts"
   private_key: "${HOME}/.ssh/id_ed25519_gar"
   connect_timeout: 10s
   batch_mode: true
@@ -21,6 +27,9 @@ network:
     gateway: "192.168.20.1"
     domain: "main.local"
     bridge: "virbr-main"
+    # keepalived floating VIP: clients reach the CMS here and the router DNATs
+    # to it. The LBs themselves live on .103/.104.
+    vip: "192.168.20.100"
 
 nodes:
   router:
@@ -65,6 +74,18 @@ nodes:
       vcpus: 1
       disk_gb: 8
       drbd_disk_gb: 3
+    # Third control-plane server: without it the embedded etcd cluster has no
+    # quorum (2 members tolerate 0 failures) and the API server goes
+    # read-only when one master is lost, which blocks DRBD/MariaDB failover.
+    # It carries no DRBD disk: replication stays a 2-node setup on master1/2.
+    - name: "internal-master3"
+      ip: "192.168.10.16"
+      fqdn: "internal-master3.internal.local"
+      mac: "52:54:00:10:01:16"
+      ram_install_mb: 4096
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
   workers:
     - name: "internal-worker1"
       ip: "192.168.10.13"
@@ -100,15 +121,23 @@ nodes:
     ram_final_mb: 1024
     vcpus: 1
     disk_gb: 10
-  lb:
-    name: "main-lb"
-    ip: "192.168.20.100"
-    fqdn: "main-lb.main.local"
-    mac: "52:54:00:10:02:64"
-    ram_install_mb: 3072
-    ram_final_mb: 768
-    vcpus: 1
-    disk_gb: 8
+  lbs:
+    - name: "main-lb1"
+      ip: "192.168.20.103"
+      fqdn: "main-lb1.main.local"
+      mac: "52:54:00:10:02:67"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+    - name: "main-lb2"
+      ip: "192.168.20.104"
+      fqdn: "main-lb2.main.local"
+      mac: "52:54:00:10:02:68"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
   cms_frontends:
     - name: "main-cms1"
       ip: "192.168.20.101"
@@ -138,9 +167,13 @@ nodes:
 database:
   name: "wordpress"
   user: "wp_user"
-  password: "WpS3cur3P4ss!"
-  root_password: "mysqlrootpass"
+  password: ""
+  root_password: ""
+  exporter_password: ""
   port: 30306
+
+wordpress:
+  admin_password: ""
 
 monitoring:
   exporters:
@@ -150,11 +183,70 @@ monitoring:
 
 pki:
   ca_port: 8443
-  provisioner_password: "StepCA-Pr0v1s10ner!"
+  provisioner_password: ""
   step_version: "0.27.5"
   step_ca_version: "0.27.5"
   domain: "ca.internal.local"
+  # Common name of the internal CA. The verify phase asserts the load-balancer
+  # certificate was issued by this CA (i.e. is no longer self-signed).
+  ca_name: "CMS Local CA"
+  # DNS SANs for the load-balancer certificate. The keepalived VIP and both
+  # balancer addresses are added automatically (clients use the VIP).
+  cert_dns_names:
+    - "cms.fake-enterprise.com"
+  # Minimum remaining validity required by `cms-ha verify` (renewal keeps the
+  # certificate above this threshold).
+  cert_min_valid_days: 30
+  # Requested certificate lifetime (hours). Must exceed cert_min_valid_days.
+  # 2160h = 90 days, so renewal kicks in around 30 days remaining.
+  cert_lifetime_hours: 2160
 
 deploy:
   ssh_timeout: 600s
   stagger_delay: 5s
+
+drbd:
+  # STONITH fencing (split-brain prevention). Before a node promotes itself it
+  # powers off the failed peer at the hypervisor, and only promotes once the
+  # power-off is confirmed. Set fencing: false only for demos: the legacy
+  # best-effort ICMP heuristic cannot rule out split-brain.
+  fencing: true
+  # Leave empty to auto-derive an SSH+virsh command against the hypervisor at
+  # <internal network>.254 (the deploy phase provisions the SSH key). Override
+  # for a different transport. {domain} is replaced with the peer domain name.
+  fence_command: ""
+  fence_state_command: ""
+
+backup:
+  # Off-DRBD backup target. Garage (S3-compatible) runs as a container on the
+  # hypervisor, on a data volume outside the DRBD device, so a split-brain
+  # never takes the copies with it. Set engine: "" to disable provisioning.
+  engine: "garage"
+  # Pinned image tag (no floating tags).
+  garage_version: "v2.4.1"
+  # Hypervisor directory for Garage data + metadata (outside the DRBD device).
+  data_dir: "/var/lib/cms-garage"
+  # S3 API port, published on the hypervisor's internal address only.
+  s3_port: 3900
+  s3_region: "garage"
+  bucket: "cms-backups"
+  # S3 access key id (not secret on its own).
+  access_key: "GKcmshabackup0000000000"
+  # S3 secret (encrypt with: cms-ha secrets encrypt). Required when engine is set.
+  secret_key: ""
+  # Keep this many days of objects (bucket) and dump files (staging volume).
+  retention_days: 7
+  # Daily dump+upload and restore drill (cron).
+  schedule: "0 2 * * *"
+  restore_test_schedule: "30 3 * * *"
+
+traffic:
+  # Load/smoke generator. The custom in-process HTTP generator was replaced by
+  # k6, run from a pinned container on the hypervisor (docker/podman required).
+  # Pinned image tag (no floating tags).
+  k6_version: "0.55.0"
+  # Stream k6 metrics to Prometheus through its remote-write endpoint so RPS,
+  # p95/p99 and error rate show up in Grafana. Empty disables the output.
+  prometheus_rw_url: "http://192.168.10.20:9090/api/v1/write"
+  # HTTP Host header the CMS vhost expects.
+  vhost: "cms.fake-enterprise.com"
