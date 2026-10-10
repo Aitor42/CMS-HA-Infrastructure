@@ -5,6 +5,7 @@ import (
 	"context"
 	crand "crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,6 +32,16 @@ type Options struct {
 }
 
 // Phase implements the VM initialization phase (Phase 00).
+//
+// MIGRATION STATUS: Ansible (ansible/playbooks/provision.yml,
+// generated from config.yaml by `cms-ha inventory`) is the declared
+// infrastructure-as-code path that creates and declares libvirt networks,
+// disks and domains. This Go/virsh creation phase is kept on purpose during
+// the coexistence window so the existing deploy pipeline keeps working until
+// the Ansible playbook has been validated against a real hypervisor. Once
+// that is confirmed, this creation path is removed and only the thin runtime
+// libvirt primitive (start/stop/shrink, fencing) remains. Do not add new
+// creation logic here — put it in the Ansible roles instead.
 type Phase struct {
 	cfg  *config.Config
 	lv   *libvirt.Client
@@ -67,7 +78,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	if p.opts.Recreate {
 		logging.Info("Recreate mode: cleaning existing resources first...")
 		if err := p.cleanup(ctx); err != nil {
-			logging.Warn("Cleanup before recreate had errors: %v", err)
+			return fmt.Errorf("cleanup before recreate: %w", err)
 		}
 	}
 
@@ -124,7 +135,6 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create storage dir %s: %w", dir, err)
 	}
-	_ = os.Chmod(dir, 0755)
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err == nil && stat.Bsize > 0 {
 		freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
@@ -287,8 +297,20 @@ type autoinstallData struct {
 func (p *Phase) deployJumpstart(ctx context.Context) error {
 	logging.Info("Deploying Jumpstart VM...")
 
-	// Clean up existing jumpstart
-	p.destroyVM(ctx, p.cfg.Nodes.Jumpstart.Name)
+	if states, err := p.lv.DomainStates(ctx); err != nil {
+		return fmt.Errorf("list domains: %w", err)
+	} else if state, exists := states[p.cfg.Nodes.Jumpstart.Name]; exists {
+		if state != "running" {
+			if err := p.lv.Start(ctx, p.cfg.Nodes.Jumpstart.Name); err != nil {
+				return fmt.Errorf("start existing Jumpstart VM: %w", err)
+			}
+		}
+		if err := p.pool.WaitForSSH(ctx, p.cfg.Nodes.Jumpstart.IP, 3*time.Minute); err != nil {
+			return fmt.Errorf("existing Jumpstart VM did not become reachable: %w", err)
+		}
+		logging.Info("Jumpstart VM already exists and is reachable; leaving its disk intact (use --recreate to replace it)")
+		return nil
+	}
 
 	// Ensure SSH key exists
 	keyPath := p.cfg.SSH.PrivateKey
@@ -297,12 +319,18 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return fmt.Errorf("SSH key setup failed: %w", err)
 	}
 
-	// Generate a random password hash for the admin user (password login disabled)
-	passHash := generateRandomPasswordHash()
+	// Generate a random password hash for the admin user (password login disabled).
+	// A failure here must abort: falling back to a static, publicly known hash
+	// would ship a guessable admin credential into the cloud-init user-data.
+	passHash, err := generateRandomPasswordHash()
+	if err != nil {
+		return fmt.Errorf("generate admin password hash: %w", err)
+	}
 
 	// Determine WAN interface config (if libvirt default network exists)
+	hasDefaultNet := p.lv.NetExists(ctx, "default")
 	wanIfaceConfig := ""
-	if p.lv.NetExists(ctx, "default") {
+	if hasDefaultNet {
 		wanIfaceConfig = fmt.Sprintf("\n      net2:\n        match:\n          macaddress: \"%s\"\n        dhcp4: true\n        dhcp4-overrides:\n          route-metric: 100\n          use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
 	}
 
@@ -364,7 +392,9 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 
 	// Create main disk
 	diskPath := filepath.Join(p.cfg.VM.StorageDir, "jumpstart.qcow2")
-	os.Remove(diskPath) // remove if exists
+	if err := ensureDiskPathAvailable(diskPath); err != nil {
+		return err
+	}
 	if err := libvirt.CreateDisk(ctx, diskPath, p.cfg.Nodes.Jumpstart.DiskGB, "qcow2"); err != nil {
 		return fmt.Errorf("failed to create jumpstart disk: %w", err)
 	}
@@ -375,7 +405,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		{Network: "internal", Mac: p.cfg.Nodes.Jumpstart.MACInternal},
 		{Network: "main", Mac: p.cfg.Nodes.Jumpstart.MACMain},
 	}
-	if p.lv.NetExists(ctx, "default") {
+	if hasDefaultNet {
 		nets = append(nets, libvirt.NetworkOpt{Network: "default", Mac: p.cfg.Nodes.Jumpstart.MACWAN})
 	}
 
@@ -425,9 +455,19 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 	logging.Info("Deploying client nodes...")
 	dir := p.cfg.VM.StorageDir
 
+	// One `virsh list --all` snapshot for the whole deployment instead of one
+	// `virsh domstate` per node.
+	existing, err := p.lv.DomainStates(ctx)
+	if err != nil {
+		return fmt.Errorf("list existing domains: %w", err)
+	}
+	exists := func(name string) bool {
+		_, ok := existing[name]
+		return ok
+	}
+
 	// Router (3 NICs: internal, main, WAN)
 	router := p.cfg.Nodes.Router
-	p.destroyVM(ctx, router.Name)
 	routerNets := []libvirt.NetworkOpt{
 		{Network: "internal", Mac: router.MACInternal},
 		{Network: "main", Mac: router.MACMain},
@@ -439,7 +479,7 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 	}
 	routerNets = append(routerNets, libvirt.NetworkOpt{Network: wanNet, Mac: router.MACWAN})
 
-	if err := p.createClientVM(ctx, router, dir, routerNets, nil); err != nil {
+	if err := p.createClientVM(ctx, router, dir, routerNets, nil, exists(router.Name)); err != nil {
 		return fmt.Errorf("failed to create router VM: %w", err)
 	}
 
@@ -450,18 +490,24 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 	}
 	for _, node := range internalNodes {
 		nets := []libvirt.NetworkOpt{{Network: "internal", Mac: node.MAC}}
-		if err := p.createClientVM(ctx, node, dir, nets, nil); err != nil {
+		if err := p.createClientVM(ctx, node, dir, nets, nil, exists(node.Name)); err != nil {
 			return fmt.Errorf("failed to create VM %s: %w", node.Name, err)
 		}
 	}
 
-	// Masters with extra DRBD disk
+	// Masters with drbd_disk_gb > 0 get the extra replicated disk; the shipped
+	// topology sets it only on master1/master2, so DRBD stays a bounded 2-node
+	// setup.
 	for _, master := range p.cfg.Nodes.Masters {
 		nets := []libvirt.NetworkOpt{{Network: "internal", Mac: master.MAC}}
-		extraDisks := []libvirt.DiskOpt{
-			{Path: filepath.Join(dir, master.Name+"-drbd.qcow2"), SizeGB: master.DRBDDiskGB},
+		var extraDisks []libvirt.DiskOpt
+		if master.DRBDDiskGB > 0 {
+			extraDisks = append(extraDisks, libvirt.DiskOpt{
+				Path:   filepath.Join(dir, master.Name+"-drbd.qcow2"),
+				SizeGB: master.DRBDDiskGB,
+			})
 		}
-		if err := p.createClientVM(ctx, master, dir, nets, extraDisks); err != nil {
+		if err := p.createClientVM(ctx, master, dir, nets, extraDisks, exists(master.Name)); err != nil {
 			return fmt.Errorf("failed to create master VM %s: %w", master.Name, err)
 		}
 	}
@@ -469,21 +515,22 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 	// Workers
 	for _, worker := range p.cfg.Nodes.Workers {
 		nets := []libvirt.NetworkOpt{{Network: "internal", Mac: worker.MAC}}
-		if err := p.createClientVM(ctx, worker, dir, nets, nil); err != nil {
+		if err := p.createClientVM(ctx, worker, dir, nets, nil, exists(worker.Name)); err != nil {
 			return fmt.Errorf("failed to create worker VM %s: %w", worker.Name, err)
 		}
 	}
 
 	// Main network nodes
-	lb := p.cfg.Nodes.LB
-	lbNets := []libvirt.NetworkOpt{{Network: "main", Mac: lb.MAC}}
-	if err := p.createClientVM(ctx, lb, dir, lbNets, nil); err != nil {
-		return fmt.Errorf("failed to create LB VM: %w", err)
+	for _, lb := range p.cfg.Nodes.LBs {
+		lbNets := []libvirt.NetworkOpt{{Network: "main", Mac: lb.MAC}}
+		if err := p.createClientVM(ctx, lb, dir, lbNets, nil, exists(lb.Name)); err != nil {
+			return fmt.Errorf("failed to create LB VM %s: %w", lb.Name, err)
+		}
 	}
 
 	for _, cms := range p.cfg.Nodes.CMSFrontends {
 		nets := []libvirt.NetworkOpt{{Network: "main", Mac: cms.MAC}}
-		if err := p.createClientVM(ctx, cms, dir, nets, nil); err != nil {
+		if err := p.createClientVM(ctx, cms, dir, nets, nil, exists(cms.Name)); err != nil {
 			return fmt.Errorf("failed to create CMS VM %s: %w", cms.Name, err)
 		}
 	}
@@ -501,7 +548,7 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 			VCPUs:        hd.VCPUs,
 			DiskGB:       hd.DiskGB,
 		}
-		if err := p.createClientVM(ctx, n, dir, nets, nil); err != nil {
+		if err := p.createClientVM(ctx, n, dir, nets, nil, exists(hd.Name)); err != nil {
 			return fmt.Errorf("failed to create hotdesk VM %s: %w", hd.Name, err)
 		}
 	}
@@ -510,16 +557,27 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 	return nil
 }
 
-// createClientVM creates a single client VM with PXE boot.
-func (p *Phase) createClientVM(ctx context.Context, node config.NodeDetail, vmDir string, nets []libvirt.NetworkOpt, extraDisks []libvirt.DiskOpt) error {
+// createClientVM creates a single client VM with PXE boot. exists reports
+// whether the domain is already defined (resolved once by the caller).
+func (p *Phase) createClientVM(ctx context.Context, node config.NodeDetail, vmDir string, nets []libvirt.NetworkOpt, extraDisks []libvirt.DiskOpt, exists bool) error {
+	if exists {
+		logging.Info("VM %s already exists; leaving it intact (use --recreate to replace it)", node.Name)
+		return nil
+	}
 	logging.Info("Creating VM: %s (RAM: %d MB, vCPUs: %d, Disk: %d GB)",
 		node.Name, node.RAMInstallMB, node.VCPUs, node.DiskGB)
 
-	p.destroyVM(ctx, node.Name)
-
 	diskPath := filepath.Join(vmDir, node.Name+".qcow2")
+	if err := ensureDiskPathAvailable(diskPath); err != nil {
+		return err
+	}
 	disks := []libvirt.DiskOpt{{Path: diskPath, SizeGB: node.DiskGB}}
 	disks = append(disks, extraDisks...)
+	for _, disk := range extraDisks {
+		if err := ensureDiskPathAvailable(disk.Path); err != nil {
+			return err
+		}
+	}
 
 	err := p.lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
 		Name:          node.Name,
@@ -543,53 +601,115 @@ func (p *Phase) createClientVM(ctx context.Context, node config.NodeDetail, vmDi
 	return nil
 }
 
+func ensureDiskPathAvailable(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("disk %s exists without a registered VM; refusing to overwrite it (use init-vms --recreate after confirming the data can be discarded)", path)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check disk path %s: %w", path, err)
+	}
+	return nil
+}
+
+// CleanupOptions specifies options for the cleanup operation.
+type CleanupOptions struct {
+	VMsOnly      bool
+	NetworksOnly bool
+}
+
+// Cleanup destroys all VMs and/or virtual networks managed by the infrastructure.
+func Cleanup(ctx context.Context, cfg *config.Config, lv *libvirt.Client, opts CleanupOptions) error {
+	p := &Phase{cfg: cfg, lv: lv}
+	return p.cleanupWithOptions(ctx, opts)
+}
+
 // cleanup destroys all VMs and networks.
 func (p *Phase) cleanup(ctx context.Context) error {
+	return p.cleanupWithOptions(ctx, CleanupOptions{})
+}
+
+func (p *Phase) cleanupWithOptions(ctx context.Context, opts CleanupOptions) error {
+	if opts.VMsOnly && opts.NetworksOnly {
+		return fmt.Errorf("VMsOnly and NetworksOnly are mutually exclusive")
+	}
+
 	timer := logging.PhaseStart("Cleanup VMs and Networks")
 	defer timer.End()
 
-	logging.Info("Destroying all VMs and networks...")
+	var errs []error
 
-	// Destroy all VMs
-	allNodes := p.cfg.AllNodes()
-	for _, node := range allNodes {
-		p.destroyVM(ctx, node.Name)
-	}
-
-	// Remove disk files
-	for _, node := range allNodes {
-		os.Remove(filepath.Join(p.cfg.VM.StorageDir, node.Name+".qcow2"))
-		os.Remove(filepath.Join(p.cfg.VM.StorageDir, node.Name+"-drbd.qcow2"))
-	}
-
-	// Destroy networks
-	for _, net := range []string{"internal", "main"} {
-		if p.lv.NetExists(ctx, net) {
-			if err := p.lv.NetDestroy(ctx, net); err != nil {
-				logging.Warn("Failed to destroy network %s: %v", net, err)
-			}
-			if err := p.lv.NetUndefine(ctx, net); err != nil {
-				logging.Warn("Failed to undefine network %s: %v", net, err)
+	if !opts.NetworksOnly {
+		logging.Info("Destroying all VMs and disk images...")
+		allNodes := p.cfg.AllNodes()
+		// One `virsh list --all` snapshot: a libvirt query failure is not
+		// evidence the domains are absent, so abort VM destruction rather than
+		// risk deleting the disks of live VMs.
+		states, err := p.lv.DomainStates(ctx)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("list domains: %w", err))
+		} else {
+			for _, node := range allNodes {
+				state, exists := states[node.Name]
+				if err := p.destroyVM(ctx, node.Name, state, exists); err != nil {
+					errs = append(errs, fmt.Errorf("remove VM %s: %w", node.Name, err))
+				}
 			}
 		}
 	}
 
+	if !opts.VMsOnly {
+		logging.Info("Destroying virtual networks...")
+		for _, net := range []string{"internal", "main"} {
+			exists, err := p.lv.NetExistsChecked(ctx, net)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("check network %s: %w", net, err))
+				continue
+			}
+			if !exists {
+				continue
+			}
+			_ = p.lv.NetDestroy(ctx, net) // An inactive network may already be stopped.
+			if err := p.lv.NetUndefine(ctx, net); err != nil {
+				errs = append(errs, fmt.Errorf("undefine network %s: %w", net, err))
+			}
+		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
 	logging.Success("Cleanup completed")
 	return nil
 }
 
-// destroyVM safely destroys and undefines a VM if it exists, and cleans up its disks.
-func (p *Phase) destroyVM(ctx context.Context, name string) {
-	if p.lv.DomainExists(ctx, name) {
+// destroyVM safely destroys and undefines a VM if it exists, and cleans up its
+// disks. exists/state come from a single caller-side domain snapshot.
+func (p *Phase) destroyVM(ctx context.Context, name, state string, exists bool) error {
+	if exists {
 		logging.Info("Removing existing VM: %s", name)
-		p.lv.Destroy(ctx, name)
-		p.lv.Undefine(ctx, name)
+		if state != "shut off" && state != "crashed" {
+			if err := p.lv.Destroy(ctx, name); err != nil {
+				return fmt.Errorf("stop domain: %w", err)
+			}
+		}
+		if err := p.lv.Undefine(ctx, name); err != nil {
+			return fmt.Errorf("undefine domain: %w", err)
+		}
 	}
-	os.Remove(filepath.Join(p.cfg.VM.StorageDir, name+".qcow2"))
-	os.Remove(filepath.Join(p.cfg.VM.StorageDir, name+"-drbd.qcow2"))
+	for _, disk := range []string{
+		filepath.Join(p.cfg.VM.StorageDir, name+".qcow2"),
+		filepath.Join(p.cfg.VM.StorageDir, name+"-drbd.qcow2"),
+	} {
+		if err := os.Remove(disk); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove disk %s: %w", disk, err)
+		}
+	}
 	if name == p.cfg.Nodes.Jumpstart.Name {
-		os.Remove(filepath.Join(p.cfg.VM.StorageDir, "seed.iso"))
+		seed := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
+		if err := os.Remove(seed); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove seed ISO: %w", err)
+		}
 	}
+	return nil
 }
 
 // ensureSSHKey returns the public key for the given private key path, generating it if needed.
@@ -639,14 +759,19 @@ func findUbuntuISO(dir string) (string, error) {
 
 // generateRandomPasswordHash generates a random SHA-512 password hash using crypto/rand.
 // The actual password is random and discarded; SSH key auth is enforced and late-commands locks the accounts.
-func generateRandomPasswordHash() string {
+func generateRandomPasswordHash() (string, error) {
 	b := make([]byte, 16)
-	_, _ = crand.Read(b)
+	if _, err := crand.Read(b); err != nil {
+		return "", fmt.Errorf("generate random password: %w", err)
+	}
 	randSecret := hex.EncodeToString(b)
 	out, err := exec.Command("openssl", "passwd", "-6", randSecret).Output() // #nosec G204 -- openssl with generated random string
-	if err == nil && len(strings.TrimSpace(string(out))) > 0 {
-		return strings.TrimSpace(string(out))
+	if err != nil {
+		return "", fmt.Errorf("openssl passwd -6 failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	// Fallback to valid standard SHA-512 crypt format hash
-	return "$6$GAR_RANDOM$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
+	hash := strings.TrimSpace(string(out))
+	if hash == "" {
+		return "", fmt.Errorf("openssl passwd -6 returned an empty hash")
+	}
+	return hash, nil
 }
