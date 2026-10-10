@@ -15,7 +15,6 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/pkg/sftp"
-	gossh "golang.org/x/crypto/ssh"
 )
 
 type Phase struct {
@@ -27,18 +26,19 @@ func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-func (p *Phase) Name() string        { return "01-setup-cobbler" }
-func (p *Phase) Description() string { return "Install and configure Cobbler PXE provisioning server on Jumpstart" }
+func (p *Phase) Name() string { return "01-setup-cobbler" }
+func (p *Phase) Description() string {
+	return "Install and configure Cobbler PXE provisioning server on Jumpstart"
+}
 
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
-	
-	logging.Info("Elevating root SSH on Jumpstart...")
-	if err := p.elevateRootSSH(ctx, jumpIP); err != nil {
-		return fmt.Errorf("failed to elevate root SSH: %w", err)
+
+	if err := p.waitForJumpstartSSH(ctx, jumpIP); err != nil {
+		return fmt.Errorf("failed waiting for Jumpstart SSH: %w", err)
 	}
 
 	logging.Info("Transferring Ubuntu ISO...")
@@ -65,82 +65,17 @@ func (p *Phase) Run(ctx context.Context) error {
 	return nil
 }
 
-func (p *Phase) elevateRootSSH(ctx context.Context, jumpIP string) error {
-	// First check if root SSH works directly
-	logging.Info("Waiting for SSH on Jumpstart (%s)...", jumpIP)
-	if err := p.pool.WaitForSSH(ctx, jumpIP, 45*time.Second); err == nil {
-		logging.Success("Root SSH already accessible on %s", jumpIP)
-		return nil
+// waitForJumpstartSSH waits until the Jumpstart node accepts SSH as the
+// configured non-root deploy account (`ssh.user`). Direct root logins are
+// disabled by the installers, so the orchestrator never tries to enable them;
+// privileged commands are elevated transparently with sudo (see docs/SECURITY.md).
+func (p *Phase) waitForJumpstartSSH(ctx context.Context, jumpIP string) error {
+	logging.Info("Waiting for SSH on Jumpstart (%s) as %q...", jumpIP, p.cfg.SSHUser())
+	if err := p.pool.WaitForSSH(ctx, jumpIP, 5*time.Minute); err != nil {
+		return fmt.Errorf("timed out waiting for SSH on %s: %w", jumpIP, err)
 	}
-
-	logging.Info("Root SSH not directly accessible; attempting elevation via non-root user (ubuntu/admin) on %s...", jumpIP)
-	keyBytes, err := os.ReadFile(p.cfg.SSH.PrivateKey)
-	if err != nil {
-		return fmt.Errorf("failed to read private key: %w", err)
-	}
-	signer, err := gossh.ParsePrivateKey(keyBytes)
-	if err != nil {
-		return fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	fallbackUsers := []string{"ubuntu", "admin"}
-	var unprivilegedClient *gossh.Client
-	pollTimeout := time.After(5 * time.Minute)
-	ticker := time.NewTicker(3 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-pollTimeout:
-			return fmt.Errorf("timed out waiting for SSH (ubuntu/admin/root) on %s", jumpIP)
-		case <-ticker.C:
-			for _, u := range fallbackUsers {
-				cfg := &gossh.ClientConfig{
-					User:            u,
-					Auth:            []gossh.AuthMethod{gossh.PublicKeys(signer)},
-					HostKeyCallback: gossh.InsecureIgnoreHostKey(),
-					Timeout:         5 * time.Second,
-				}
-				if c, err := gossh.Dial("tcp", jumpIP+":22", cfg); err == nil {
-					unprivilegedClient = c
-					break
-				}
-			}
-		}
-		if unprivilegedClient != nil {
-			break
-		}
-	}
-	defer unprivilegedClient.Close()
-
-	elevateCmd := `sudo bash -c '
-mkdir -p /root/.ssh
-for f in /home/*/.ssh/authorized_keys; do
-    [ -f "$f" ] && cat "$f" >> /root/.ssh/authorized_keys
-done
-sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys 2>/dev/null || true
-chown -R root:root /root/.ssh
-chmod 700 /root/.ssh
-chmod 600 /root/.ssh/authorized_keys
-mkdir -p /etc/ssh/sshd_config.d
-echo "PermitRootLogin prohibit-password" > /etc/ssh/sshd_config.d/01-permitrootlogin.conf
-systemctl reload ssh 2>/dev/null || service ssh reload 2>/dev/null || true
-'`
-	session, err := unprivilegedClient.NewSession()
-	if err != nil {
-		return fmt.Errorf("failed to open session: %w", err)
-	}
-	defer session.Close()
-
-	if out, err := session.CombinedOutput(elevateCmd); err != nil {
-		return fmt.Errorf("elevation script failed: %w: %s", err, string(out))
-	}
-
-	logging.Success("Root SSH successfully elevated on %s", jumpIP)
-	p.pool.Invalidate(jumpIP)
-	return p.pool.WaitForSSH(ctx, jumpIP, 30*time.Second)
+	logging.Success("SSH accessible on %s", jumpIP)
+	return nil
 }
 
 func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
@@ -149,7 +84,7 @@ func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
 	if err != nil || len(matches) == 0 {
 		return fmt.Errorf("could not find Ubuntu ISO in %s", p.cfg.VM.StorageDir)
 	}
-	
+
 	isoPath := ""
 	for _, match := range matches {
 		info, err := os.Stat(match)
@@ -161,9 +96,9 @@ func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
 	if isoPath == "" {
 		return fmt.Errorf("could not find an Ubuntu ISO > 1GB in %s", p.cfg.VM.StorageDir)
 	}
-	
+
 	remotePath := "/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
-	
+
 	// Check if already present on Jumpstart
 	_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("[ -f %s ] && [ $(stat -c%%s %s 2>/dev/null || echo 0) -gt 1000000000 ]", remotePath, remotePath))
 	if code == 0 {
@@ -171,25 +106,25 @@ func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
 		return nil
 	}
 
-	// Create dir
 	_, _, _, err = p.pool.RunCommand(ctx, jumpIP, "mkdir -p /var/lib/cobbler/isos")
 	if err != nil {
 		return err
 	}
-	
+
 	logging.Info("Uploading %s to %s", isoPath, remotePath)
 	return p.pool.CopyFile(ctx, jumpIP, isoPath, remotePath)
 }
 
 func (p *Phase) uploadTemplates(ctx context.Context, jumpIP string) error {
 	templates := map[string]string{
-		"templates/systemd/no-rate-limit.conf":           "/tmp/tpl_no_rate_limit.conf",
-		"templates/systemd/isc-dhcp-timeout.conf":        "/tmp/tpl_isc_dhcp_timeout.conf",
-		"templates/systemd/cobblerd-timeout.conf":        "/tmp/tpl_cobblerd_timeout.conf",
-		"templates/cobbler/settings-patch.py":            "/tmp/tpl_settings_patch.py",
-		"templates/cobbler/dhcp.template":                "/tmp/tpl_dhcp.template",
-		"templates/cobbler/named.template":               "/tmp/tpl_named.template",
+		"templates/systemd/no-rate-limit.conf":            "/tmp/tpl_no_rate_limit.conf",
+		"templates/systemd/isc-dhcp-timeout.conf":         "/tmp/tpl_isc_dhcp_timeout.conf",
+		"templates/systemd/cobblerd-timeout.conf":         "/tmp/tpl_cobblerd_timeout.conf",
+		"templates/cobbler/settings-patch.py":             "/tmp/tpl_settings_patch.py",
+		"templates/cobbler/dhcp.template":                 "/tmp/tpl_dhcp.template",
+		"templates/cobbler/named.template":                "/tmp/tpl_named.template",
 		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": "/tmp/tpl_autoinstall.yaml",
+		"templates/cobbler/casper_initrd_tcp.sh":          "/tmp/casper_initrd_tcp.sh",
 	}
 
 	return p.pool.WithSFTP(ctx, jumpIP, func(sftpClient *sftp.Client) error {
@@ -221,7 +156,7 @@ func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
 
 	steps := []string{
 		`add-apt-repository -y universe 2>/dev/null || true && apt-get update -qq`,
-		
+
 		`COBBLER_REPO_24="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_24.04"
 COBBLER_REPO_22="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_22.04"
 if ! grep -q "systemsmanagement.*cobbler" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
@@ -235,16 +170,16 @@ if ! grep -q "systemsmanagement.*cobbler" /etc/apt/sources.list /etc/apt/sources
         apt-get update -qq 2>/dev/null || true
     fi
 fi`,
-		
+
 		`DEBIAN_FRONTEND=noninteractive apt-get install -y cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe shim-signed grub-efi-amd64-signed syslinux-common curl wget rsync || {
     DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe syslinux-common curl wget rsync
 }`,
-		
+
 		`if ! python3 -c "import django" &>/dev/null; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip 2>/dev/null || true
     pip3 install "django>=3.2,<5" --break-system-packages 2>/dev/null || pip3 install "django>=3.2,<5" 2>/dev/null || true
 fi`,
-		
+
 		`for svc in named.service isc-dhcp-server.service cobblerd.service; do
     svc_dir="/etc/systemd/system/${svc}.d"
     mkdir -p "$svc_dir"
@@ -268,7 +203,7 @@ else
 fi`,
 
 		`python3 /tmp/tpl_settings_patch.py`,
-		
+
 		`cp /tmp/tpl_dhcp.template /etc/cobbler/dhcp.template
 cp /tmp/tpl_named.template /etc/cobbler/named.template
 mkdir -p /var/cache/bind/data
@@ -302,10 +237,9 @@ done`,
 		}
 	}
 
-	// Wait for cobblerd
 	logging.Info("Waiting for cobblerd to become active...")
-	err := retry.Poll(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second}, func() (bool, error) {
-		_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, "systemctl is-active --quiet cobblerd")
+	err := retry.PollContext(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second, MaxInterval: 15 * time.Second, Timeout: 2 * time.Minute}, func(attemptCtx context.Context) (bool, error) {
+		_, _, code, _ := p.pool.RunCommand(attemptCtx, jumpIP, "systemctl is-active --quiet cobblerd")
 		return code == 0, nil
 	})
 	if err != nil {
@@ -313,12 +247,14 @@ done`,
 	}
 
 	postSteps := []string{
-		`mkdir -p /var/www/cobbler/pub
+		`set -e
+mkdir -p /var/www/cobbler/pub
 [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
 { cat /root/.ssh/id_ed25519.pub; cat /root/.ssh/authorized_keys 2>/dev/null || true; } | awk '!seen[$0]++' > /var/www/cobbler/pub/authorized_keys
 chmod 644 /var/www/cobbler/pub/authorized_keys`,
 
-		`ISO_FILE="/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
+		`set -e
+ISO_FILE="/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
 MOUNT_POINT="/mnt/ubuntu-24.04"
 cobbler system list 2>/dev/null | awk '{print $1}' | while read -r sys; do
     [ -n "$sys" ] && cobbler system remove --name="$sys" &>/dev/null || true
@@ -327,20 +263,34 @@ cobbler profile remove --name="ubuntu-24.04-x86_64" 2>/dev/null || true
 cobbler distro  remove --name="ubuntu-24.04-x86_64" 2>/dev/null || true
 
 mkdir -p "$MOUNT_POINT"
-mount -o loop "$ISO_FILE" "$MOUNT_POINT" 2>/dev/null || true
-mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
-rsync -a "${MOUNT_POINT}/" /var/www/cobbler/distro_mirror/ubuntu-24.04/ 2>/dev/null || true
-umount "$MOUNT_POINT" 2>/dev/null || true
+if [ -f "$ISO_FILE" ]; then
+    # mount/rsync failures must abort: an incomplete mirror breaks
+    # 'cobbler distro add' or produces a PXE installer that never boots.
+    mount -o loop "$ISO_FILE" "$MOUNT_POINT"
+    mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
+    rsync -a "${MOUNT_POINT}/" /var/www/cobbler/distro_mirror/ubuntu-24.04/
+    umount "$MOUNT_POINT"
+fi
+
+# Casper (BusyBox nfsmount) mounts the PXE root via NFSv3/UDP by default and
+# ignores all command-line NFS options; concurrent clients then die in
+# SQASHFS I/O errors and install-batches never sees SSH. The helper verifies
+# the mirror (md5sum -c) and appends a cpio segment to casper/initrd that
+# forces the mount over TCP (ro,tcp); a failure here must abort the phase.
+install -m 0755 /tmp/casper_initrd_tcp.sh /usr/local/bin/casper_initrd_tcp.sh
+/usr/local/bin/casper_initrd_tcp.sh /var/www/cobbler/distro_mirror/ubuntu-24.04
 
 cobbler distro add --name="ubuntu-24.04-x86_64" --kernel="/var/www/cobbler/distro_mirror/ubuntu-24.04/casper/vmlinuz" --initrd="/var/www/cobbler/distro_mirror/ubuntu-24.04/casper/initrd" --breed=ubuntu`,
 
-		`mkdir -p /etc/cobbler/autoinstall_templates /var/lib/cobbler/templates
+		`set -e
+mkdir -p /etc/cobbler/autoinstall_templates /var/lib/cobbler/templates
 cp /tmp/tpl_autoinstall.yaml /etc/cobbler/autoinstall_templates/ubuntu-24.04-autoinstall.yaml
 cp /etc/cobbler/autoinstall_templates/ubuntu-24.04-autoinstall.yaml /var/lib/cobbler/templates/ubuntu-24.04-autoinstall.yaml
 
 cobbler profile add --name="ubuntu-24.04-x86_64" --distro="ubuntu-24.04-x86_64" --autoinstall="ubuntu-24.04-autoinstall.yaml" --autoinstall-meta="hostname=default"`,
 
-		`cobbler mkloaders 2>/dev/null || true
+		`set -e
+cobbler mkloaders 2>/dev/null || true
 cobbler sync`,
 	}
 
@@ -357,18 +307,27 @@ cobbler sync`,
 
 func (p *Phase) verifyCobbler(ctx context.Context, jumpIP string) error {
 	services := []string{"cobblerd", "apache2", "tftpd-hpa", "isc-dhcp-server", "named", "nfs-kernel-server"}
-	var failed []string
-	for _, svc := range services {
-		err := retry.Poll(ctx, retry.Config{MaxAttempts: 5, Interval: 1 * time.Second}, func() (bool, error) {
-			_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("systemctl is-active --quiet %s", svc))
-			return code == 0, nil
-		})
-		if err != nil {
-			failed = append(failed, svc)
-			logging.Warn("Service %s is not active after wait", svc)
+	// A single `systemctl is-active` call checks every unit at once (one SSH
+	// round-trip per poll instead of one per service) and exits non-zero while
+	// any of them is inactive.
+	cmd := "systemctl is-active " + strings.Join(services, " ")
+	var out string
+	err := retry.PollContext(ctx, retry.Config{MaxAttempts: 10, Interval: 1 * time.Second, Timeout: 30 * time.Second}, func(attemptCtx context.Context) (bool, error) {
+		o, _, code, _ := p.pool.RunCommand(attemptCtx, jumpIP, cmd)
+		out = o
+		return code == 0, nil
+	})
+	if err != nil {
+		var failed []string
+		states := strings.Fields(strings.TrimSpace(out))
+		for i, svc := range services {
+			if i < len(states) && states[i] != "active" {
+				failed = append(failed, fmt.Sprintf("%s (%s)", svc, states[i]))
+			}
 		}
-	}
-	if len(failed) > 0 {
+		if len(failed) == 0 {
+			return fmt.Errorf("cobbler verification failed: %w", err)
+		}
 		return fmt.Errorf("cobbler verification failed: inactive services: %s", strings.Join(failed, ", "))
 	}
 	return nil
