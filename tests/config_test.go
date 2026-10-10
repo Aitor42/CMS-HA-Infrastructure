@@ -3,6 +3,7 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -30,6 +31,7 @@ network:
     gateway: "192.168.20.1"
     domain: "main.local"
     bridge: "virbr-main"
+    vip: "192.168.20.100"
 
 nodes:
   router:
@@ -67,6 +69,13 @@ nodes:
       vcpus: 1
       disk_gb: 8
       drbd_disk_gb: 3
+    - name: "internal-master3"
+      ip: "192.168.10.16"
+      mac: "52:54:00:10:01:16"
+      ram_install_mb: 4096
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
   workers:
     - name: "internal-worker1"
       ip: "192.168.10.13"
@@ -91,14 +100,21 @@ nodes:
     ram_final_mb: 1024
     vcpus: 1
     disk_gb: 4
-  lb:
-    name: "main-lb"
-    ip: "192.168.20.100"
-    mac: "52:54:00:10:02:64"
-    ram_install_mb: 3072
-    ram_final_mb: 768
-    vcpus: 1
-    disk_gb: 4
+  lbs:
+    - name: "main-lb1"
+      ip: "192.168.20.103"
+      mac: "52:54:00:10:02:67"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 4
+    - name: "main-lb2"
+      ip: "192.168.20.104"
+      mac: "52:54:00:10:02:68"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 4
   cms_frontends:
     - name: "main-cms1"
       ip: "192.168.20.101"
@@ -160,13 +176,13 @@ deploy:
 	}
 
 	internalNodes := cfg.InternalNodes()
-	if len(internalNodes) != 7 {
-		t.Errorf("expected 7 internal nodes, got %d", len(internalNodes))
+	if len(internalNodes) != 8 {
+		t.Errorf("expected 8 internal nodes, got %d", len(internalNodes))
 	}
 
 	mainNodes := cfg.MainNodes()
-	if len(mainNodes) != 5 {
-		t.Errorf("expected 5 main nodes, got %d", len(mainNodes))
+	if len(mainNodes) != 6 {
+		t.Errorf("expected 6 main nodes, got %d", len(mainNodes))
 	}
 
 	allNodes := cfg.AllNodes()
@@ -222,7 +238,7 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			Network: config.NetworkConfig{
 				Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
-				Main:     config.NetworkDetail{CIDR: "192.168.20.0/24"},
+				Main:     config.NetworkDetail{CIDR: "192.168.20.0/24", VIP: "192.168.20.100"},
 			},
 			Nodes: config.NodesConfig{
 				Router:    config.NodeDetail{Name: "ufw-router", IP: "192.168.10.1"},
@@ -230,8 +246,12 @@ func TestConfig_Validate(t *testing.T) {
 				Masters: []config.NodeDetail{
 					{Name: "master1", IP: "192.168.10.11"},
 					{Name: "master2", IP: "192.168.10.12"},
+					{Name: "master3", IP: "192.168.10.16"},
 				},
-				LB: config.NodeDetail{Name: "lb", IP: "192.168.20.100"},
+				LBs: []config.NodeDetail{
+					{Name: "lb1", IP: "192.168.20.103"},
+					{Name: "lb2", IP: "192.168.20.104"},
+				},
 				CMSFrontends: []config.NodeDetail{
 					{Name: "cms1", IP: "192.168.20.101"},
 				},
@@ -290,17 +310,55 @@ func TestConfig_Validate(t *testing.T) {
 		cfg := validCfg()
 		cfg.Nodes.Masters = []config.NodeDetail{
 			{Name: "master1", IP: "192.168.10.11"},
+			{Name: "master2", IP: "192.168.10.12"},
 		}
 		if err := cfg.Validate(); err == nil {
-			t.Fatal("expected error for <2 masters")
+			t.Fatal("expected error for <3 masters (even count has no failure tolerance)")
 		}
 	})
 
-	t.Run("missing LB IP", func(t *testing.T) {
+	t.Run("even number of masters is rejected", func(t *testing.T) {
 		cfg := validCfg()
-		cfg.Nodes.LB.IP = ""
+		cfg.Nodes.Masters = []config.NodeDetail{
+			{Name: "master1", IP: "192.168.10.11"},
+			{Name: "master2", IP: "192.168.10.12"},
+			{Name: "master3", IP: "192.168.10.16"},
+			{Name: "master4", IP: "192.168.10.17"},
+		}
 		if err := cfg.Validate(); err == nil {
-			t.Fatal("expected error for missing LB IP")
+			t.Fatal("expected error for an even number of masters (no failure tolerance)")
+		}
+	})
+
+	t.Run("half-configured fence is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.DRBD.FenceCommand = "ssh host sudo virsh destroy {domain}"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error when only fence_command is set")
+		}
+	})
+
+	t.Run("missing LB VIP", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.VIP = ""
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for missing VIP")
+		}
+	})
+
+	t.Run("single load balancer is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.LBs = cfg.Nodes.LBs[:1]
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a single LB (no HA)")
+		}
+	})
+
+	t.Run("VIP colliding with a node is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.VIP = "192.168.20.103"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error when the VIP collides with an LB IP")
 		}
 	})
 
@@ -309,6 +367,262 @@ func TestConfig_Validate(t *testing.T) {
 		cfg.Nodes.CMSFrontends = nil
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for missing CMS frontends")
+		}
+	})
+
+	t.Run("invalid node name", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Router.Name = "router; rm -rf /"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a node name with unsafe characters")
+		}
+	})
+
+	t.Run("invalid database identifier", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Database.Name = "wordpress; DROP"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an unsafe database.name")
+		}
+	})
+
+	t.Run("hotdesk range overflow reports the dedicated message", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Hotdesks = config.HotdesksConf{Count: 60}
+		err := cfg.Validate()
+		if err == nil {
+			t.Fatal("expected error for an overflowing hotdesk range")
+		}
+		// The overflow check must run before the per-node IP sweep, otherwise
+		// this surfaces as the far less clear "invalid IPv4 .../192.168.20.260".
+		if !strings.Contains(err.Error(), "overflows") {
+			t.Errorf("expected the dedicated overflow message, got: %v", err)
+		}
+	})
+
+	t.Run("floating k6 tag is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Traffic.K6Version = "latest"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a floating traffic.k6_version")
+		}
+	})
+
+	t.Run("invalid prometheus remote-write URL is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Traffic.PrometheusRWURL = "192.168.10.20:9090/api/v1/write"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a scheme-less traffic.prometheus_rw_url")
+		}
+	})
+}
+
+func TestConfig_HypervisorIPAndFenceCommands(t *testing.T) {
+	cfg := &config.Config{
+		Network: config.NetworkConfig{
+			Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
+		},
+	}
+
+	if got := cfg.HypervisorIP(); got != "192.168.10.254" {
+		t.Errorf("HypervisorIP() = %q, want 192.168.10.254", got)
+	}
+
+	t.Run("derived fencing commands target the hypervisor", func(t *testing.T) {
+		off, state := cfg.FenceCommands()
+		for _, cmd := range []string{off, state} {
+			if !strings.Contains(cmd, "192.168.10.254") {
+				t.Errorf("derived fence command %q must target the hypervisor address", cmd)
+			}
+			if !strings.Contains(cmd, "{domain}") {
+				t.Errorf("derived fence command %q must keep the {domain} placeholder", cmd)
+			}
+		}
+		if !strings.Contains(off, "destroy") {
+			t.Errorf("power-off command %q must use virsh destroy", off)
+		}
+		if !strings.Contains(state, "domstate") {
+			t.Errorf("state command %q must use virsh domstate", state)
+		}
+	})
+
+	t.Run("custom commands are returned verbatim", func(t *testing.T) {
+		cfg.DRBD.FenceCommand = "fence-off {domain}"
+		cfg.DRBD.FenceStateCommand = "fence-state {domain}"
+		off, state := cfg.FenceCommands()
+		if off != "fence-off {domain}" || state != "fence-state {domain}" {
+			t.Errorf("custom commands not returned verbatim: %q / %q", off, state)
+		}
+	})
+}
+
+func TestConfig_LoadBalancerTLS(t *testing.T) {
+	base := func() *config.Config {
+		return &config.Config{
+			Network: config.NetworkConfig{
+				Main: config.NetworkDetail{CIDR: "192.168.20.0/24", VIP: "192.168.20.100"},
+			},
+			Nodes: config.NodesConfig{
+				LBs: []config.NodeDetail{
+					{Name: "lb1", IP: "192.168.20.103"},
+					{Name: "lb2", IP: "192.168.20.104"},
+				},
+			},
+		}
+	}
+
+	t.Run("defaults when unset", func(t *testing.T) {
+		cfg := base()
+		if got := cfg.PKICommonName(); got != "CMS Local CA" {
+			t.Errorf("PKICommonName() = %q, want CMS Local CA", got)
+		}
+		if got := cfg.LBTLSDNSNames(); len(got) != 1 || got[0] != "cms.fake-enterprise.com" {
+			t.Errorf("LBTLSDNSNames() = %v, want [cms.fake-enterprise.com]", got)
+		}
+		if got := cfg.LBTLSCertMinValidDays(); got != 30 {
+			t.Errorf("LBTLSCertMinValidDays() = %d, want 30", got)
+		}
+		if got := cfg.LBTLSCertLifetimeHours(); got != 2160 {
+			t.Errorf("LBTLSCertLifetimeHours() = %d, want 2160", got)
+		}
+	})
+
+	t.Run("SANs include DNS names, VIP and both balancers", func(t *testing.T) {
+		cfg := base()
+		cfg.PKI.CertDNSNames = []string{"cms.example.com", "www.example.com"}
+		sans := cfg.LBTLSSANs()
+		for _, want := range []string{"cms.example.com", "www.example.com", "192.168.20.100", "192.168.20.103", "192.168.20.104"} {
+			if !contains(sans, want) {
+				t.Errorf("LBTLSSANs() = %v, missing %q", sans, want)
+			}
+		}
+	})
+
+	t.Run("overrides are honoured", func(t *testing.T) {
+		cfg := base()
+		cfg.PKI.CAName = "Custom CA"
+		cfg.PKI.CertMinValidDays = 45
+		cfg.PKI.CertLifetimeHours = 4380
+		if got := cfg.PKICommonName(); got != "Custom CA" {
+			t.Errorf("PKICommonName() = %q", got)
+		}
+		if got := cfg.LBTLSCertMinValidDays(); got != 45 {
+			t.Errorf("LBTLSCertMinValidDays() = %d", got)
+		}
+		if got := cfg.LBTLSCertLifetimeHours(); got != 4380 {
+			t.Errorf("LBTLSCertLifetimeHours() = %d", got)
+		}
+	})
+
+	t.Run("validation rejects a lifetime shorter than the minimum validity", func(t *testing.T) {
+		cfg := base()
+		cfg.VM.StorageDir = "/var/lib/libvirt/images"
+		cfg.Network.Internal.CIDR = "192.168.10.0/24"
+		cfg.Nodes.Router.IP = "192.168.10.1"
+		cfg.Nodes.Jumpstart.IP = "192.168.10.10"
+		cfg.Nodes.Masters = []config.NodeDetail{
+			{Name: "m1", IP: "192.168.10.11"},
+			{Name: "m2", IP: "192.168.10.12"},
+			{Name: "m3", IP: "192.168.10.16"},
+		}
+		cfg.Nodes.CMSFrontends = []config.NodeDetail{{Name: "cms1", IP: "192.168.20.101"}}
+		cfg.PKI.CertMinValidDays = 30
+		cfg.PKI.CertLifetimeHours = 720 // 30 days, not strictly greater
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a lifetime not exceeding cert_min_valid_days")
+		}
+	})
+
+	t.Run("validation rejects an invalid certificate DNS name", func(t *testing.T) {
+		cfg := base()
+		cfg.VM.StorageDir = "/var/lib/libvirt/images"
+		cfg.Network.Internal.CIDR = "192.168.10.0/24"
+		cfg.Nodes.Router.IP = "192.168.10.1"
+		cfg.Nodes.Jumpstart.IP = "192.168.10.10"
+		cfg.Nodes.Masters = []config.NodeDetail{
+			{Name: "m1", IP: "192.168.10.11"},
+			{Name: "m2", IP: "192.168.10.12"},
+			{Name: "m3", IP: "192.168.10.16"},
+		}
+		cfg.Nodes.CMSFrontends = []config.NodeDetail{{Name: "cms1", IP: "192.168.20.101"}}
+		cfg.PKI.CertDNSNames = []string{"not a valid name"}
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an invalid certificate DNS name")
+		}
+	})
+}
+
+func contains(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestConfig_SSHAccessHardening: config.yaml must point at a non-root deploy
+// account and a known-hosts store, defaults must be safe, and an invalid
+// account name must be rejected.
+func TestConfig_SSHAccessHardening(t *testing.T) {
+	validCfg := func() *config.Config {
+		cfg := &config.Config{
+			VM: config.VMConfig{StorageDir: "/var/lib/libvirt/images"},
+			Network: config.NetworkConfig{
+				Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
+				Main:     config.NetworkDetail{CIDR: "192.168.20.0/24", VIP: "192.168.20.100"},
+			},
+			Nodes: config.NodesConfig{
+				Router:    config.NodeDetail{Name: "ufw-router", IP: "192.168.10.1"},
+				Jumpstart: config.NodeDetail{Name: "jumpstart", IP: "192.168.10.10"},
+				Masters: []config.NodeDetail{
+					{Name: "m1", IP: "192.168.10.11"},
+					{Name: "m2", IP: "192.168.10.12"},
+					{Name: "m3", IP: "192.168.10.16"},
+				},
+				LBs: []config.NodeDetail{
+					{Name: "lb1", IP: "192.168.20.103"},
+					{Name: "lb2", IP: "192.168.20.104"},
+				},
+				CMSFrontends: []config.NodeDetail{{Name: "cms1", IP: "192.168.20.101"}},
+			},
+		}
+		return cfg
+	}
+
+	t.Run("config.yaml uses a non-root deploy account and a known_hosts store", func(t *testing.T) {
+		cfg, err := config.Load(filepath.Join("..", "config.yaml"))
+		if err != nil {
+			t.Fatalf("load config.yaml: %v", err)
+		}
+		if got := cfg.SSHUser(); got != "ubuntu" {
+			t.Errorf("SSHUser() = %q, want ubuntu", got)
+		}
+		if kh := cfg.SSHKnownHostsFile(); !strings.HasSuffix(kh, "cms_known_hosts") {
+			t.Errorf("SSHKnownHostsFile() = %q, want a cms_known_hosts path", kh)
+		}
+	})
+
+	t.Run("empty ssh.user falls back to root for backwards compatibility", func(t *testing.T) {
+		cfg := &config.Config{}
+		if got := cfg.SSHUser(); got != "root" {
+			t.Errorf("SSHUser() = %q, want root", got)
+		}
+	})
+
+	t.Run("validation rejects an invalid ssh.user", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.SSH.User = "bad user; rm -rf /"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an invalid ssh.user")
+		}
+	})
+
+	t.Run("validation accepts a valid ssh.user", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.SSH.User = "cms-deploy"
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid ssh.user rejected: %v", err)
 		}
 	})
 }

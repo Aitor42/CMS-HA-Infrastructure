@@ -502,34 +502,43 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 
 	hasEncrypted := IsEncrypted(c.Database.Password) ||
 		IsEncrypted(c.Database.RootPassword) ||
-		IsEncrypted(c.PKI.ProvisionerPassword)
+		IsEncrypted(c.Database.ExporterPassword) ||
+		IsEncrypted(c.WordPress.AdminPassword) ||
+		IsEncrypted(c.PKI.ProvisionerPassword) ||
+		IsEncrypted(c.Backup.SecretKey)
 
 	if hasEncrypted {
 		if _, err := os.Stat(resolvedKeyPath); err != nil {
 			return nil, fmt.Errorf("configuration contains encrypted fields but key file %s does not exist: %w", resolvedKeyPath, err)
 		}
 
-		var err error
-		if IsEncrypted(c.Database.Password) {
-			c.Database.Password, err = DecryptValue(c.Database.Password, resolvedKeyPath)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt db password: %w", err)
-			}
+		d, err := newDecrypter(resolvedKeyPath)
+		if err != nil {
+			return nil, err
 		}
-		if IsEncrypted(c.Database.RootPassword) {
-			c.Database.RootPassword, err = DecryptValue(c.Database.RootPassword, resolvedKeyPath)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt db root password: %w", err)
-			}
+		secrets := []struct {
+			value *string
+			label string
+		}{
+			{&c.Database.Password, "db password"},
+			{&c.Database.RootPassword, "db root password"},
+			{&c.Database.ExporterPassword, "db exporter password"},
+			{&c.WordPress.AdminPassword, "WordPress admin password"},
+			{&c.PKI.ProvisionerPassword, "pki provisioner password"},
+			{&c.Backup.SecretKey, "backup secret key"},
 		}
-		if IsEncrypted(c.PKI.ProvisionerPassword) {
-			c.PKI.ProvisionerPassword, err = DecryptValue(c.PKI.ProvisionerPassword, resolvedKeyPath)
-			if err != nil {
-				return nil, fmt.Errorf("decrypt pki provisioner password: %w", err)
+		for _, s := range secrets {
+			if !IsEncrypted(*s.value) {
+				continue
 			}
+			v, err := d.decrypt(*s.value)
+			if err != nil {
+				return nil, fmt.Errorf("decrypt %s: %w", s.label, err)
+			}
+			*s.value = v
 		}
 	}
-	
+
 	return &c, nil
 }
 
@@ -538,11 +547,14 @@ func (c *Config) Validate() error {
 	if c.VM.StorageDir == "" {
 		return fmt.Errorf("vm.storage_dir is required")
 	}
-	if c.Network.Internal.CIDR == "" {
-		return fmt.Errorf("network.internal.cidr is required")
+	if c.SSH.User != "" && !validUnixUser.MatchString(c.SSH.User) {
+		return fmt.Errorf("ssh.user is not a valid Unix user name: %q", c.SSH.User)
 	}
-	if c.Network.Main.CIDR == "" {
-		return fmt.Errorf("network.main.cidr is required")
+	if _, _, err := net.ParseCIDR(c.Network.Internal.CIDR); err != nil {
+		return fmt.Errorf("network.internal.cidr is not a valid CIDR: %w", err)
+	}
+	if _, _, err := net.ParseCIDR(c.Network.Main.CIDR); err != nil {
+		return fmt.Errorf("network.main.cidr is not a valid CIDR: %w", err)
 	}
 	if c.Nodes.Router.IP == "" {
 		return fmt.Errorf("nodes.router.ip is required")
@@ -550,17 +562,127 @@ func (c *Config) Validate() error {
 	if c.Nodes.Jumpstart.IP == "" {
 		return fmt.Errorf("nodes.jumpstart.ip is required")
 	}
-	if len(c.Nodes.Masters) < 2 {
-		return fmt.Errorf("at least 2 master nodes are required for HA (got %d)", len(c.Nodes.Masters))
+	// HA requires an etcd quorum. With an even number of members (notably the
+	// old 2-node layout) quorum == member count, so losing a single master
+	// makes the API server read-only and blocks DRBD/MariaDB failover. Three
+	// is the minimum that tolerates one failure; keep it odd so extra members
+	// increase fault tolerance rather than just raising the quorum threshold.
+	if len(c.Nodes.Masters) < 3 {
+		return fmt.Errorf("at least 3 master nodes are required for etcd quorum (got %d)", len(c.Nodes.Masters))
 	}
-	if c.Nodes.LB.IP == "" {
-		return fmt.Errorf("nodes.lb.ip is required")
+	if len(c.Nodes.Masters)%2 == 0 {
+		return fmt.Errorf("an odd number of master nodes is required for etcd quorum (got %d)", len(c.Nodes.Masters))
+	}
+	// A half-configured fence would silently disable promotion (or worse,
+	// promote without fencing), so require both commands together.
+	if (c.DRBD.FenceCommand == "") != (c.DRBD.FenceStateCommand == "") {
+		return fmt.Errorf("drbd.fence_command and drbd.fence_state_command must be set together (or both left empty to auto-derive)")
+	}
+	if len(c.Nodes.LBs) < 2 {
+		return fmt.Errorf("at least 2 load balancer nodes are required for HA (got %d)", len(c.Nodes.LBs))
+	}
+	if c.Network.Main.VIP == "" {
+		return fmt.Errorf("network.main.vip is required (keepalived floating address)")
+	}
+	if ip := net.ParseIP(c.Network.Main.VIP); ip == nil || ip.To4() == nil {
+		return fmt.Errorf("network.main.vip is not a valid IPv4 address: %q", c.Network.Main.VIP)
+	}
+	for _, n := range c.AllNodes() {
+		if n.IP == c.Network.Main.VIP {
+			return fmt.Errorf("network.main.vip %s collides with node %s", c.Network.Main.VIP, n.Name)
+		}
 	}
 	if len(c.Nodes.CMSFrontends) < 1 {
 		return fmt.Errorf("at least 1 CMS frontend node is required")
 	}
+	// A certificate whose total lifetime is shorter than the minimum validity
+	// asserted by verify would fail as soon as it is issued.
+	if c.PKI.CertMinValidDays > 0 && c.PKI.CertLifetimeHours > 0 &&
+		c.PKI.CertLifetimeHours <= c.PKI.CertMinValidDays*24 {
+		return fmt.Errorf("pki.cert_lifetime_hours (%d) must exceed pki.cert_min_valid_days*24 (%d)",
+			c.PKI.CertLifetimeHours, c.PKI.CertMinValidDays*24)
+	}
+	for _, dns := range c.PKI.CertDNSNames {
+		if !fqdnPattern.MatchString(dns) {
+			return fmt.Errorf("pki.cert_dns_names entry is not a valid DNS name: %q", dns)
+		}
+	}
+	if c.Backup.Engine != "" && c.Backup.Engine != "garage" {
+		return fmt.Errorf("backup.engine %q is not supported (supported: garage)", c.Backup.Engine)
+	}
+	if c.Backup.S3Port < 0 || c.Backup.S3Port > 65535 {
+		return fmt.Errorf("backup.s3_port out of range: %d", c.Backup.S3Port)
+	}
+	if c.Backup.RetentionDays < 0 {
+		return fmt.Errorf("backup.retention_days must be >= 0")
+	}
+	for _, sched := range []string{c.Backup.Schedule, c.Backup.RestoreTestSchedule} {
+		if sched != "" && !cronPattern.MatchString(sched) {
+			return fmt.Errorf("backup schedule %q contains unsupported characters", sched)
+		}
+	}
+	if v := strings.TrimSpace(c.Traffic.K6Version); v == "latest" {
+		return fmt.Errorf("traffic.k6_version must be pinned to a specific tag (got %q)", v)
+	}
+	if rw := strings.TrimSpace(c.Traffic.PrometheusRWURL); rw != "" {
+		if u, err := url.Parse(rw); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("traffic.prometheus_rw_url must be an http(s) URL: %q", rw)
+		}
+	}
+
+	// Hotdesk IPs are generated as <network>.<octet>: detect overflow before
+	// the node sweep below so this clearer message wins (generation happens
+	// inside AllNodes and would otherwise surface as "invalid IPv4 .256").
+	if c.Nodes.Hotdesks.Count > 0 {
+		base := c.Nodes.Hotdesks.BaseIPOctet
+		if base == 0 || base == 201 {
+			base = 201
+		}
+		if base+c.Nodes.Hotdesks.Count-1 > 254 {
+			return fmt.Errorf("hotdesk range overflows: base octet %d with %d nodes exceeds 254", base, c.Nodes.Hotdesks.Count)
+		}
+	}
+
+	// These fields are interpolated into remote SSH commands, Cobbler
+	// registration scripts and awk filters: an unvalidated value breaks or
+	// manipulates far-away infrastructure, so their shape must be exact.
+	for _, n := range c.AllNodes() {
+		if n.Name != "" && !nodeNamePattern.MatchString(n.Name) {
+			return fmt.Errorf("node has an invalid name (letters, digits, dots, underscores, hyphens only): %q", n.Name)
+		}
+		if n.IP != "" {
+			if ip := net.ParseIP(n.IP); ip == nil || ip.To4() == nil {
+				return fmt.Errorf("node %s has an invalid IPv4 address: %q", n.Name, n.IP)
+			}
+		}
+		if n.FQDN != "" && !fqdnPattern.MatchString(n.FQDN) {
+			return fmt.Errorf("node %s has an invalid FQDN (letters, digits, dots, hyphens only): %q", n.Name, n.FQDN)
+		}
+		if n.MAC != "" && !macPattern.MatchString(n.MAC) {
+			return fmt.Errorf("node %s has an invalid MAC address: %q", n.Name, n.MAC)
+		}
+	}
+
+	// These are interpolated unquoted into the backup shell command: a dot
+	// would be parsed as db.table and any other character would break or
+	// inject into the command, so restrict them to plain SQL identifiers.
+	for field, v := range map[string]string{"database.user": c.Database.User, "database.name": c.Database.Name} {
+		if v != "" && !dbIdentifierPattern.MatchString(v) {
+			return fmt.Errorf("%s must contain only letters, digits, or underscores: %q", field, v)
+		}
+	}
 	return nil
 }
+
+var fqdnPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
+var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var dbIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+var cronPattern = regexp.MustCompile(`^[0-9A-Za-z*,/ @-]+$`)
+
+// validUnixUser matches a conservative portable POSIX user name (lowercase
+// letters, digits, underscore and hyphen, not starting with a digit or hyphen).
+var validUnixUser = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
 func toSpec(n NodeDetail, fallbackIP string) NodeSpec {
 	ip := n.IP
