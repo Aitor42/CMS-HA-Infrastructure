@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -41,49 +44,50 @@ func (p *Phase) Name() string {
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
-	
+
 	if len(p.cfg.Nodes.Masters) < 2 {
 		return fmt.Errorf("DRBD requires at least 2 master nodes")
 	}
 
 	master1 := p.cfg.Nodes.Masters[0]
 	master2 := p.cfg.Nodes.Masters[1]
-	
+
+	drbdPair := []config.NodeDetail{master1, master2}
+
+	if err := p.setupFencing(ctx, drbdPair); err != nil {
+		return err
+	}
+
 	logging.Info("Installing DRBD utils on master nodes...")
-	installCmd := `
-cloud-init status --wait 2>/dev/null || true
-for i in {1..30}; do
-	if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-		break
-	fi
-	sleep 2
-done
+	installCmd := ssh.AptLockWaitSnippet + `
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 `
-	
-	res := p.pool.RunParallel(ctx, []string{master1.IP, master2.IP}, installCmd)
-	for _, r := range res {
+
+	for _, r := range p.pool.RunParallel(ctx, []string{master1.IP, master2.IP}, installCmd) {
 		if r.Err != nil {
 			return fmt.Errorf("failed to install DRBD on %s: %w", r.Host, r.Err)
 		}
+		if r.ExitCode != 0 {
+			return fmt.Errorf("failed to install DRBD on %s (exit %d): %s", r.Host, r.ExitCode, strings.TrimSpace(r.Output))
+		}
 	}
-	
+
 	logging.Info("Deploying DRBD configuration...")
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/drbd/cms-data.res")
 	if err != nil {
 		return fmt.Errorf("failed to read template: %w", err)
 	}
-	
+
 	tmpl, err := template.New("drbd").Parse(string(tmplContent))
 	if err != nil {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
-	
+
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, p.cfg); err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
-	
+
 	drbdCfgBytes := buf.Bytes()
 	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
 	for _, ip := range []string{master1.IP, master2.IP} {
@@ -97,33 +101,64 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 			return fmt.Errorf("failed to copy DRBD config to %s: %w", r.Host, r.Err)
 		}
 	}
-	
+
 	logging.Info("Initializing DRBD metadata in parallel...")
-	initCmd := "modprobe drbd || true; drbdadm create-md cms_data --force || true; drbdadm up cms_data || true"
-	p.pool.RunParallel(ctx, []string{master1.IP, master2.IP}, initCmd)
-	
-	logging.Info("Promoting Master 1 to Primary...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms_data --force || true")
-	if err != nil {
-		logging.Warn("Primary promotion output: %v", err)
+	// create-md fails when metadata already exists (expected on re-runs): that
+	// is confirmed with dump-md, and `set -e` surfaces every other error.
+	// The script runs through RunScript inside RunParallelFunc so drbdadm's
+	// stderr (which reports the expected "already exists" condition) is kept;
+	// plain RunParallel only surfaces stdout.
+	initScript := `set -e
+modprobe drbd
+if ! drbdadm create-md cms_data --force; then
+    drbdadm dump-md cms_data >/dev/null 2>&1 || {
+        echo "drbdadm create-md failed and no existing metadata was found" >&2
+        exit 1
+    }
+fi
+drbdadm up cms_data
+`
+	initTasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	for _, ip := range []string{master1.IP, master2.IP} {
+		nodeIP := ip
+		initTasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+			_, err := pool.RunScript(c, nodeIP, initScript)
+			return err
+		}
 	}
-	
+	for _, r := range p.pool.RunParallelFunc(ctx, initTasks) {
+		if r.Err != nil {
+			return fmt.Errorf("failed to initialize DRBD metadata on %s: %w", r.Host, r.Err)
+		}
+	}
+
+	logging.Info("Promoting Master 1 to Primary...")
+	_, _, code, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms_data --force")
+	if err != nil || code != 0 {
+		return fmt.Errorf("failed to promote %s to DRBD Primary: %v (exit code %d)", master1.IP, err, code)
+	}
+
 	logging.Info("Waiting for DRBD replication to start/sync...")
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm status cms_data")
+	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "drbdadm status cms_data")
 		if err != nil {
 			return err
 		}
-		if !strings.Contains(out, "peer-disk:UpToDate") && !strings.Contains(out, "SyncTarget") && !strings.Contains(out, "Established") {
+		// "Established"/"Connected" is only the connection state: the peer
+		// disk must also be UpToDate (or at least syncing) before the
+		// replica can be considered ready. A connection alone is not.
+		connected := strings.Contains(out, "Established") || strings.Contains(out, "Connected")
+		diskReady := strings.Contains(out, "peer-disk:UpToDate") || strings.Contains(out, "ds:UpToDate") || strings.Contains(out, "SyncTarget")
+		if !connected || !diskReady {
 			return fmt.Errorf("replication not ready: %s", out)
 		}
 		return nil
 	})
-	
+
 	if err != nil {
 		logging.Warn("DRBD replication sync might still be ongoing: %v", err)
 	}
-	
+
 	logging.Info("Formatting and mounting DRBD volume on Master 1...")
 	mountCmd := `
 mkdir -p /mnt/data/mariadb
@@ -138,7 +173,7 @@ fi
 	if err != nil {
 		return fmt.Errorf("failed to format and mount DRBD volume on master1: %w", err)
 	}
-	
+
 	logging.Info("Updating fstab and mount directory on masters...")
 	fstabCmd := "mkdir -p /mnt/data/mariadb && (grep -q '/dev/drbd0' /etc/fstab || echo '/dev/drbd0 /mnt/data/mariadb ext4 defaults,noauto 0 0' >> /etc/fstab)"
 	for _, ip := range []string{master1.IP, master2.IP} {
@@ -171,7 +206,9 @@ fi
 		if err := p.pool.CopyContent(ctx, ip, []byte(watchdogServiceContent), "/etc/systemd/system/drbd-failover-watchdog.service", 0644); err != nil {
 			return fmt.Errorf("failed to deploy watchdog service to %s: %w", ip, err)
 		}
-		p.pool.RunCommand(ctx, ip, "systemctl daemon-reload && systemctl enable --now drbd-failover-watchdog.service && systemctl enable drbd.service")
+		if _, _, _, err := p.pool.RunCommand(ctx, ip, "systemctl daemon-reload && systemctl enable --now drbd-failover-watchdog.service && systemctl enable drbd.service"); err != nil {
+			return fmt.Errorf("failed to enable DRBD services on %s: %w", ip, err)
+		}
 	}
 
 	logging.Info("Deploying DRBD boot-time service and tmpfiles on Master 1...")
@@ -193,7 +230,9 @@ WantedBy=multi-user.target
 	if err := p.pool.CopyContent(ctx, master1.IP, []byte(primaryService), "/etc/systemd/system/drbd-cms-primary.service", 0644); err != nil {
 		logging.Warn("Failed to upload drbd-cms-primary.service: %v", err)
 	} else {
-		p.pool.RunCommand(ctx, master1.IP, "systemctl daemon-reload && systemctl enable drbd-cms-primary.service")
+		if _, _, _, err := p.pool.RunCommand(ctx, master1.IP, "systemctl daemon-reload && systemctl enable drbd-cms-primary.service"); err != nil {
+			return fmt.Errorf("failed to enable drbd-cms-primary.service on %s: %w", master1.IP, err)
+		}
 	}
 
 	tmpfilesContent := "d /mnt/data 0755 root root -\nd /mnt/data/mariadb 0755 999 999 -\n"
@@ -204,7 +243,128 @@ WantedBy=multi-user.target
 			p.pool.RunCommand(ctx, ip, "systemd-tmpfiles --create /etc/tmpfiles.d/mariadb-datadir.conf 2>/dev/null || true")
 		}
 	}
-	
+
 	logging.Success("DRBD Setup completed successfully.")
 	return nil
+}
+
+// setupFencing provisions STONITH fencing for the 2-node DRBD resource: it
+// deploys fence-peer.sh and a per-node /etc/drbd-fence.conf to the pair, and
+// (when no custom command is configured) creates an SSH key on the hypervisor,
+// authorises it for the user running the orchestrator (the same $USER the fence
+// command SSHes as) and copies the private key to the masters so they can drive
+// libvirt on the hypervisor.
+func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) error {
+	fenceRequired := "0"
+	if p.cfg.DRBD.Fencing {
+		fenceRequired = "1"
+	}
+	logging.Info("Configuring DRBD STONITH fencing (required=%s)...", fenceRequired)
+
+	offCmd, stateCmd := p.cfg.FenceCommands()
+	custom := p.cfg.DRBD.FenceCommand != ""
+
+	fenceScript, err := cms.TemplatesFS.ReadFile("templates/drbd/fence-peer.sh")
+	if err != nil {
+		return fmt.Errorf("failed to read fence-peer.sh: %w", err)
+	}
+	confContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-fence.conf")
+	if err != nil {
+		return fmt.Errorf("failed to read drbd-fence.conf template: %w", err)
+	}
+	confTmpl, err := template.New("drbd-fence").Parse(string(confContent))
+	if err != nil {
+		return fmt.Errorf("failed to parse drbd-fence.conf template: %w", err)
+	}
+
+	// Derived (SSH) fencing needs a key on the hypervisor and a copy on the
+	// masters. A failure here is non-fatal but means automatic promotion will
+	// not be able to fence until it is resolved.
+	var fenceKey []byte
+	if p.cfg.DRBD.Fencing && !custom {
+		fenceKey, err = p.ensureFenceKey()
+		if err != nil {
+			logging.Warn("Could not provision the hypervisor fence SSH key; automatic promotion will fail to fence until fixed: %v", err)
+			fenceKey = nil
+		}
+	}
+
+	for i, node := range pair {
+		peer := pair[(i+1)%len(pair)] // DRBD cms_data is a 2-node resource
+
+		if _, _, _, err := p.pool.RunCommand(ctx, node.IP, "mkdir -p /etc/drbd-fence && chmod 700 /etc/drbd-fence"); err != nil {
+			return fmt.Errorf("failed to prepare /etc/drbd-fence on %s: %w", node.Name, err)
+		}
+
+		if err := p.pool.CopyContent(ctx, node.IP, fenceScript, "/usr/local/bin/fence-peer.sh", 0755); err != nil {
+			return fmt.Errorf("failed to deploy fence-peer.sh to %s: %w", node.Name, err)
+		}
+
+		data := struct {
+			FenceRequired     string
+			PeerDomain        string
+			FenceCommand      string
+			FenceStateCommand string
+		}{fenceRequired, peer.Name, offCmd, stateCmd}
+
+		var buf bytes.Buffer
+		if err := confTmpl.Execute(&buf, data); err != nil {
+			return fmt.Errorf("failed to render drbd-fence.conf for %s: %w", node.Name, err)
+		}
+
+		if len(fenceKey) > 0 {
+			if err := p.pool.CopyContent(ctx, node.IP, fenceKey, "/etc/drbd-fence/fence_key", 0600); err != nil {
+				return fmt.Errorf("failed to copy fence key to %s: %w", node.Name, err)
+			}
+		}
+		if err := p.pool.CopyContent(ctx, node.IP, buf.Bytes(), "/etc/drbd-fence.conf", 0600); err != nil {
+			return fmt.Errorf("failed to deploy drbd-fence.conf to %s: %w", node.Name, err)
+		}
+	}
+
+	logging.Success("DRBD fencing configured on %s and %s.", pair[0].Name, pair[1].Name)
+	return nil
+}
+
+// ensureFenceKey creates (if needed) a dedicated ed25519 key on the hypervisor,
+// authorises it for the current user and returns the private key material.
+func (p *Phase) ensureFenceKey() ([]byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	sshDir := filepath.Join(home, ".ssh")
+	keyPath := filepath.Join(sshDir, "id_ed25519_fence")
+
+	if _, err := os.Stat(keyPath); err != nil {
+		if err := os.MkdirAll(sshDir, 0700); err != nil {
+			return nil, err
+		}
+		out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-C", "cms-ha-fence", "-f", keyPath).CombinedOutput() // #nosec G204
+		if err != nil {
+			return nil, fmt.Errorf("ssh-keygen: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	pub, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		return nil, err
+	}
+	authPath := filepath.Join(sshDir, "authorized_keys")
+	existing, _ := os.ReadFile(authPath)
+	if !strings.Contains(string(existing), strings.TrimSpace(string(pub))) {
+		f, err := os.OpenFile(authPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304
+		if err != nil {
+			return nil, err
+		}
+		_, werr := f.Write(append(pub, '\n'))
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			return nil, werr
+		}
+	}
+
+	return os.ReadFile(keyPath)
 }

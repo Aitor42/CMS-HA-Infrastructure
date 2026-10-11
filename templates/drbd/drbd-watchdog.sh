@@ -13,10 +13,15 @@
 #      to ICMP (prevents false positives during transient DRBD link flaps).
 #   3. Strike threshold: Requires N consecutive failures (default: 3 checks = 15s)
 #      before triggering failover to absorb network jitter.
-#   4. Active Primary maintenance: Automatically mounts /mnt/data/mariadb,
+#   4. STONITH fence: the ping checks are only a precondition. Before promoting,
+#      the failed peer is powered off at the hypervisor (fence-peer.sh) and the
+#      power-off is *confirmed*. Without a confirmed fence the watchdog refuses
+#      to promote (unless FENCE_REQUIRED=0), so both nodes can never write the
+#      replicated volume.
+#   5. Active Primary maintenance: Automatically mounts /mnt/data/mariadb,
 #      ensures the Kubernetes drbd-status=primary label is active on the Primary,
 #      and ensures MariaDB pod runs on the active storage node.
-#   5. Passive Secondary maintenance: Ensures /mnt/data/mariadb is unmounted and
+#   6. Passive Secondary maintenance: Ensures /mnt/data/mariadb is unmounted and
 #      drbd-status label is cleared from Secondary nodes.
 
 set -uo pipefail
@@ -27,6 +32,12 @@ DRBD_DEVICE="/dev/drbd0"
 CHECK_INTERVAL="${CHECK_INTERVAL:-5}"
 FAIL_THRESHOLD="${FAIL_THRESHOLD:-3}"
 FAILOVER_SCRIPT="/usr/local/bin/drbd-failover.sh"
+FENCE_SCRIPT="/usr/local/bin/fence-peer.sh"
+FENCE_CONF="/etc/drbd-fence.conf"
+# 1: never promote without a confirmed fence (split-brain safe, default).
+FENCE_REQUIRED="${FENCE_REQUIRED:-1}"
+# shellcheck disable=SC1090
+[ -r "$FENCE_CONF" ] && . "$FENCE_CONF"
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
 GATEWAY="${GATEWAY:-$(ip route show default 2>/dev/null | awk '{print $3}' | head -n1 || echo "192.168.10.1")}"
@@ -52,6 +63,21 @@ get_peer_ip() {
     fi
   fi
   echo "$peer"
+}
+
+# Map a peer IP to its libvirt domain name (DRBD "on <fqdn> <name>" blocks).
+# Prefers the PEER_DOMAIN written by the deploy phase; falls back to parsing.
+get_peer_domain() {
+  local peer_ip="$1" dom=""
+  if [ -n "${PEER_DOMAIN:-}" ]; then
+    echo "$PEER_DOMAIN"
+    return
+  fi
+  dom=$(awk -v ip="$peer_ip" '
+    $1 == "on"      { dom = $3 }
+    $1 == "address" && index($0, ip ":") { print dom; exit }
+  ' /etc/drbd.d/cms_data.res 2>/dev/null)
+  echo "$dom"
 }
 
 log "Starting DRBD Failover Watchdog (Resource: $RESOURCE, Interval: ${CHECK_INTERVAL}s, Threshold: $FAIL_THRESHOLD strikes)"
@@ -164,15 +190,38 @@ while true; do
     log "ALERT: Peer $PEER_IP unreachable! DRBD cstate: $CSTATE. Strike $STRIKE_COUNT of $FAIL_THRESHOLD"
 
     if [ $STRIKE_COUNT -ge $FAIL_THRESHOLD ]; then
-      log "CRITICAL: Peer $PEER_IP confirmed DEAD after $STRIKE_COUNT consecutive failed checks. Executing automatic failover promotion!"
-      if [ -x "$FAILOVER_SCRIPT" ]; then
-        "$FAILOVER_SCRIPT" promote || log "ERROR: Failover promotion script exited with error $?"
+      log "CRITICAL: Peer $PEER_IP unreachable after $STRIKE_COUNT consecutive checks. Fencing before any promotion."
+
+      FENCE_TARGET_DOMAIN=$(get_peer_domain "$PEER_IP")
+      FENCED=0
+      if [ -x "$FENCE_SCRIPT" ] && [ -n "$FENCE_TARGET_DOMAIN" ]; then
+        if "$FENCE_SCRIPT" "$FENCE_TARGET_DOMAIN"; then
+          FENCED=1
+        else
+          log "ERROR: Fencing '$FENCE_TARGET_DOMAIN' failed (exit $?)."
+        fi
       else
-        log "ERROR: Failover script $FAILOVER_SCRIPT not found or not executable!"
+        log "ERROR: fence script '$FENCE_SCRIPT' missing or peer domain unknown."
+      fi
+
+      if [ "$FENCED" = "1" ]; then
+        log "Fence confirmed for $FENCE_TARGET_DOMAIN. Executing automatic failover promotion."
+        if [ -x "$FAILOVER_SCRIPT" ]; then
+          "$FAILOVER_SCRIPT" promote || log "ERROR: Failover promotion script exited with error $?"
+        else
+          log "ERROR: Failover script $FAILOVER_SCRIPT not found or not executable!"
+        fi
+        NEW_ROLE=$(drbdadm role "$RESOURCE" 2>/dev/null | cut -d'/' -f1 || echo "Unknown")
+        log "Failover promotion execution finished. New local role: $NEW_ROLE"
+      elif [ "$FENCE_REQUIRED" = "1" ]; then
+        log "CRITICAL: refusing to promote without a confirmed fence (split-brain risk). Peer $PEER_IP stays unreachable."
+      else
+        log "WARNING: FENCE_REQUIRED=0. Promoting WITHOUT fencing (best-effort; split-brain is possible)."
+        if [ -x "$FAILOVER_SCRIPT" ]; then
+          "$FAILOVER_SCRIPT" promote || log "ERROR: Failover promotion script exited with error $?"
+        fi
       fi
       STRIKE_COUNT=0
-      NEW_ROLE=$(drbdadm role "$RESOURCE" 2>/dev/null | cut -d'/' -f1 || echo "Unknown")
-      log "Failover promotion execution finished. New local role: $NEW_ROLE"
     fi
 
     sleep "$CHECK_INTERVAL"
