@@ -1,10 +1,14 @@
 package kubernetes
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
-	"os"
+	"io/fs"
+	"strconv"
 	"strings"
 	"time"
 
@@ -153,118 +157,327 @@ func (p *Phase) Run(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
-		logging.Warn("Nodes might not be fully ready: %v", err)
+		return fmt.Errorf("K3s nodes did not all become Ready: %w", err)
 	}
-	
+
+	// The whole point of the third master: etcd must have a real quorum.
+	// Verifying the member count (not just node readiness) catches a server
+	// that joined as an agent or failed to register with etcd.
+	logging.Info("Verifying embedded etcd quorum (%d members required)...", len(p.cfg.Nodes.Masters))
+	expectedEtcd := strconv.Itoa(len(p.cfg.Nodes.Masters))
+	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl -n kube-system get pods -o name 2>/dev/null | grep -c 'pod/etcd-' || true")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(out) != expectedEtcd {
+			return fmt.Errorf("expected %s etcd members, got %s", expectedEtcd, strings.TrimSpace(out))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("etcd did not reach quorum with %s members: %w", expectedEtcd, err)
+	}
+	logging.Success("etcd quorum healthy: %s members", expectedEtcd)
+
 	logging.Info("Labeling Master 1 with DRBD primary status...")
 	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", master1.FQDN, master1.Name))
 	if err != nil {
 		logging.Warn("Failed to label node: %v", err)
 	}
-	
-	logging.Info("Applying Kubernetes Manifests...")
-	// Extract manifests from embed and copy to master1
+
+	logging.Info("Applying Kubernetes Manifests (kustomize)...")
+	// Extract the kustomize tree (base, backups, jobs, monitoring and the
+	// overlays) to master1, preserving the layout so relative references
+	// (e.g. ../../base) resolve.
 	manifestsDir := "/tmp/k3s-manifests"
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("mkdir -p %s", manifestsDir))
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("install -d -m 0700 %s", manifestsDir), "create private manifest directory"); err != nil {
+		return err
+	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _, _, _ = p.pool.RunCommand(cleanupCtx, master1.IP, fmt.Sprintf("rm -rf %s", manifestsDir))
+	}()
+
+	if err := copyKustomizeTree(ctx, p.pool, master1.IP, manifestsDir); err != nil {
+		return fmt.Errorf("failed to copy the kustomize tree: %w", err)
+	}
+
+	generatedDir := fmt.Sprintf("%s/generated", manifestsDir)
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("install -d -m 0700 %s", generatedDir), "create generated manifest directory"); err != nil {
+		return err
+	}
+
+	secretManifest, err := makeMariaDBSecret(p.cfg.Database.RootPassword, p.cfg.Database.Password, p.cfg.Database.ExporterPassword)
 	if err != nil {
-		return fmt.Errorf("failed to create manifests dir: %w", err)
+		return fmt.Errorf("failed to generate MariaDB Secret manifest: %w", err)
+	}
+	secretPath := fmt.Sprintf("%s/mariadb-secret.yaml", generatedDir)
+	if err := p.pool.CopyContent(ctx, master1.IP, secretManifest, secretPath, 0600); err != nil {
+		return fmt.Errorf("failed to copy generated MariaDB Secret: %w", err)
 	}
 
-	manifestFiles := []string{
-		"namespace.yaml",
-		"mariadb-secret.yaml",
-		"mariadb-pv.yaml",
-		"mariadb-pvc.yaml",
-		"mariadb-backup-pv.yaml",
-		"mariadb-service.yaml",
-		"mariadb-statefulset.yaml",
-		"mariadb-backup-cronjob.yaml",
-		"init-db-job.yaml",
-	}
-
-	for _, mFile := range manifestFiles {
-		content, err := cms.KubernetesFS.ReadFile("kubernetes/" + mFile)
+	// Backups live off the DRBD device (Garage S3 on the hypervisor). The jobs
+	// read the endpoint/bucket from a ConfigMap and the credentials from a
+	// Secret, both generated here so config.yaml stays the single source of
+	// truth. When backup.engine is empty the whole feature is skipped.
+	backupsOn := p.cfg.BackupEnabled()
+	backupSecretPath := ""
+	backupConfigPath := ""
+	if backupsOn {
+		backupSecret, err := makeBackupSecret(p.cfg.BackupAccessKey(), p.cfg.Backup.SecretKey)
 		if err != nil {
-			return fmt.Errorf("failed to read manifest %s: %w", mFile, err)
+			return fmt.Errorf("failed to generate backup Secret manifest: %w", err)
+		}
+		backupSecretPath = fmt.Sprintf("%s/backup-secret.yaml", generatedDir)
+		if err := p.pool.CopyContent(ctx, master1.IP, backupSecret, backupSecretPath, 0600); err != nil {
+			return fmt.Errorf("failed to copy generated backup Secret: %w", err)
 		}
 
-		cfgContent := string(content)
-		if mFile == "mariadb-secret.yaml" {
-			if p.cfg.Database.Password != "" {
-				b64Pass := base64.StdEncoding.EncodeToString([]byte(p.cfg.Database.Password))
-				cfgContent = strings.ReplaceAll(cfgContent, "V3BTM2N1cjNQNHNzIQ==", b64Pass)
-			}
-			if p.cfg.Database.RootPassword != "" {
-				b64Root := base64.StdEncoding.EncodeToString([]byte(p.cfg.Database.RootPassword))
-				cfgContent = strings.ReplaceAll(cfgContent, "bXlzcWxyb290cGFzcw==", b64Root)
-			}
+		backupConfig, err := makeBackupConfigMap(p.cfg.BackupS3Endpoint(), p.cfg.BackupBucket(), p.cfg.BackupS3Region(), p.cfg.BackupRetentionDays())
+		if err != nil {
+			return fmt.Errorf("failed to generate backup ConfigMap manifest: %w", err)
 		}
-		
-		perm := os.FileMode(0644)
-		if mFile == "mariadb-secret.yaml" {
-			perm = 0600
-		}
-		if err := p.pool.CopyContent(ctx, master1.IP, []byte(cfgContent), fmt.Sprintf("%s/%s", manifestsDir, mFile), perm); err != nil {
-			return fmt.Errorf("failed to copy manifest %s: %w", mFile, err)
+		backupConfigPath = fmt.Sprintf("%s/backup-config.yaml", generatedDir)
+		if err := p.pool.CopyContent(ctx, master1.IP, backupConfig, backupConfigPath, 0644); err != nil {
+			return fmt.Errorf("failed to copy generated backup ConfigMap: %w", err)
 		}
 	}
-	
-	// Apply base manifests (all except init-db-job) in single command
-	var applyArgs []string
-	for i := 0; i < len(manifestFiles)-1; i++ {
-		applyArgs = append(applyArgs, fmt.Sprintf("-f %s/%s", manifestsDir, manifestFiles[i]))
-	}
-	applyCmd := "kubectl apply " + strings.Join(applyArgs, " ")
 
-	logging.Info("Applying base Kubernetes manifests in batch...")
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 6, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func() error {
-		_, _, _, err := p.pool.RunCommand(ctx, master1.IP, applyCmd)
+	// Namespace and generated credentials first, so no workload ever starts
+	// against a missing Secret.
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s/base/namespace.yaml", manifestsDir), "apply Kubernetes namespace"); err != nil {
+		return err
+	}
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", secretPath), "apply MariaDB Secret"); err != nil {
+		return err
+	}
+	_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", secretPath))
+
+	if backupsOn {
+		if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupConfigPath), "apply backup ConfigMap"); err != nil {
+			return err
+		}
+		if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupSecretPath), "apply backup Secret"); err != nil {
+			return err
+		}
+		_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", backupSecretPath))
+	}
+
+	// Core platform via the lab kustomize overlay (base + overlays).
+	logging.Info("Applying base manifests with kustomize (kubectl apply -k overlays/lab)...")
+	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 6, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+		return runChecked(attemptCtx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/overlays/lab", manifestsDir), "apply base kustomize overlay")
+	})
+	if err != nil {
+		return fmt.Errorf("failed to apply base kustomize overlay: %w", err)
+	}
+
+	// Least-privilege scrape RBAC for Prometheus (ServiceAccount + read-only
+	// ClusterRole/binding). It lives in its own kustomize root because it
+	// targets kube-system, which the other roots rewrite via `namespace:`.
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/monitoring", manifestsDir), "apply Prometheus scrape RBAC"); err != nil {
+		return err
+	}
+
+	// Off-DRBD backup stack (only when configured).
+	if backupsOn {
+		if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/backups", manifestsDir), "apply backup kustomize root"); err != nil {
+			return err
+		}
+	}
+
+	// Keep the CronJob schedules in sync with config.yaml; the schedules baked
+	// into the manifests are only fallbacks. Schedules are validated in
+	// config.Validate() to be shell-safe.
+	if backupsOn {
+		schedules := map[string]string{
+			"mariadb-backup":       p.cfg.BackupSchedule(),
+			"mariadb-restore-test": p.cfg.BackupRestoreTestSchedule(),
+		}
+		for name, sched := range schedules {
+			patch := fmt.Sprintf(`{"spec":{"schedule":"%s"}}`, sched)
+			cmd := fmt.Sprintf("kubectl patch cronjob %s -n cms --type merge -p '%s'", name, patch)
+			if out, errOut, code, err := p.pool.RunCommand(ctx, master1.IP, cmd); err != nil || code != 0 {
+				logging.Warn("Could not sync the schedule of CronJob %s (exit %d): %v %s%s",
+					name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
+			}
+		}
+	}
+
+	logging.Info("Waiting for MariaDB pod to be Running...")
+	// kubectl wait returns as soon as the pod reaches the Running phase.
+	if err := runChecked(ctx, p.pool, master1.IP, "kubectl wait --for=jsonpath='{.status.phase}'=Running pod -l app=mariadb -n cms --timeout=300s", "wait for MariaDB pod"); err != nil {
+		return fmt.Errorf("mariadb pod failed to start: %w", err)
+	}
+
+	logging.Info("Applying init-db-job...")
+	p.pool.RunCommand(ctx, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true")
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/jobs", manifestsDir), "apply MariaDB initialization Job"); err != nil {
+		return err
+	}
+
+	logging.Info("Waiting for init-db-job completion...")
+	// The Job exists as soon as it is applied; wait for its complete condition.
+	if err := runChecked(ctx, p.pool, master1.IP, "kubectl wait --for=condition=complete job/init-wordpress-db -n cms --timeout=300s", "wait for MariaDB initialization Job"); err != nil {
+		return fmt.Errorf("init-wordpress-db job did not complete: %w", err)
+	}
+
+	logging.Success("Kubernetes Setup completed successfully.")
+	return nil
+}
+
+// copyKustomizeTree copies the embedded kubernetes/ kustomize tree to the remote
+// host, preserving the directory layout so relative resource references
+// (e.g. ../../base from an overlay) keep working. The whole tree is packed into
+// a single tar and extracted in one SSH session (directories 0700, files 0644)
+// instead of one round-trip per directory and per file.
+func copyKustomizeTree(ctx context.Context, pool *ssh.Pool, host, dest string) error {
+	tarball, err := buildKustomizeTar()
+	if err != nil {
+		return err
+	}
+	if err := pool.CopyTar(ctx, host, dest, tarball); err != nil {
+		return fmt.Errorf("extract kustomize tree: %w", err)
+	}
+	return nil
+}
+
+// buildKustomizeTar packs the embedded kubernetes/ tree into a tar archive with
+// deterministic modes (directories 0700, regular files 0644).
+func buildKustomizeTar() ([]byte, error) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+
+	err := fs.WalkDir(cms.KubernetesFS, "kubernetes", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel := strings.TrimPrefix(p, "kubernetes/")
+		if rel == "" || rel == "kubernetes" {
+			return nil
+		}
+		if d.IsDir() {
+			return tw.WriteHeader(&tar.Header{Name: rel + "/", Mode: 0700, Typeflag: tar.TypeDir})
+		}
+		content, err := cms.KubernetesFS.ReadFile(p)
+		if err != nil {
+			return fmt.Errorf("read embedded manifest %s: %w", p, err)
+		}
+		hdr := &tar.Header{Name: rel, Mode: 0644, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		_, err = tw.Write(content)
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("failed to apply base Kubernetes manifests: %w", err)
+		_ = tw.Close()
+		return nil, err
 	}
-	
-	logging.Info("Waiting for MariaDB pod to be Running...")
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _, _, _ := p.pool.RunCommand(ctx, master1.IP, "kubectl get pods -n cms -l app=mariadb -o jsonpath='{.items[0].status.phase}'")
-		if strings.TrimSpace(out) != "Running" {
-			return fmt.Errorf("mariadb not running: %s", out)
-		}
-		return nil
-	})
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func runChecked(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
+	_, stderr, code, err := pool.RunCommand(ctx, host, command)
 	if err != nil {
-		return fmt.Errorf("mariadb pod failed to start: %w", err)
+		return fmt.Errorf("%s: %w", action, err)
 	}
-	
-	logging.Info("Applying init-db-job...")
-	p.pool.RunCommand(ctx, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl apply -f %s/%s", manifestsDir, "init-db-job.yaml"))
-	if err != nil {
-		return fmt.Errorf("failed to apply init-db-job: %w", err)
+	if code != 0 {
+		return fmt.Errorf("%s failed (exit %d): %s", action, code, strings.TrimSpace(stderr))
 	}
-	
-	logging.Info("Waiting for init-db-job completion...")
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(5 * time.Second):
-	}
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _, _, _ := p.pool.RunCommand(ctx, master1.IP, "kubectl get job init-wordpress-db -n cms -o jsonpath='{.status.succeeded}'")
-		if strings.TrimSpace(out) != "1" {
-			return fmt.Errorf("job not completed")
-		}
-		return nil
-	})
-	if err != nil {
-		p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -rf %s", manifestsDir))
-		return fmt.Errorf("init-wordpress-db job did not complete: %w", err)
-	}
-	
-	logging.Info("Cleaning up temporary manifests...")
-	p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -rf %s", manifestsDir))
-	
-	logging.Success("Kubernetes Setup completed successfully.")
 	return nil
+}
+
+// makeMariaDBSecret builds the Kubernetes Secret manifest from runtime config.
+// JSON is valid YAML, and encoding the values here avoids storing credentials
+// in the embedded Kubernetes manifests.
+func makeMariaDBSecret(rootPassword, wordpressPassword, exporterPassword string) ([]byte, error) {
+	secret := struct {
+		APIVersion string            `json:"apiVersion"`
+		Kind       string            `json:"kind"`
+		Metadata   map[string]string `json:"metadata"`
+		Type       string            `json:"type"`
+		Data       map[string]string `json:"data"`
+	}{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Metadata: map[string]string{
+			"name":      "mariadb-secret",
+			"namespace": "cms",
+		},
+		Type: "Opaque",
+		Data: map[string]string{
+			"MYSQL_ROOT_PASSWORD":     base64.StdEncoding.EncodeToString([]byte(rootPassword)),
+			"MYSQL_WP_PASSWORD":       base64.StdEncoding.EncodeToString([]byte(wordpressPassword)),
+			"MYSQL_EXPORTER_PASSWORD": base64.StdEncoding.EncodeToString([]byte(exporterPassword)),
+		},
+	}
+	content, err := json.Marshal(secret)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Secret: %w", err)
+	}
+	return content, nil
+}
+
+// makeBackupSecret renders the S3 credentials Secret consumed by the backup and
+// restore-drill CronJobs.
+func makeBackupSecret(accessKey, secretKey string) ([]byte, error) {
+	secret := struct {
+		APIVersion string            `json:"apiVersion"`
+		Kind       string            `json:"kind"`
+		Metadata   map[string]string `json:"metadata"`
+		Type       string            `json:"type"`
+		Data       map[string]string `json:"data"`
+	}{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Metadata: map[string]string{
+			"name":      "backup-secret",
+			"namespace": "cms",
+		},
+		Type: "Opaque",
+		Data: map[string]string{
+			"S3_ACCESS_KEY": base64.StdEncoding.EncodeToString([]byte(accessKey)),
+			"S3_SECRET_KEY": base64.StdEncoding.EncodeToString([]byte(secretKey)),
+		},
+	}
+	content, err := json.Marshal(secret)
+	if err != nil {
+		return nil, fmt.Errorf("marshal backup Secret: %w", err)
+	}
+	return content, nil
+}
+
+// makeBackupConfigMap renders the non-secret backup settings (endpoint, bucket,
+// region, retention) consumed by the backup and restore-drill CronJobs.
+func makeBackupConfigMap(endpoint, bucket, region string, retentionDays int) ([]byte, error) {
+	configMap := struct {
+		APIVersion string            `json:"apiVersion"`
+		Kind       string            `json:"kind"`
+		Metadata   map[string]string `json:"metadata"`
+		Data       map[string]string `json:"data"`
+	}{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+		Metadata: map[string]string{
+			"name":      "backup-config",
+			"namespace": "cms",
+		},
+		Data: map[string]string{
+			"S3_ENDPOINT":    endpoint,
+			"S3_BUCKET":      bucket,
+			"S3_REGION":      region,
+			"RETENTION_DAYS": strconv.Itoa(retentionDays),
+		},
+	}
+	content, err := json.Marshal(configMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal backup ConfigMap: %w", err)
+	}
+	return content, nil
 }
