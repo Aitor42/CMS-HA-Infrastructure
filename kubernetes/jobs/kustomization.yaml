@@ -1,0 +1,11 @@
+# Kustomize root — one-shot Jobs applied after the database is reachable
+# (currently the idempotent database/user initialization Job). Apply with:
+#
+#   kubectl apply -k kubernetes/jobs
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cms
+
+resources:
+  - init-db-job.yaml

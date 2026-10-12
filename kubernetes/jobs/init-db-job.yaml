@@ -29,7 +29,7 @@ spec:
           effect: "NoSchedule"
       containers:
         - name: init-db
-          image: mariadb:10.11
+          image: mariadb:10.11@sha256:0d0945c57f75b3a3b9ebe71aedaaad005fa5305054e8fca3d2e42a8c92b43b5e
           imagePullPolicy: IfNotPresent
           env:
             - name: MYSQL_ROOT_PASSWORD
@@ -42,6 +42,11 @@ spec:
                 secretKeyRef:
                   name: mariadb-secret
                   key: MYSQL_WP_PASSWORD
+            - name: MYSQL_EXPORTER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mariadb-secret
+                  key: MYSQL_EXPORTER_PASSWORD
           command:
             - /bin/bash
             - -c
@@ -49,7 +54,7 @@ spec:
               echo "[+] Esperando a que MariaDB esté disponible..."
               READY=false
               for i in $(seq 1 30); do
-                if mysqladmin ping -h mariadb.cms.svc.cluster.local -u root -p"${MYSQL_ROOT_PASSWORD}" --silent 2>/dev/null; then
+                if MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysqladmin ping -h mariadb.cms.svc.cluster.local -u root --silent 2>/dev/null; then
                   echo "[+] MariaDB está listo."
                   READY=true
                   break
@@ -63,11 +68,22 @@ spec:
               fi
 
               echo "[+] Creando base de datos y usuario para WordPress..."
-              mysql -h mariadb.cms.svc.cluster.local -u root -p"${MYSQL_ROOT_PASSWORD}" <<SQL
+              sql_escape() {
+                local value="$1"
+                value="${value//\\/\\\\}"
+                value="${value//\'/\'\'}"
+                printf '%s' "$value"
+              }
+              WP_PASSWORD_SQL="$(sql_escape "$MYSQL_WP_PASSWORD")"
+              EXPORTER_PASSWORD_SQL="$(sql_escape "$MYSQL_EXPORTER_PASSWORD")"
+              MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql -h mariadb.cms.svc.cluster.local -u root <<SQL
+              SET SESSION sql_mode = TRIM(BOTH ',' FROM REPLACE(CONCAT(',', @@SESSION.sql_mode, ','), ',NO_BACKSLASH_ESCAPES,', ','));
               CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-              CREATE USER IF NOT EXISTS 'wp_user'@'%' IDENTIFIED BY '${MYSQL_WP_PASSWORD}';
+              CREATE USER IF NOT EXISTS 'wp_user'@'%' IDENTIFIED BY '${WP_PASSWORD_SQL}';
+              ALTER USER 'wp_user'@'%' IDENTIFIED BY '${WP_PASSWORD_SQL}';
               GRANT ALL PRIVILEGES ON wordpress.* TO 'wp_user'@'%';
-              CREATE USER IF NOT EXISTS 'exporter'@'%' IDENTIFIED BY 'exporter_password';
+              CREATE USER IF NOT EXISTS 'exporter'@'%' IDENTIFIED BY '${EXPORTER_PASSWORD_SQL}';
+              ALTER USER 'exporter'@'%' IDENTIFIED BY '${EXPORTER_PASSWORD_SQL}';
               GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
               FLUSH PRIVILEGES;
               SQL

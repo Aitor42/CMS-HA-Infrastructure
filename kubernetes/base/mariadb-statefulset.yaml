@@ -38,7 +38,7 @@ spec:
                       - primary
       containers:
         - name: mariadb
-          image: mariadb:10.11
+          image: mariadb:10.11@sha256:0d0945c57f75b3a3b9ebe71aedaaad005fa5305054e8fca3d2e42a8c92b43b5e
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3306

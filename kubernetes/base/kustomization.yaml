@@ -1,0 +1,21 @@
+# Kustomize base — environment-agnostic CMS HA manifests.
+#
+# Everything that defines the CMS platform lives here; the lab-specific
+# overlays live in ../overlays. Apply with:
+#
+#   kubectl apply -k kubernetes/overlays/lab
+#
+# (The generated Secret/ConfigMap for the database and the off-DRBD backup
+# store are produced at deploy time by the `kubernetes` phase and applied
+# alongside this base; the CronJob schedules are patched from config.yaml.)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cms
+
+resources:
+  - namespace.yaml
+  - mariadb-pv.yaml
+  - mariadb-pvc.yaml
+  - mariadb-service.yaml
+  - mariadb-statefulset.yaml
