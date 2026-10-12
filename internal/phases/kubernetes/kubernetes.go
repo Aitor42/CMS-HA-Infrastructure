@@ -41,33 +41,44 @@ func (p *Phase) Name() string {
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
-	
-	if len(p.cfg.Nodes.Masters) < 2 {
-		return fmt.Errorf("k3s requires at least 2 master nodes in this setup")
+
+	if len(p.cfg.Nodes.Masters) < 3 {
+		return fmt.Errorf("k3s HA requires at least 3 master nodes for etcd quorum (got %d)", len(p.cfg.Nodes.Masters))
+	}
+	if p.cfg.Database.Password == "" || p.cfg.Database.RootPassword == "" || p.cfg.Database.ExporterPassword == "" || p.cfg.WordPress.AdminPassword == "" {
+		return fmt.Errorf("database.password, database.root_password, database.exporter_password, and wordpress.admin_password must be set in config.yaml; cms-ha encrypts them automatically")
+	}
+	for name, secret := range map[string]string{
+		"database.password": p.cfg.Database.Password, "database.root_password": p.cfg.Database.RootPassword,
+		"database.exporter_password": p.cfg.Database.ExporterPassword, "wordpress.admin_password": p.cfg.WordPress.AdminPassword,
+	} {
+		if strings.ContainsAny(secret, "\r\n") {
+			return fmt.Errorf("%s cannot contain line breaks", name)
+		}
 	}
 
 	master1 := p.cfg.Nodes.Masters[0]
-	master2 := p.cfg.Nodes.Masters[1]
-	
+	joiningServers := p.cfg.Nodes.Masters[1:]
+
 	logging.Info("Installing K3s on Master 1 (cluster-init)...")
-	initCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --cluster-init --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP)
-	if _, _, _, err := p.pool.RunCommand(ctx, master1.IP, initCmd); err != nil {
-		return fmt.Errorf("failed to init k3s on master1: %w", err)
+	initCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP)
+	if err := runChecked(ctx, p.pool, master1.IP, initCmd, "install K3s on master1"); err != nil {
+		return err
 	}
-	
+
 	logging.Info("Waiting for API server on Master 1...")
-	err := retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		_, _, _, err := p.pool.RunCommand(ctx, master1.IP, "kubectl get nodes")
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 150, Interval: 2 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+		_, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes")
 		return err
 	})
 	if err != nil {
 		return fmt.Errorf("k3s API server on master1 not ready: %w", err)
 	}
-	
+
 	logging.Info("Extracting K3s token from Master 1...")
 	var token string
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func() error {
-		tok, _, _, err := p.pool.RunCommand(ctx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
+	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+		tok, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
 		if err != nil || strings.TrimSpace(tok) == "" {
 			return fmt.Errorf("node-token not ready yet")
 		}
@@ -77,31 +88,61 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to get k3s token: %w", err)
 	}
-	
-	logging.Info("Installing K3s on Master 2 (join)...")
-	joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token %s --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, token, master2.IP)
-	if _, _, _, err := p.pool.RunCommand(ctx, master2.IP, joinCmd); err != nil {
-		return fmt.Errorf("failed to join k3s on master2: %w", err)
+
+	logging.Info("Distributing K3s join token to joining nodes (file 0600, not argv)...")
+	joinTokenPath := "/root/.k3s-join-token"
+	var joiningNodeIPs []string
+	for _, m := range joiningServers {
+		if m.IP != "" {
+			joiningNodeIPs = append(joiningNodeIPs, m.IP)
+		}
 	}
-	
+	for _, w := range p.cfg.Nodes.Workers {
+		if w.IP != "" {
+			joiningNodeIPs = append(joiningNodeIPs, w.IP)
+		}
+	}
+	for _, joinIP := range joiningNodeIPs {
+		if err := p.pool.CopyContent(ctx, joinIP, []byte(token), joinTokenPath, 0600); err != nil {
+			return fmt.Errorf("failed to upload k3s token to %s: %w", joinIP, err)
+		}
+	}
+
+	// Join every additional control-plane server so the embedded etcd cluster
+	// reaches quorum. The token travels through --token-file instead of the
+	// command line: argv of the remote shell would expose it to every local
+	// user via /proc/*/cmdline.
+	for _, m := range joiningServers {
+		logging.Info("Installing K3s on %s (server join)...", m.Name)
+		joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, joinTokenPath, m.IP)
+		if err := runChecked(ctx, p.pool, m.IP, joinCmd, "join K3s "+m.Name); err != nil {
+			return err
+		}
+	}
+
 	logging.Info("Installing K3s Agents on Workers...")
-	agentJoinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" K3S_URL=https://%s:6443 K3S_TOKEN=%s INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\" sh -", master1.IP, token)
+	// The token is expanded by bash into an exported env var (the assignment
+	// literal "$(cat ...)" stays unexpanded in argv), so the value is only
+	// visible in the owner-readable /proc/*/environ, never in cmdline.
+	agentJoinCmd := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443 INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\"; curl -sfL https://get.k3s.io | sh -", joinTokenPath, master1.IP)
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
 		workerIPs = append(workerIPs, w.IP)
 	}
-	
-	res := p.pool.RunParallel(ctx, workerIPs, agentJoinCmd)
-	for _, r := range res {
+
+	for _, r := range p.pool.RunParallel(ctx, workerIPs, agentJoinCmd) {
 		if r.Err != nil {
 			return fmt.Errorf("failed to join k3s agent on %s: %w", r.Host, r.Err)
 		}
+		if r.ExitCode != 0 {
+			return fmt.Errorf("failed to join k3s agent on %s (exit code %d): %s", r.Host, r.ExitCode, strings.TrimSpace(r.Output))
+		}
 	}
-	
+
 	logging.Info("Waiting for all nodes to be Ready...")
 	expectedCount := fmt.Sprintf("%d", len(p.cfg.Nodes.Masters)+len(p.cfg.Nodes.Workers))
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 30, Interval: 10 * time.Second, Timeout: 5 * time.Minute}, func() error {
-		out, _, _, err := p.pool.RunCommand(ctx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep Ready | wc -l")
+	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep Ready | wc -l")
 		if err != nil {
 			return err
 		}
