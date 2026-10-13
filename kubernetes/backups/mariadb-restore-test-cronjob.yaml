@@ -1,0 +1,164 @@
+# mariadb-restore-test-cronjob.yaml
+# Daily restore drill: fetch the newest off-DRBD backup from the Garage S3
+# bucket, restore it into an ephemeral MariaDB instance and validate the
+# result, so RPO/RTO are proven and not just assumed.
+#
+#   Schedule : every day at 03:30 UTC (backup.restore_test_schedule)
+#   Metrics  : cms_backup_restore_last_success_timestamp_seconds,
+#              cms_backup_restore_duration_seconds (node-exporter textfile)
+#
+# The endpoint/bucket come from the `backup-config` ConfigMap and the
+# credentials from the `backup-secret` Secret, both injected by the
+# `kubernetes` phase from config.yaml.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mariadb-restore-test
+  namespace: cms
+  labels:
+    app: mariadb
+    purpose: restore-test
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            app: mariadb
+            purpose: restore-test
+        spec:
+          restartPolicy: OnFailure
+          # The drill is self-contained (S3 + ephemeral DB), so it can run on
+          # any schedulable node. Master tolerations let it use the
+          # control-plane nodes too.
+          tolerations:
+            - key: "node-role.kubernetes.io/master"
+              operator: "Exists"
+              effect: "NoSchedule"
+            - key: "node-role.kubernetes.io/control-plane"
+              operator: "Exists"
+              effect: "NoSchedule"
+          initContainers:
+            # Download the newest object from the bucket to a scratch volume.
+            - name: fetch
+              image: rclone/rclone:1.68.2@sha256:74c51b8817e5431bd6d7ed27cb2a50d8ee78d77f6807b72a41ef6f898845942b
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: backup-config
+                - secretRef:
+                    name: backup-secret
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  export RCLONE_CONFIG_S3_TYPE=s3
+                  export RCLONE_CONFIG_S3_PROVIDER=Other
+                  export RCLONE_CONFIG_S3_ENDPOINT="${S3_ENDPOINT}"
+                  export RCLONE_CONFIG_S3_ACCESS_KEY_ID="${S3_ACCESS_KEY}"
+                  export RCLONE_CONFIG_S3_SECRET_ACCESS_KEY="${S3_SECRET_KEY}"
+                  export RCLONE_CONFIG_S3_REGION="${S3_REGION}"
+                  export RCLONE_CONFIG_S3_FORCE_PATH_STYLE=true
+
+                  echo "[$(date)] Locating the newest backup in s3://${S3_BUCKET}/ ..."
+                  NEWEST=$(rclone lsf "s3:${S3_BUCKET}" | grep -E '^wordpress-.*\.sql\.gz$' | sort | tail -n1)
+                  if [ -z "${NEWEST}" ]; then
+                    echo "[ERROR] No backup object found in s3://${S3_BUCKET}/"
+                    exit 1
+                  fi
+                  echo "[$(date)] Downloading ${NEWEST} ..."
+                  rclone copyto "s3:${S3_BUCKET}/${NEWEST}" /staging/restore.sql.gz
+                  if [ ! -s /staging/restore.sql.gz ]; then
+                    echo "[ERROR] Downloaded backup is empty"
+                    exit 1
+                  fi
+                  echo "${NEWEST}" > /staging/restore.name
+              volumeMounts:
+                - name: staging
+                  mountPath: /staging
+          containers:
+            # Restore into a throwaway MariaDB and validate the schema.
+            - name: verify
+              image: mariadb:10.11@sha256:0d0945c57f75b3a3b9ebe71aedaaad005fa5305054e8fca3d2e42a8c92b43b5e
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: backup-config
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  START=$(date +%s)
+                  echo "[$(date)] Initializing ephemeral MariaDB data dir..."
+                  mariadb-install-db --datadir=/tmp/mysqldata --auth-root-authentication-method=normal >/dev/null
+
+                  echo "[$(date)] Starting ephemeral MariaDB..."
+                  mariadbd --datadir=/tmp/mysqldata --socket=/tmp/mysqld.sock \
+                    --skip-networking --pid-file=/tmp/mysqld.pid >/tmp/mysqld.log 2>&1 &
+                  READY=0
+                  for _ in $(seq 1 60); do
+                    if mariadb --socket=/tmp/mysqld.sock -e 'SELECT 1' >/dev/null 2>&1; then
+                      READY=1
+                      break
+                    fi
+                    sleep 1
+                  done
+                  if [ "${READY}" != "1" ]; then
+                    echo "[ERROR] Ephemeral MariaDB did not start:"
+                    cat /tmp/mysqld.log
+                    exit 1
+                  fi
+
+                  echo "[$(date)] Restoring $(cat /staging/restore.name) ..."
+                  zcat /staging/restore.sql.gz | mariadb --socket=/tmp/mysqld.sock
+
+                  TABLES=$(mariadb --socket=/tmp/mysqld.sock -N -B \
+                    -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress'")
+                  echo "[OK] Restored tables: ${TABLES}"
+                  if [ "${TABLES}" -lt 1 ]; then
+                    echo "[ERROR] Restore validation failed: no tables restored"
+                    exit 1
+                  fi
+                  for t in wp_posts wp_options wp_users; do
+                    CNT=$(mariadb --socket=/tmp/mysqld.sock -N -B \
+                      -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='wordpress' AND table_name='${t}'")
+                    if [ "${CNT}" != "1" ]; then
+                      echo "[ERROR] Restore validation failed: missing table ${t}"
+                      exit 1
+                    fi
+                  done
+
+                  mariadb-admin --socket=/tmp/mysqld.sock shutdown || true
+
+                  DURATION=$(( $(date +%s) - START ))
+                  echo "[$(date)] Restore drill OK in ${DURATION}s"
+
+                  NOW=$(date +%s)
+                  cat > /host-metrics/cms_backup_restore.prom <<EOF
+                  # HELP cms_backup_restore_last_success_timestamp_seconds Unix time of the last successful restore drill.
+                  # TYPE cms_backup_restore_last_success_timestamp_seconds gauge
+                  cms_backup_restore_last_success_timestamp_seconds ${NOW}
+                  # HELP cms_backup_restore_duration_seconds Duration of the last successful restore drill.
+                  # TYPE cms_backup_restore_duration_seconds gauge
+                  cms_backup_restore_duration_seconds ${DURATION}
+                  EOF
+                  chmod 0644 /host-metrics/cms_backup_restore.prom
+              volumeMounts:
+                - name: staging
+                  mountPath: /staging
+                - name: node-metrics
+                  mountPath: /host-metrics
+          volumes:
+            - name: staging
+              emptyDir: {}
+            - name: node-metrics
+              hostPath:
+                path: /var/lib/prometheus/node-exporter
+                type: DirectoryOrCreate

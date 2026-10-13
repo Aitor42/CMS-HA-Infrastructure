@@ -1,0 +1,13 @@
+# Kustomize root — Prometheus scrape RBAC (least privilege, read-only).
+#
+# Kept separate from kubernetes/base because the ServiceAccount lives in
+# kube-system and the kustomize `namespace:` transformer used by the other roots
+# would otherwise rewrite it. Applied by the `kubernetes` phase so the monitoring
+# phase only has to mint the bearer token. Apply with:
+#
+#   kubectl apply -k kubernetes/monitoring
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - prometheus-rbac.yaml

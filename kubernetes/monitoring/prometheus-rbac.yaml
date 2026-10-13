@@ -1,0 +1,46 @@
+# prometheus-rbac.yaml
+# Least-privilege read-only access for the Prometheus instance on
+# internal-monitor so it can scrape K3s control-plane / kubelet metrics.
+#
+# Namespace note: this directory deliberately has NO `namespace:` field in its
+# kustomization (unlike base/backups/jobs): the ServiceAccount lives in
+# kube-system and a `namespace:` transformer would rewrite it. The ServiceAccount
+# namespace is set explicitly below.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/part-of: cms-ha
+    app.kubernetes.io/component: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-metrics-reader
+  labels:
+    app.kubernetes.io/part-of: cms-ha
+    app.kubernetes.io/component: monitoring
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "nodes/proxy", "pods", "services", "endpoints", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+  labels:
+    app.kubernetes.io/part-of: cms-ha
+    app.kubernetes.io/component: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: kube-system

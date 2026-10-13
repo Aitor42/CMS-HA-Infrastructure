@@ -1,0 +1,14 @@
+# Lab overlay patch: tag the MariaDB workload as belonging to the lab
+# environment so per-environment queries/alerts can target it.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  namespace: cms
+  labels:
+    environment: lab
+spec:
+  template:
+    metadata:
+      labels:
+        environment: lab
