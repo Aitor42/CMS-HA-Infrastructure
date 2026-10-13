@@ -1,0 +1,20 @@
+# blackbox.yml — blackbox_exporter probe modules.
+#
+# Prometheus drives these from the monitor node to check that the LB and the
+# CMS frontends are actually reachable end-to-end (not just that a process is
+# running). See the 'blackbox' job in prometheus.yml.
+modules:
+  # HTTP probe. insecure_skip_verify is required because the LB serves the
+  # cluster's own (internal-CA) certificate, which the monitor does not trust.
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+      tls_config:
+        insecure_skip_verify: true
+
+  # TCP connect probe for non-HTTP endpoints.
+  tcp_connect:
+    prober: tcp
+    timeout: 5s

@@ -1,0 +1,51 @@
+# Alertmanager configuration — deployed by Puppet (role::monitor) to
+# /etc/prometheus/alertmanager.yml on internal-monitor (Ubuntu package
+# prometheus-alertmanager, listening on tcp/9093).
+#
+# Prometheus forwards firing alerts here via the `alerting:` block in
+# prometheus.yml. This baseline routes everything to a no-op `default`
+# receiver so the daemon stays healthy and alerts are visible in the
+# Alertmanager UI (http://192.168.10.20:9093) and through `amtool`; add a real
+# integration below to also *deliver* notifications. See docs/MANUAL.md §4
+# ("Alertmanager Notifications") for the full step-by-step procedure.
+#
+# Example: enable webhook, email and Slack delivery by extending `receivers`:
+#
+#   receivers:
+#     - name: 'default'
+#       webhook_configs:
+#         - url: 'http://192.168.10.20:5001/alert'   # generic webhook
+#           send_resolved: true
+#       email_configs:
+#         - to: 'ops@example.com'
+#           from: 'alertmanager@internal.local'
+#           smarthost: 'localhost:25'
+#       slack_configs:
+#         - api_url: 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+#           channel: '#alerts'
+#           send_resolved: true
+#
+# Example: throttle low-severity noise with a child route (uncomment inside
+# `route`); `matchers` requires Alertmanager >= 0.22 (jammy ships 0.23):
+#
+#   routes:
+#     - matchers: [ severity = "warning" ]
+#       receiver: 'default'
+#       group_wait: 5m
+#       repeat_interval: 12h
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: 'default'
+  # Group by alert so a single incident produces one notification, not N.
+  group_by: ['alertname', 'severity']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  # No-op receiver: keeps Alertmanager running without an external dependency.
+  # Replace/extend with webhook, email or Slack integrations to deliver alerts.
+  - name: 'default'
