@@ -1,6 +1,7 @@
 # role::monitor — Prometheus + Grafana observability stack (internal-monitor).
 #
-# Manages: Prometheus binary + config file, Grafana APT repo + package +
+# Manages: Prometheus binary + config file, Prometheus Alertmanager
+# (prometheus-alertmanager package + config), Grafana APT repo + package +
 # provisioning files (datasource and dashboard provider), UFW rules.
 
 class role::monitor {
@@ -30,6 +31,54 @@ class role::monitor {
     ensure  => running,
     enable  => true,
     require => Package['prometheus'],
+  }
+
+  # ---------------------------------------------------------------------------
+  # PROMETHEUS ALERTMANAGER — alert routing/deduplication (same node)
+  # Prometheus forwards firing alerts here (see the `alerting:` block in
+  # prometheus.yml). Listens on tcp/9093; config at /etc/prometheus/alertmanager.yml.
+  # ---------------------------------------------------------------------------
+  package { 'prometheus-alertmanager':
+    ensure => installed,
+  }
+
+  file { '/etc/prometheus/alertmanager.yml':
+    ensure  => file,
+    owner   => 'prometheus',
+    group   => 'prometheus',
+    mode    => '0644',
+    source  => 'puppet:///modules/role/prometheus/alertmanager.yml',
+    require => Package['prometheus-alertmanager'],
+    notify  => Service['prometheus-alertmanager'],
+  }
+
+  service { 'prometheus-alertmanager':
+    ensure  => running,
+    enable  => true,
+    require => Package['prometheus-alertmanager'],
+  }
+
+  # ---------------------------------------------------------------------------
+  # BLACKBOX EXPORTER — HTTP/TCP reachability probes for Prometheus
+  # ---------------------------------------------------------------------------
+  package { 'prometheus-blackbox-exporter':
+    ensure => installed,
+  }
+
+  file { '/etc/blackbox_exporter/config.yml':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    source  => 'puppet:///modules/role/prometheus/blackbox.yml',
+    require => Package['prometheus-blackbox-exporter'],
+    notify  => Service['prometheus-blackbox-exporter'],
+  }
+
+  service { 'prometheus-blackbox-exporter':
+    ensure  => running,
+    enable  => true,
+    require => Package['prometheus-blackbox-exporter'],
   }
 
   # ---------------------------------------------------------------------------
@@ -138,6 +187,18 @@ class role::monitor {
     notify  => Service['grafana-server'],
   }
 
+  # HA overview: DRBD replication/role, etcd quorum, keepalived VIP ownership,
+  # blackbox probes and k6 load-test metrics (see alert-rules.yml).
+  file { '/var/lib/grafana/dashboards/ha-overview.json':
+    ensure  => file,
+    owner   => 'grafana',
+    group   => 'grafana',
+    mode    => '0644',
+    source  => 'puppet:///modules/role/grafana/ha-overview.json',
+    require => File['/var/lib/grafana/dashboards'],
+    notify  => Service['grafana-server'],
+  }
+
   # ---------------------------------------------------------------------------
   # UFW — Firewall rules for the monitor node
   # ---------------------------------------------------------------------------
@@ -150,6 +211,18 @@ class role::monitor {
   exec { 'ufw-grafana':
     command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 3000 proto tcp comment "Grafana"',
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "3000"',
+    require => Exec['ufw-enable'],
+  }
+
+  exec { 'ufw-blackbox':
+    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 9115 proto tcp comment "Blackbox exporter"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9115"',
+    require => Exec['ufw-enable'],
+  }
+
+  exec { 'ufw-alertmanager':
+    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 9093 proto tcp comment "Alertmanager"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9093"',
     require => Exec['ufw-enable'],
   }
 }

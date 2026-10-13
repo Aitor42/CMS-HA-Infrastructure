@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
@@ -38,76 +39,117 @@ func (p *Phase) Name() string {
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
-	
+
 	monitorIP := p.cfg.Nodes.Monitor.IP
-	
+
 	logging.Info("Running Puppet agent on Monitor node...")
-	_, _, exitCode, err := p.pool.RunCommand(ctx, monitorIP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
-	if exitCode != 0 && exitCode != 2 {
-		return fmt.Errorf("puppet agent failed on monitor node (exit code %d): %v", exitCode, err)
+	if _, _, err := phases.RunPuppetAgent(ctx, p.pool, monitorIP, "monitor node"); err != nil {
+		return err
 	}
-	
+
 	logging.Info("Running Puppet agent on exporter nodes in parallel...")
 	var exporterIPs []string
-	for _, m := range p.cfg.Nodes.Masters { exporterIPs = append(exporterIPs, m.IP) }
-	for _, w := range p.cfg.Nodes.Workers { exporterIPs = append(exporterIPs, w.IP) }
-	for _, c := range p.cfg.Nodes.CMSFrontends { exporterIPs = append(exporterIPs, c.IP) }
-	if p.cfg.Nodes.Storage.IP != "" {
-		exporterIPs = append(exporterIPs, p.cfg.Nodes.Storage.IP)
-	}
-	exporterIPs = append(exporterIPs, p.cfg.Nodes.LB.IP)
-	exporterIPs = append(exporterIPs, p.cfg.Nodes.Router.IP)
-	
-	res := p.pool.RunParallel(ctx, exporterIPs, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
-	for _, r := range res {
-		if r.ExitCode != 0 && r.ExitCode != 2 {
-			logging.Warn("puppet agent failed on %s (exit code %d)", r.Host, r.ExitCode)
+	seen := make(map[string]struct{})
+	addExporter := func(ip string) {
+		if ip == "" {
+			return
 		}
+		if _, dup := seen[ip]; dup {
+			return
+		}
+		seen[ip] = struct{}{}
+		exporterIPs = append(exporterIPs, ip)
 	}
-	
-	logging.Info("Syncing K3s bearer token for kubelet metrics...")
+	for _, m := range p.cfg.Nodes.Masters {
+		addExporter(m.IP)
+	}
+	for _, w := range p.cfg.Nodes.Workers {
+		addExporter(w.IP)
+	}
+	for _, c := range p.cfg.Nodes.CMSFrontends {
+		addExporter(c.IP)
+	}
+	addExporter(p.cfg.Nodes.Storage.IP)
+	for _, lb := range p.cfg.Nodes.LBs {
+		addExporter(lb.IP)
+	}
+	addExporter(p.cfg.Nodes.Router.IP)
+
+	// Tolerant: a missing exporter is a monitoring gap, not a deploy stopper.
+	if err := phases.RunPuppetAgentParallel(ctx, p.pool, exporterIPs); err != nil {
+		logging.Warn("puppet agent issues on exporter nodes (continuing): %v", err)
+	}
+
+	logging.Info("Minting K3s bearer token for kubelet metrics...")
 	if len(p.cfg.Nodes.Masters) > 0 && p.cfg.Nodes.Masters[0].IP != "" {
 		masterIP := p.cfg.Nodes.Masters[0].IP
-		tokCmd := `kubectl create serviceaccount prometheus -n kube-system 2>/dev/null || true; ` +
-			`kubectl create clusterrolebinding prometheus --clusterrole=cluster-admin --serviceaccount=kube-system:prometheus 2>/dev/null || true; ` +
-			`kubectl create token prometheus -n kube-system --duration=87600h 2>/dev/null || true`
-		if tok, _, _, err := p.pool.RunCommand(ctx, masterIP, tokCmd); err == nil && strings.TrimSpace(tok) != "" {
-			token := strings.TrimSpace(tok)
-			_ = p.pool.CopyContent(ctx, monitorIP, []byte(token+"\n"), "/etc/prometheus/k3s.token", 0600)
-			p.pool.RunCommand(ctx, monitorIP, "chown prometheus:prometheus /etc/prometheus/k3s.token && systemctl reload prometheus")
+
+		// The Prometheus ServiceAccount and its least-privilege, read-only RBAC
+		// (ClusterRole prometheus-metrics-reader + matching binding) are declared
+		// in kubernetes/monitoring/ and applied by the kubernetes phase, so no
+		// over-privileged cluster-admin binding is ever created here. This phase
+		// only mints the bearer token the scraper authenticates with.
+		tok, _, code, err := p.pool.RunCommand(ctx, masterIP, "kubectl create token prometheus -n kube-system --duration=8760h")
+		token := strings.TrimSpace(tok)
+		if err != nil || code != 0 {
+			logging.Warn("failed to mint the Prometheus bearer token (exit %d): %v", code, err)
+		} else if token != "" {
+			// Token is bounded to 1 year (rotate by re-running the phase) so
+			// it is not an effectively permanent credential for the
+			// kubelet metrics API.
+			if err := p.pool.CopyContent(ctx, monitorIP, []byte(token+"\n"), "/etc/prometheus/k3s.token", 0600); err != nil {
+				logging.Warn("failed to update Prometheus token file: %v", err)
+			} else if _, _, _, rerr := p.pool.RunCommand(ctx, monitorIP, "chown prometheus:prometheus /etc/prometheus/k3s.token && systemctl reload prometheus"); rerr != nil {
+				logging.Warn("failed to reload prometheus with the new token: %v", rerr)
+			}
 		}
+	}
+
+	logging.Info("Deploying Prometheus alert rules...")
+	if rules, rerr := cms.TemplatesFS.ReadFile("templates/monitoring/alert-rules.yml"); rerr != nil {
+		logging.Warn("failed to read embedded alert rules: %v", rerr)
+	} else if cerr := p.pool.CopyContent(ctx, monitorIP, rules, "/etc/prometheus/alert-rules.yml", 0644); cerr != nil {
+		logging.Warn("failed to deploy alert rules: %v", cerr)
+	} else if _, _, _, rerr := p.pool.RunCommand(ctx, monitorIP, "chown prometheus:prometheus /etc/prometheus/alert-rules.yml && systemctl reload prometheus"); rerr != nil {
+		logging.Warn("failed to reload prometheus after deploying alert rules: %v", rerr)
 	}
 
 	logging.Info("Verifying Prometheus and Grafana services...")
 	verifyCmd := "systemctl is-active prometheus && systemctl is-active grafana-server"
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func() error {
-		_, _, _, err := p.pool.RunCommand(ctx, monitorIP, verifyCmd)
-		return err
+	verifyErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+		_, _, _, rerr := p.pool.RunCommand(attemptCtx, monitorIP, verifyCmd)
+		return rerr
 	})
-	if err != nil {
-		return fmt.Errorf("monitoring services not active: %w", err)
+	if verifyErr != nil {
+		return fmt.Errorf("monitoring services not active: %w", verifyErr)
 	}
-	
+
+	// The blackbox exporter is best-effort: its absence is a monitoring gap,
+	// not a deploy stopper (Prometheus simply marks the blackbox job down).
+	if _, _, _, err := p.pool.RunCommand(ctx, monitorIP, "systemctl is-active prometheus-blackbox-exporter"); err != nil {
+		logging.Warn("blackbox exporter is not active on the monitor node: %v", err)
+	}
+
 	logging.Info("Testing Prometheus API reachability...")
-	err = retry.Do(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func() error {
-		out, _, _, err := p.pool.RunCommand(ctx, monitorIP, "curl -s http://localhost:9090/api/v1/status/buildinfo")
-		if err != nil {
-			return err
+	apiErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+		out, _, _, rerr := p.pool.RunCommand(attemptCtx, monitorIP, "curl -s http://localhost:9090/api/v1/status/buildinfo")
+		if rerr != nil {
+			return rerr
 		}
 		if !strings.Contains(out, "version") {
 			return fmt.Errorf("prometheus API invalid response: %s", out)
 		}
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("prometheus API test failed: %w", err)
+	if apiErr != nil {
+		return fmt.Errorf("prometheus API test failed: %w", apiErr)
 	}
-	
+
 	logging.Info("Checking Prometheus scrape targets health...")
 	if out, _, _, err := p.pool.RunCommand(ctx, monitorIP, `curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"up"' | wc -l`); err == nil {
 		logging.Info("Prometheus active targets reporting UP: %s", strings.TrimSpace(out))
 	}
-	
+
 	logging.Success("Monitoring Setup completed successfully.")
 	return nil
 }

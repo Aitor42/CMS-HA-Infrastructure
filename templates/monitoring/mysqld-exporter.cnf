@@ -1,5 +1,0 @@
-[client]
-user=exporter
-password=exporter_password
-host=127.0.0.1
-port=30306

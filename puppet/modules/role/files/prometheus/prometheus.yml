@@ -3,6 +3,24 @@ global:
   evaluation_interval: 15s
   scrape_timeout:      10s
 
+# ── Alertmanager ───────────────────────────────────────────────────────────
+# Prometheus pushes firing alerts to Alertmanager, which is installed on this
+# same node by role::monitor (prometheus-alertmanager package, tcp/9093) and
+# configured through /etc/prometheus/alertmanager.yml. Alerts remain visible in
+# Prometheus (`/alerts`) and Grafana regardless of delivery settings.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'localhost:9093'
+
+# ── Alert rule files ──────────────────────────────────────────────────────
+# Deployed by the monitoring phase (`cms-ha`), which owns this file's sibling
+# /etc/prometheus/alert-rules.yml. Evaluated every evaluation_interval (15 s):
+# availability, DRBD/etcd quorum, keepalived, service and backup health.
+rule_files:
+  - '/etc/prometheus/alert-rules.yml'
+
 scrape_configs:
 
   # ── Node resource metrics (node_exporter on every node) ────────────────────
@@ -13,11 +31,13 @@ scrape_configs:
           - '192.168.10.10:9100'   # jumpstart
           - '192.168.10.11:9100'   # internal-master1
           - '192.168.10.12:9100'   # internal-master2
+          - '192.168.10.16:9100'   # internal-master3
           - '192.168.10.13:9100'   # internal-worker1
           - '192.168.10.14:9100'   # internal-worker2
           - '192.168.10.15:9100'   # internal-storage
           - '192.168.10.20:9100'   # internal-monitor (self)
-          - '192.168.20.100:9100'  # main-lb
+          - '192.168.20.103:9100'  # main-lb1
+          - '192.168.20.104:9100'  # main-lb2
           - '192.168.20.101:9100'  # main-cms1
           - '192.168.20.102:9100'  # main-cms2
 
@@ -25,7 +45,8 @@ scrape_configs:
   - job_name: 'nginx'
     static_configs:
       - targets:
-          - '192.168.20.100:9113'  # nginx_exporter on main-lb
+          - '192.168.20.103:9113'  # nginx_exporter on main-lb1
+          - '192.168.20.104:9113'  # nginx_exporter on main-lb2
 
   # ── Apache CMS frontend metrics ────────────────────────────────────────────
   - job_name: 'apache'
@@ -53,6 +74,39 @@ scrape_configs:
       - targets:
           - '192.168.10.11:10250'  # internal-master1 kubelet
           - '192.168.10.12:10250'  # internal-master2 kubelet
+          - '192.168.10.16:10250'  # internal-master3 kubelet
           - '192.168.10.13:10250'  # internal-worker1 kubelet
           - '192.168.10.14:10250'  # internal-worker2 kubelet
     metrics_path: /metrics
+
+  # ── etcd metrics (quorum visibility) ───────────────────────────────────────
+  # K3s exposes the embedded etcd metrics on the supervisor port 2381 of every
+  # server. Used by the EtcdNoQuorum alert: fewer than two reachable members of
+  # the three-member cluster means no quorum (the API goes read-only).
+  - job_name: 'etcd'
+    scheme: http
+    static_configs:
+      - targets:
+          - '192.168.10.11:2381'  # internal-master1
+          - '192.168.10.12:2381'  # internal-master2
+          - '192.168.10.16:2381'  # internal-master3
+
+  # ── Blackbox endpoint probes (end-to-end reachability) ─────────────────────
+  # Prometheus scrapes blackbox_exporter, which probes each target over HTTP.
+  # probe_success == 0 means the endpoint (or the path to it) is down.
+  - job_name: 'blackbox'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - 'https://192.168.20.100/'  # LB VIP (HTTPS entrypoint)
+          - 'http://192.168.20.101/'   # main-cms1
+          - 'http://192.168.20.102/'   # main-cms2
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9115
