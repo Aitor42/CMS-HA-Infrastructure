@@ -2,6 +2,7 @@ package puppet
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -29,9 +30,30 @@ func (p *Phase) Description() string {
 	return "Install Puppet Server on Jumpstart and Puppet Agents on all nodes"
 }
 
+// tailLines returns the last few non-empty lines of s for error reporting.
+func tailLines(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n\r"), "\n")
+	if len(lines) > 10 {
+		lines = lines[len(lines)-10:]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
+	if p.cfg.Database.Password == "" || p.cfg.Database.ExporterPassword == "" || p.cfg.WordPress.AdminPassword == "" {
+		return fmt.Errorf("database.password, database.exporter_password, and wordpress.admin_password must be set in config.yaml")
+	}
+	for name, secret := range map[string]string{
+		"database.password":          p.cfg.Database.Password,
+		"database.exporter_password": p.cfg.Database.ExporterPassword,
+		"wordpress.admin_password":   p.cfg.WordPress.AdminPassword,
+	} {
+		if strings.ContainsAny(secret, "\r\n") {
+			return fmt.Errorf("%s cannot contain line breaks", name)
+		}
+	}
 
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
 	if jumpstartIP == "" {
@@ -49,7 +71,14 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Applying Puppet catalog on Jumpstart...")
-	p.pool.RunCommand(ctx, jumpstartIP, "/opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local || [ $? -eq 2 ]")
+	stdout, stderr, err := phases.RunPuppetAgentCmd(ctx, p.pool, jumpstartIP, "jumpstart", phases.PuppetAgentCommand("jumpstart.internal.local"))
+	if err != nil {
+		// Jumpstart convergence bootstraps the puppetserver; letting a failed
+		// catalog slide here makes every later phase fail with confusing
+		// errors much further down the line.
+		logging.Warn("puppet agent output on %s (tail):\n%s", jumpstartIP, tailLines(stdout))
+		return fmt.Errorf("puppet agent failed on jumpstart %s: %v\n%s", jumpstartIP, err, tailLines(stderr))
+	}
 
 	agentNodes := p.getAgentNodes()
 
@@ -156,7 +185,6 @@ func (p *Phase) uploadPuppetCode(ctx context.Context, jumpstartIP string) error 
 	}
 	remoteCodeDir := "/etc/puppetlabs/code/environments/production"
 
-	// Create directories
 	_, _, _, err := p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("mkdir -p %s", remoteCodeDir))
 	if err != nil {
 		return err
@@ -166,7 +194,7 @@ func (p *Phase) uploadPuppetCode(ctx context.Context, jumpstartIP string) error 
 	if err != nil {
 		return fmt.Errorf("copy dir failed: %w", err)
 	}
-	
+
 	// Fix ownership and permissions
 	chownCmd := fmt.Sprintf("chown -R puppet:puppet %s && chmod -R u+rwX,go+rX %s", remoteCodeDir, remoteCodeDir)
 	p.pool.RunCommand(ctx, jumpstartIP, chownCmd)
@@ -193,24 +221,19 @@ func (p *Phase) installAgents(ctx context.Context, nodes []config.NodeSpec) erro
 		nodeSpec := n
 		tasks[nodeSpec.IP] = func(ctx context.Context, pool *ssh.Pool) error {
 			cmd := fmt.Sprintf(`
+				set -e
 				export DEBIAN_FRONTEND=noninteractive
-				cloud-init status --wait 2>/dev/null || true
-				for i in {1..30}; do
-					if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-						break
-					fi
-					sleep 2
-				done
+				%s
 				if ! dpkg -l | grep -q puppet8-release; then
 					wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
 					dpkg -i /tmp/puppet8-release-noble.deb || true
 					apt-get update
 				fi
 				dpkg -s puppet-agent >/dev/null 2>&1 || apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -y puppet-agent
-				
+
 				ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
 				grep -q "jumpstart.internal.local" /etc/hosts || echo "%s jumpstart.internal.local jumpstart puppet" >> /etc/hosts
-				
+
 				mkdir -p /etc/puppetlabs/puppet
 				cat << 'EOF_PUPPET' > /etc/puppetlabs/puppet/puppet.conf
 [main]
@@ -220,8 +243,8 @@ runinterval = 30m
 certname = %s
 EOF_PUPPET
 
-				systemctl enable puppet || true
-			`, jumpstartIP, nodeSpec.FQDN)
+				systemctl enable puppet
+			`, ssh.AptLockWaitSnippet, jumpstartIP, nodeSpec.FQDN)
 
 			_, _, code, err := pool.RunCommand(ctx, nodeSpec.IP, cmd)
 			if err != nil || code != 0 {
@@ -274,10 +297,10 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 
 			logging.Info("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP)
 
-			// Stop background daemon to avoid catalog run lock contention
-			p.pool.RunCommand(ctx, spec.IP, "systemctl stop puppet 2>/dev/null || true")
-
+			// Stop the background daemon first (same session) to avoid catalog
+			// run lock contention.
 			cmd := `
+				systemctl stop puppet 2>/dev/null || true
 				/opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local
 				code=$?
 				if [ $code -eq 0 ] || [ $code -eq 2 ]; then
@@ -291,8 +314,7 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 			stdout, stderr, code, err := p.pool.RunCommand(nodeCtx, spec.IP, cmd)
 
 			// Self-healing: if SSL certificate does not match private key, revoke and purge
-			combinedOutput := stdout + " " + stderr
-			if code != 0 && strings.Contains(combinedOutput, "does not match its private key") {
+			if code != 0 && (strings.Contains(stdout, "does not match its private key") || strings.Contains(stderr, "does not match its private key")) {
 				logging.Warn("Certificate mismatch detected on %s (%s). Performing self-healing SSL reset...", spec.Name, spec.FQDN)
 				p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("puppetserver ca clean --certname %s 2>/dev/null || true", spec.FQDN))
 				p.pool.RunCommand(ctx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl")
