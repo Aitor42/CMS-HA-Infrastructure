@@ -99,7 +99,7 @@ class role::router {
   }
 
   exec { 'ufw-route-monitor-scrape-nginx':
-    command => '/usr/sbin/ufw route allow proto tcp from 192.168.10.20 to 192.168.20.100 port 9113 comment "Monitor -> Nginx exporter"',
+    command => '/usr/sbin/ufw route allow proto tcp from 192.168.10.20 to 192.168.20.0/24 port 9113 comment "Monitor -> Nginx exporter"',
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9113.*Monitor.*Nginx"',
     require => Exec['ufw-enable'],
   }

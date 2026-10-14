@@ -124,6 +124,14 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
   # WORDPRESS — wp-config.php with database credentials
   # ---------------------------------------------------------------------------
+  file { '/usr/local/sbin/cms-ha-configure-wordpress.py':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+    source => 'puppet:///modules/role/cms-ha/configure-wordpress.py',
+  }
+
   exec { 'wordpress-config-create':
     command => '/bin/cp /var/www/html/wp-config-sample.php /var/www/html/wp-config.php',
     creates => '/var/www/html/wp-config.php',
@@ -143,9 +151,9 @@ class role::cms_frontend {
   }
 
   exec { 'wordpress-config-db-pass':
-    command => "/bin/sed -i \"s/password_here/WpS3cur3P4ss!/\" /var/www/html/wp-config.php",
-    unless  => "/usr/bin/grep -q \"define.*DB_PASSWORD.*'WpS3cur3P4ss!'\" /var/www/html/wp-config.php",
-    require => Exec['wordpress-config-create'],
+    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py configure-db',
+    unless  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py check-db',
+    require => [Exec['wordpress-config-create'], File['/usr/local/sbin/cms-ha-configure-wordpress.py']],
   }
 
   exec { 'wordpress-config-db-host':
@@ -214,15 +222,7 @@ class role::cms_frontend {
   # WORDPRESS CORE INSTALL — Runs only if WordPress is not yet installed in DB
   # ---------------------------------------------------------------------------
   exec { 'wordpress-core-install':
-    command => '/usr/local/bin/wp core install \
-      --url="https://cms.fake-enterprise.com" \
-      --title="Fake Enterprise CMS" \
-      --admin_user="admin" \
-      --admin_password="WpS3cur3P4ss!" \
-      --admin_email="admin@fake-enterprise.com" \
-      --skip-email \
-      --allow-root \
-      --path=/var/www/html',
+    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py install',
     onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
     unless  => '/usr/bin/test -x /usr/local/bin/wp && /usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
     require => [
@@ -230,6 +230,7 @@ class role::cms_frontend {
       Exec['wordpress-config-db-host'],
       Exec['wordpress-config-db-user'],
       Exec['wordpress-config-db-pass'],
+      File['/usr/local/sbin/cms-ha-configure-wordpress.py'],
       Exec['wordpress-config-db-name'],
       Exec['wordpress-config-ssl-reverse-proxy'],
       Mount['/var/www/html/wp-content/uploads'],

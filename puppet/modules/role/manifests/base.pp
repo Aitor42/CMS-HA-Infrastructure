@@ -44,10 +44,76 @@ class role::base {
   # ---------------------------------------------------------------------------
   # NODE EXPORTER
   # ---------------------------------------------------------------------------
+  # Enable the textfile collector so in-cluster CronJobs can publish their own
+  # metrics (e.g. cms_backup_last_success_timestamp_seconds) without adding an
+  # extra exporter.
+  file { '/var/lib/prometheus/node-exporter':
+    ensure  => directory,
+    owner   => 'prometheus',
+    group   => 'prometheus',
+    mode    => '0755',
+    require => Package['prometheus-node-exporter'],
+  }
+
+  file { '/etc/default/prometheus-node-exporter':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "ARGS=\"--collector.textfile.directory=/var/lib/prometheus/node-exporter\"\n",
+    notify  => Service['prometheus-node-exporter'],
+    require => Package['prometheus-node-exporter'],
+  }
+
   service { 'prometheus-node-exporter':
     ensure  => running,
     enable  => true,
     require => Package['prometheus-node-exporter'],
+  }
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY ACCOUNT — non-root orchestration user with audited sudo
+  # ---------------------------------------------------------------------------
+  # The orchestrator logs in as this non-root account (`ssh.user`) and elevates
+  # privileged commands with `sudo -n`. Command scope is intentionally broad
+  # (the orchestrator runs arbitrary privileged operations), so scope is
+  # enforced by the dedicated, key-only account plus disabled root logins below,
+  # and every sudo invocation is logged.
+  file { '/etc/sudoers.d/90-cms-ha':
+    ensure       => file,
+    owner        => 'root',
+    group        => 'root',
+    mode         => '0440',
+    validate_cmd => '/usr/sbin/visudo -cf %',
+    content      => @("SUDOERS"),
+      # Managed by CMS-HA — non-root deploy account for the orchestrator.
+      Defaults:ubuntu !requiretty
+      Defaults log_output
+      ubuntu ALL=(ALL) NOPASSWD:ALL
+      | SUDOERS
+  }
+
+  # ---------------------------------------------------------------------------
+  # SSHD — no direct root logins (use the deploy account + sudo instead)
+  # ---------------------------------------------------------------------------
+  package { 'openssh-server':
+    ensure => installed,
+  }
+
+  file { '/etc/ssh/sshd_config.d/10-cms-ha-root-login.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "PermitRootLogin no\n",
+    notify  => Service['sshd'],
+    require => Package['openssh-server'],
+  }
+
+  service { 'sshd':
+    ensure  => running,
+    enable  => true,
+    require => Package['openssh-server'],
   }
 
   # ---------------------------------------------------------------------------
@@ -65,19 +131,22 @@ class role::base {
       # Perimeter router and firewall
       192.168.10.1    ufw-router.internal.local ufw-router
 
-      # Jumpstart / Puppet Server
-      192.168.10.10   jumpstart.internal.local jumpstart puppet
+      # Jumpstart / Puppet Server / Internal CA (step-ca)
+      192.168.10.10   jumpstart.internal.local jumpstart puppet ca.internal.local ca
 
       # Internal network (192.168.10.0/24)
       192.168.10.20   internal-monitor.internal.local internal-monitor
       192.168.10.11   internal-master1.internal.local internal-master1
       192.168.10.12   internal-master2.internal.local internal-master2
+      192.168.10.16   internal-master3.internal.local internal-master3
       192.168.10.13   internal-worker1.internal.local internal-worker1
       192.168.10.14   internal-worker2.internal.local internal-worker2
       192.168.10.15   internal-storage.internal.local internal-storage
 
       # Main network (192.168.20.0/24)
-      192.168.20.100  main-lb.main.local main-lb
+      192.168.20.100  main-lb.main.local main-lb   # keepalived VIP
+      192.168.20.103  main-lb1.main.local main-lb1
+      192.168.20.104  main-lb2.main.local main-lb2
       192.168.20.101  main-cms1.main.local main-cms1
       192.168.20.102  main-cms2.main.local main-cms2
 

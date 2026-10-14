@@ -14,7 +14,8 @@ node /^internal-monitor/ {
   include role::monitor
 }
 
-# K3s control-plane masters (also run DRBD for MariaDB HA)
+# K3s control-plane servers (master1/master2 also run DRBD for MariaDB HA;
+# master3 exists to give etcd an odd quorum and carries no DRBD disk)
 node /^internal-master/ {
   include role::k3s_master
 }
@@ -24,7 +25,7 @@ node /^internal-worker/ {
   include role::k3s_worker
 }
 
-# Nginx load balancer
+# Nginx load balancers (keepalived VIP 192.168.20.100)
 node /^main-lb/ {
   include role::loadbalancer
 }

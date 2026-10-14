@@ -1,6 +1,8 @@
-# role::k3s_master — K3s control-plane node (internal-master1, internal-master2).
+# role::k3s_master — K3s control-plane node (internal-master1, master2, master3).
 #
-# Manages: base dependencies and all UFW rules required by a K3s master.
+# Manages: base dependencies and all UFW rules required by a K3s server.
+# master1/master2 additionally have DRBD configured by the deploy phase; master3
+# is control-plane only (etcd quorum).
 # The K3s binary installation and cluster bootstrap remain in 06_setup_kubernetes.sh
 # because they require ordered token exchange between masters (not declarative state).
 
@@ -25,13 +27,12 @@ class role::k3s_master {
     mode   => '0755',
   }
 
-  file { '/etc/mysql/exporter.cnf':
-    ensure  => file,
-    owner   => 'root',
-    group   => 'root',
-    mode    => '0644',
-    content => "[client]\nuser=exporter\npassword=exporter_password\nhost=127.0.0.1\nport=30306\n",
-    require => File['/etc/mysql'],
+  file { '/usr/local/sbin/cms-ha-configure-mysqld-exporter.py':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+    source => 'puppet:///modules/role/cms-ha/configure-mysqld-exporter.py',
   }
 
   file { '/etc/default/prometheus-mysqld-exporter':
@@ -45,19 +46,51 @@ class role::k3s_master {
   package { 'prometheus-mysqld-exporter':
     ensure  => installed,
     require => [
-      File['/etc/mysql/exporter.cnf'],
+      File['/etc/mysql'],
       File['/etc/default/prometheus-mysqld-exporter'],
     ],
+  }
+
+  exec { 'configure-mysqld-exporter-credentials':
+    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-mysqld-exporter.py',
+    unless  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-mysqld-exporter.py check',
+    require => [Package['prometheus-mysqld-exporter'], File['/usr/local/sbin/cms-ha-configure-mysqld-exporter.py']],
+    notify  => Service['prometheus-mysqld-exporter'],
   }
 
   service { 'prometheus-mysqld-exporter':
     ensure    => running,
     enable    => true,
     subscribe => [
-      File['/etc/mysql/exporter.cnf'],
+      Exec['configure-mysqld-exporter-credentials'],
       File['/etc/default/prometheus-mysqld-exporter'],
     ],
     require   => Package['prometheus-mysqld-exporter'],
+  }
+
+  # ---------------------------------------------------------------------------
+  # DRBD METRICS — replication health published to node_exporter (textfile)
+  # ---------------------------------------------------------------------------
+  # Only master1/master2 run the DRBD resource; on master3 (and before the DRBD
+  # phase has run) the script finds no resource and publishes nothing, so the
+  # DRBD alerts never fire on a node that is not supposed to have DRBD.
+  file { '/usr/local/bin/cms-drbd-metrics.sh':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+    source => 'puppet:///modules/role/cms-ha/cms-drbd-metrics.sh',
+  }
+
+  cron { 'cms-drbd-metrics':
+    ensure  => present,
+    command => '/usr/local/bin/cms-drbd-metrics.sh >/dev/null 2>&1',
+    user    => 'root',
+    minute  => '*',
+    require => [
+      File['/usr/local/bin/cms-drbd-metrics.sh'],
+      File['/var/lib/prometheus/node-exporter'],
+    ],
   }
 
   # ---------------------------------------------------------------------------
@@ -75,6 +108,14 @@ class role::k3s_master {
   exec { 'ufw-etcd-peers':
     command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 2379:2380 proto tcp comment "etcd"',
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2379:2380/tcp"',
+    require => Exec['ufw-enable'],
+  }
+
+  # etcd metrics (k3s supervisor, exposed with --etcd-expose-metrics).
+  # Prometheus on internal-monitor scrapes them for the EtcdNoQuorum alert.
+  exec { 'ufw-etcd-metrics':
+    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 2381 proto tcp comment "etcd metrics"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2381"',
     require => Exec['ufw-enable'],
   }
 

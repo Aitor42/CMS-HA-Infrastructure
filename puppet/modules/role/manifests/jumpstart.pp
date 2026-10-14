@@ -79,4 +79,18 @@ class role::jumpstart {
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "111.*ALLOW"',
     require => Exec['ufw-enable'],
   }
+
+  # Internal CA (step-ca) — the load balancers (main network) renew their TLS
+  # certificates against it. Restricted to the two lab subnets; never public.
+  exec { 'ufw-allow-step-ca-internal':
+    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 8443 proto tcp comment "step-ca internal"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "8443/tcp.*192.168.10.0/24"',
+    require => Exec['ufw-enable'],
+  }
+
+  exec { 'ufw-allow-step-ca-main':
+    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 8443 proto tcp comment "step-ca main"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "8443/tcp.*192.168.20.0/24"',
+    require => Exec['ufw-enable'],
+  }
 }
