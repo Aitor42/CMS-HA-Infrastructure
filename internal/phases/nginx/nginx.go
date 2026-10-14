@@ -36,19 +36,24 @@ func (p *Phase) Name() string {
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
-	
+
 	if p.cfg.Nodes.Storage.IP != "" {
 		logging.Info("Converging Storage node %s (%s) for NFS shared persistence...", p.cfg.Nodes.Storage.Name, p.cfg.Nodes.Storage.IP)
-		_, _, code, err := p.pool.RunCommand(ctx, p.cfg.Nodes.Storage.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
-		if code != 0 && code != 2 {
-			return fmt.Errorf("puppet agent failed on storage %s (exit code %d): %v", p.cfg.Nodes.Storage.IP, code, err)
+		if _, _, err := phases.RunPuppetAgent(ctx, p.pool, p.cfg.Nodes.Storage.IP, "storage node"); err != nil {
+			return err
 		}
 	}
 
-	logging.Info("Running Puppet agent on LB node...")
-	_, _, code, err := p.pool.RunCommand(ctx, p.cfg.Nodes.LB.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
-	if code != 0 && code != 2 {
-		return fmt.Errorf("puppet agent failed on LB %s (exit code %d): %v", p.cfg.Nodes.LB.IP, code, err)
+	logging.Info("Running Puppet agent on LB nodes in parallel...")
+	var lbIPs []string
+	for _, lb := range p.cfg.Nodes.LBs {
+		if lb.IP == "" {
+			continue
+		}
+		lbIPs = append(lbIPs, lb.IP)
+	}
+	if err := phases.RunPuppetAgentParallel(ctx, p.pool, lbIPs); err != nil {
+		return err
 	}
 
 	logging.Info("Running Puppet agent on CMS frontends sequentially to prevent install race conditions...")
@@ -57,17 +62,19 @@ func (p *Phase) Run(ctx context.Context) error {
 			continue
 		}
 		logging.Info("Converging CMS frontend %s (%s)...", cms.Name, cms.IP)
-		_, _, code, err := p.pool.RunCommand(ctx, cms.IP, "/opt/puppetlabs/bin/puppet agent -t || [ $? -eq 2 ]")
-		if code != 0 && code != 2 {
-			return fmt.Errorf("puppet agent failed on %s (exit code %d): %v", cms.Name, code, err)
+		if _, _, err := phases.RunPuppetAgent(ctx, p.pool, cms.IP, cms.Name); err != nil {
+			return err
 		}
 	}
-	
-	logging.Info("Verifying Nginx configuration on LB...")
-	if _, _, _, err := p.pool.RunCommand(ctx, p.cfg.Nodes.LB.IP, "nginx -t && systemctl is-active nginx"); err != nil {
-		return fmt.Errorf("nginx verification failed on LB: %w", err)
+
+	logging.Info("Verifying Nginx configuration on LB nodes...")
+	resLB := p.pool.RunParallel(ctx, lbIPs, "nginx -t && systemctl is-active nginx")
+	for _, r := range resLB {
+		if r.Err != nil || r.ExitCode != 0 {
+			return fmt.Errorf("nginx verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
+		}
 	}
-	
+
 	logging.Info("Verifying Apache configuration on CMS nodes in parallel...")
 	var cmsIPs []string
 	for _, cms := range p.cfg.Nodes.CMSFrontends {
@@ -96,15 +103,15 @@ func (p *Phase) Run(ctx context.Context) error {
 			return fmt.Errorf("nfs mount verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
 		}
 	}
-	
+
 	logging.Info("Testing HTTPS reachability on Load Balancer...")
-	out, _, _, err := p.pool.RunCommand(ctx, p.cfg.Nodes.LB.IP, "curl -skI https://127.0.0.1/ | grep 'HTTP/'")
+	out, _, _, err := p.pool.RunCommand(ctx, p.cfg.PrimaryLB().IP, "curl -skI https://127.0.0.1/ | grep 'HTTP/'")
 	if err != nil || !strings.Contains(out, "HTTP/") {
 		logging.Warn("HTTPS check on LB reported: WordPress may still be initialising")
 	} else {
 		logging.Success("WordPress reachable via HTTPS on Load Balancer")
 	}
-	
+
 	logging.Success("NGINX & WordPress Setup completed successfully.")
 	return nil
 }

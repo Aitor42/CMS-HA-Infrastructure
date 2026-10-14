@@ -1,0 +1,9 @@
+[Unit]
+Description=Renew the CMS load-balancer TLS certificate (step-ca)
+Documentation=file:/usr/local/bin/cms-tls-renew.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cms-tls-renew.sh
