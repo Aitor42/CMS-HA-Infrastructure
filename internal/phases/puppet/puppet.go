@@ -86,6 +86,9 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := p.installAgents(ctx, agentNodes); err != nil {
 		return fmt.Errorf("install puppet agents: %w", err)
 	}
+	if err := p.installRuntimeSecretFiles(ctx); err != nil {
+		return fmt.Errorf("install runtime credentials for CMS and database exporter: %w", err)
+	}
 
 	logging.Info("Signing any pending agent certificates on Puppet Server...")
 	p.pool.RunCommand(ctx, jumpstartIP, "puppetserver ca sign --all 2>/dev/null || true")
@@ -99,8 +102,74 @@ func (p *Phase) Run(ctx context.Context) error {
 	return nil
 }
 
+// installRuntimeSecretFiles puts credentials on the nodes that consume them,
+// without exposing them as Puppet facts or embedding them in Puppet code.
+func (p *Phase) installRuntimeSecretFiles(ctx context.Context) error {
+	if p.cfg.Database.Password == "" || p.cfg.Database.ExporterPassword == "" || p.cfg.WordPress.AdminPassword == "" {
+		return fmt.Errorf("database.password, database.exporter_password, and wordpress.admin_password must be set")
+	}
+	credentials, err := json.Marshal(map[string]map[string]string{
+		"cms_ha": {
+			"database_password":          p.cfg.Database.Password,
+			"database_exporter_password": p.cfg.Database.ExporterPassword,
+			"wordpress_admin_password":   p.cfg.WordPress.AdminPassword,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal runtime facts: %w", err)
+	}
+	exporterCredentials, err := json.Marshal(map[string]map[string]string{
+		"cms_ha": {"database_exporter_password": p.cfg.Database.ExporterPassword},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal exporter credentials: %w", err)
+	}
+
+	type target struct {
+		name        string
+		credentials []byte
+	}
+	nodes := make(map[string]target)
+	for _, master := range p.cfg.Nodes.Masters {
+		if master.IP != "" {
+			nodes[master.IP] = target{name: master.Name, credentials: exporterCredentials}
+		}
+	}
+	for _, frontend := range p.cfg.Nodes.CMSFrontends {
+		if frontend.IP != "" {
+			nodes[frontend.IP] = target{name: frontend.Name, credentials: credentials}
+		}
+	}
+	tasks := make(map[string]func(context.Context, *ssh.Pool) error, len(nodes))
+	for ip, node := range nodes {
+		node := node
+		nodeIP := ip
+		tasks[nodeIP] = func(ctx context.Context, pool *ssh.Pool) error {
+			_, _, code, err := pool.RunCommand(ctx, nodeIP, "install -d -m 0700 /etc/cms-ha")
+			if err != nil {
+				return fmt.Errorf("prepare credentials directory on %s (%s): %w", node.name, nodeIP, err)
+			}
+			if code != 0 {
+				return fmt.Errorf("prepare credentials directory on %s (%s) exited with code %d", node.name, nodeIP, code)
+			}
+			if err := pool.CopyContent(ctx, nodeIP, node.credentials, "/etc/cms-ha/runtime-secrets.json", 0600); err != nil {
+				return fmt.Errorf("copy runtime credentials to %s (%s): %w", node.name, nodeIP, err)
+			}
+			return nil
+		}
+	}
+	for _, res := range p.pool.RunParallelFunc(ctx, tasks) {
+		if res.Err != nil {
+			return res.Err
+		}
+	}
+	return nil
+}
+
 func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) error {
-	p.pool.WaitForAptLock(ctx, jumpstartIP)
+	if err := p.pool.WaitForAptLock(ctx, jumpstartIP); err != nil {
+		return fmt.Errorf("wait for apt lock on jumpstart: %w", err)
+	}
 	cmd := `
 		export DEBIAN_FRONTEND=noninteractive
 		
