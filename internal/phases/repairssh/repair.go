@@ -31,35 +31,35 @@ func (p *Phase) Description() string {
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
-	
+
 	allNodes := p.cfg.AllNodes()
 	allIPs := p.cfg.AllNodeIPs()
-	
+
+	logging.Info("Cleaning local known_hosts before connecting...")
+	if err := p.cleanKnownHosts(allIPs); err != nil {
+		logging.Warn("Failed to clean known_hosts: %v", err)
+	}
+
 	logging.Info("Waiting for SSH on all nodes...")
 	if err := p.pool.WaitForAllSSH(ctx, allIPs, 5*time.Minute); err != nil {
 		return fmt.Errorf("failed waiting for SSH: %w", err)
 	}
-	
-	logging.Info("Cleaning local known_hosts...")
-	if err := p.cleanKnownHosts(allIPs); err != nil {
-		logging.Warn("Failed to clean known_hosts: %v", err)
-	}
-	
+
 	logging.Info("Setting hostnames on all nodes...")
 	if err := p.setHostnames(ctx, allNodes); err != nil {
 		return fmt.Errorf("failed setting hostnames: %w", err)
 	}
-	
+
 	logging.Info("Generating and distributing /etc/hosts...")
 	if err := p.generateHosts(ctx, allNodes); err != nil {
 		return fmt.Errorf("failed generating hosts file: %w", err)
 	}
-	
+
 	logging.Info("Propagating Jumpstart SSH key to all nodes...")
 	if err := p.propagateSSHKeys(ctx, allNodes); err != nil {
 		return fmt.Errorf("failed propagating SSH keys: %w", err)
 	}
-	
+
 	logging.Success("SSH repair phase completed successfully")
 	return nil
 }
@@ -69,19 +69,36 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 	if err != nil {
 		return err
 	}
-	
-	knownHostsPath := filepath.Clean(filepath.Join(homeDir, ".ssh", "known_hosts"))
-	data, err := os.ReadFile(knownHostsPath)
+
+	paths := []string{filepath.Clean(filepath.Join(homeDir, ".ssh", "known_hosts"))}
+	// The orchestrator's own TOFU store must be cleaned too: a re-provisioned
+	// VM presents a new host key, and the pinned entry would otherwise make the
+	// connection fail closed (see internal/ssh verifyHostKey).
+	if kh := p.cfg.SSHKnownHostsFile(); kh != "" {
+		paths = append(paths, filepath.Clean(kh))
+	}
+
+	var firstErr error
+	for _, knownHostsPath := range paths {
+		if err := removeHostsFromKnownHosts(knownHostsPath, ips); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func removeHostsFromKnownHosts(knownHostsPath string, ips []string) error {
+	data, err := os.ReadFile(filepath.Clean(knownHostsPath)) // #nosec G304 -- operator's own ssh known_hosts paths
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return err
 	}
-	
+
 	lines := strings.Split(string(data), "\n")
 	var newLines []string
-	
+
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -105,7 +122,7 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 			newLines = append(newLines, line)
 		}
 	}
-	
+
 	return os.WriteFile(filepath.Clean(knownHostsPath), []byte(strings.Join(newLines, "\n")), 0600) // #nosec G703 G304 -- safely write cleaned known_hosts in user ssh dir
 }
 
@@ -144,7 +161,7 @@ func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error
 			return nil
 		}
 	}
-	
+
 	results := p.pool.RunParallelFunc(ctx, tasks)
 	for _, res := range results {
 		if res.Err != nil {
@@ -154,6 +171,11 @@ func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error
 	return nil
 }
 
+// generateHosts writes a bootstrap /etc/hosts (derived from config.yaml) to
+// every node *before* Puppet runs, so the agents can resolve the Puppet server
+// by name. Puppet's role::base then owns the file as the steady-state desired
+// configuration (it adds 127.0.1.1 and the hot-desk entries); keep the two in
+// sync by hand when adding nodes.
 func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) error {
 	var sb strings.Builder
 	sb.WriteString("127.0.0.1 localhost\n")
@@ -167,7 +189,7 @@ func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) erro
 		}
 	}
 	hostsContent := sb.String()
-	
+
 	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
 	for _, n := range nodes {
 		node := n
@@ -178,7 +200,7 @@ func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) erro
 			return pool.CopyContent(c, node.IP, []byte(hostsContent), "/etc/hosts", 0644)
 		}
 	}
-	
+
 	results := p.pool.RunParallelFunc(ctx, tasks)
 	for _, res := range results {
 		if res.Err != nil {
@@ -193,14 +215,14 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 	if jumpstartIP == "" {
 		return fmt.Errorf("jumpstart IP is empty")
 	}
-	
+
 	// Check if jumpstart has an ssh key, if not generate it
 	checkCmd := "if [ ! -f /root/.ssh/id_ed25519 ]; then mkdir -p /root/.ssh && chmod 700 /root/.ssh && ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519; fi"
 	_, _, code, err := p.pool.RunCommand(ctx, jumpstartIP, checkCmd)
 	if err != nil || code != 0 {
 		return fmt.Errorf("failed to ensure jumpstart ssh key (exit %d): %v", code, err)
 	}
-	
+
 	// Read jumpstart public key
 	pubKeyStr, _, code, err := p.pool.RunCommand(ctx, jumpstartIP, "cat /root/.ssh/id_ed25519.pub")
 	if err != nil || code != 0 {
@@ -210,8 +232,16 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 	if pubKeyStr == "" {
 		return fmt.Errorf("jumpstart public key is empty")
 	}
-	
+
 	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	// Inter-node SSH must use the non-root deploy account: the installers
+	// disable direct root logins (PermitRootLogin no), so authorising the
+	// jumpstart key for root would be dead weight.
+	deployUser := p.cfg.SSHUser()
+	deployHome := "/home/" + deployUser
+	if deployUser == "root" {
+		deployHome = "/root"
+	}
 	for _, n := range nodes {
 		if n.IP == jumpstartIP || n.IP == "" {
 			continue
@@ -219,11 +249,12 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		nodeIP := n.IP
 		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
 			cmd := fmt.Sprintf(`
-				mkdir -p /root/.ssh
-				chmod 700 /root/.ssh
-				grep -qxF '%s' /root/.ssh/authorized_keys 2>/dev/null || echo '%s' >> /root/.ssh/authorized_keys
-				chmod 600 /root/.ssh/authorized_keys
-			`, pubKeyStr, pubKeyStr)
+				mkdir -p %[1]s/.ssh
+				chmod 700 %[1]s/.ssh
+				grep -qxF '%[2]s' %[1]s/.ssh/authorized_keys 2>/dev/null || echo '%[2]s' >> %[1]s/.ssh/authorized_keys
+				chmod 600 %[1]s/.ssh/authorized_keys
+				chown -R %[3]s:%[3]s %[1]s/.ssh 2>/dev/null || true
+			`, deployHome, pubKeyStr, deployUser)
 			_, _, code, err := pool.RunCommand(c, nodeIP, cmd)
 			if err != nil || code != 0 {
 				return fmt.Errorf("failed to add pubkey on %s (exit %d): %v", nodeIP, code, err)
@@ -231,7 +262,7 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 			return nil
 		}
 	}
-	
+
 	results := p.pool.RunParallelFunc(ctx, tasks)
 	for _, res := range results {
 		if res.Err != nil {
