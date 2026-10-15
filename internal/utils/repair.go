@@ -44,6 +44,9 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	defer timer.End()
 
 	SyncClocks(ctx, cfg, s)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	// Clean up stopped / hung k3s processes across all cluster nodes concurrently
 	var clusterIPs []string
@@ -60,7 +63,11 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 
 	logging.Info("Stopping and cleaning hung K3s processes across cluster nodes...")
 	cleanupCmd := "systemctl stop k3s k3s-agent 2>/dev/null || true; killall -9 k3s k3s-server k3s-agent 2>/dev/null || true"
-	s.RunParallel(ctx, clusterIPs, cleanupCmd)
+	for _, res := range s.RunParallel(ctx, clusterIPs, cleanupCmd) {
+		if res.Err != nil {
+			logging.Warn("k3s cleanup issue on %s (exit %d): %v %s", res.Host, res.ExitCode, res.Err, strings.TrimSpace(res.Output))
+		}
+	}
 
 	// Start K3s masters concurrently to establish quorum
 	var masterIPs []string
@@ -71,9 +78,17 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	}
 	if len(masterIPs) > 0 {
 		logging.Info("Starting K3s on master nodes in parallel to reach quorum...")
-		s.RunParallel(ctx, masterIPs, "systemctl start k3s")
-		if !sleepCtx(ctx, 5*time.Second) {
-			return ctx.Err()
+		for _, res := range s.RunParallel(ctx, masterIPs, "systemctl start k3s") {
+			if res.Err != nil || res.ExitCode != 0 {
+				logging.Warn("failed to start k3s on %s (exit %d): %v %s", res.Host, res.ExitCode, res.Err, strings.TrimSpace(res.Output))
+			}
+		}
+		// Wait for the API server to answer.
+		if !waitFor(ctx, 90*time.Second, 3*time.Second, func() bool {
+			out, _, code, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes --no-headers")
+			return err == nil && code == 0 && strings.TrimSpace(out) != ""
+		}) {
+			logging.Warn("K3s API server did not become ready within 90s")
 		}
 	}
 
@@ -86,18 +101,22 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	}
 	if len(workerIPs) > 0 {
 		logging.Info("Starting K3s agents on worker nodes...")
-		s.RunParallel(ctx, workerIPs, "systemctl start k3s-agent")
-		if !sleepCtx(ctx, 5*time.Second) {
-			return ctx.Err()
+		for _, res := range s.RunParallel(ctx, workerIPs, "systemctl start k3s-agent") {
+			if res.Err != nil || res.ExitCode != 0 {
+				logging.Warn("failed to start k3s-agent on %s (exit %d): %v %s", res.Host, res.ExitCode, res.Err, strings.TrimSpace(res.Output))
+			}
+		}
+		// Wait for every node to report Ready.
+		if len(masterIPs) > 0 && !waitFor(ctx, 120*time.Second, 3*time.Second, func() bool {
+			out, _, code, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes --no-headers")
+			return err == nil && code == 0 && strings.TrimSpace(out) != "" && !strings.Contains(out, "NotReady")
+		}) {
+			logging.Warn("Not all nodes reached Ready within 120s")
 		}
 	}
 
-	// Verify
 	if len(masterIPs) > 0 {
-		logging.Info("Waiting for cluster stability and verifying Kubernetes status...")
-		if !sleepCtx(ctx, 5*time.Second) {
-			return ctx.Err()
-		}
+		logging.Info("Verifying Kubernetes status...")
 		out, _, _, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes")
 		if err != nil {
 			logging.Error("Failed to verify nodes: %v", err)

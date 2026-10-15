@@ -95,15 +95,17 @@ func (v *Verifier) printResult(phase, name string, pass bool, details string) {
 }
 
 func (v *Verifier) phase00(ctx context.Context) CheckResult {
-	// Libvirt VMs running + networks active
+	// At least one libvirt VM is running.
 	running, err := v.libvirt.ListRunning(ctx)
 	pass := err == nil && len(running) > 0
 	return CheckResult{"Phase 00", "Libvirt VMs & Networks", pass, fmt.Sprintf("%d running VMs", len(running))}
 }
 
 func (v *Verifier) phase01(ctx context.Context) CheckResult {
-	// Cobbler services + system count in single SSH session
-	cmd := `systemctl is-active cobblerd apache2 isc-dhcp-server bind9 tftpd-hpa; echo "---CMS_DELIM---"; cobbler system list | wc -l`
+	// Cobbler services + system count in single SSH session.
+	// bind9 and named are aliases for the same resolver on Ubuntu 24.04;
+	// checking both tolerates whichever alias systemd registers.
+	cmd := `for unit in cobblerd apache2 isc-dhcp-server bind9 named tftpd-hpa; do systemctl is-active $unit 2>/dev/null; done | sort -u; echo "---CMS_DELIM---"; cobbler system list | wc -l`
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, cmd)
 	parts := strings.Split(out, "---CMS_DELIM---")
 	servicesOut := ""
@@ -114,11 +116,28 @@ func (v *Verifier) phase01(ctx context.Context) CheckResult {
 	} else {
 		servicesOut = out
 	}
-	pass := err == nil && !strings.Contains(servicesOut, "inactive") && !strings.Contains(servicesOut, "failed")
+	pass := err == nil && serviceStatesActive(servicesOut)
 	if sysCount == "0" || sysCount == "" {
 		pass = false
 	}
-	return CheckResult{"Phase 01", "Cobbler Services & Systems", pass, fmt.Sprintf("Systems: %s", sysCount)}
+	details := fmt.Sprintf("Systems: %s", sysCount)
+	return CheckResult{"Phase 01", "Cobbler Services & Systems", pass, details}
+}
+
+// serviceStatesActive checks every `systemctl is-active` state token; a
+// multi-unit invocation prints one state per line and the SSH output carries
+// one state per line (sorted), with no extra noise.
+func serviceStatesActive(out string) bool {
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return false
+	}
+	for _, f := range fields {
+		if f != "active" {
+			return false
+		}
+	}
+	return true
 }
 
 func (v *Verifier) phase02(ctx context.Context) CheckResult {
@@ -142,10 +161,39 @@ func (v *Verifier) phase02(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase03(ctx context.Context) CheckResult {
-	// Nginx + Apache + SSL cert on LB
-	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.LB.IP, "systemctl is-active nginx")
-	pass := err == nil && strings.TrimSpace(out) == "active"
-	
+	// Nginx/keepalived + CA-issued cert on the LBs; apache2 + uploads mount on
+	// the CMS frontends.
+	var lbIPs []string
+	for _, lb := range v.cfg.Nodes.LBs {
+		if lb.IP != "" {
+			lbIPs = append(lbIPs, lb.IP)
+		}
+	}
+	pass := true
+	var issues []string
+
+	// The load balancers must serve a certificate issued by the internal CA
+	// (not the self-signed bootstrap) that is valid for at least
+	// pki.cert_min_valid_days. `-checkend` makes openssl exit non-zero when the
+	// certificate expires before the given number of seconds.
+	minDays := v.cfg.LBTLSCertMinValidDays()
+	caName := v.cfg.PKICommonName()
+	lbCmd := fmt.Sprintf("systemctl is-active nginx && systemctl is-active keepalived && "+
+		"openssl x509 -in /etc/nginx/ssl/cms.crt -noout -issuer -checkend %d", minDays*86400)
+
+	resLB := v.ssh.RunParallel(ctx, lbIPs, lbCmd)
+	for _, r := range resLB {
+		if r.Err != nil || r.ExitCode != 0 {
+			pass = false
+			issues = append(issues, fmt.Sprintf("%s: services or certificate check failed", r.Host))
+			continue
+		}
+		if !strings.Contains(r.Output, caName) {
+			pass = false
+			issues = append(issues, fmt.Sprintf("%s: certificate not issued by %q", r.Host, caName))
+		}
+	}
+
 	var cmsIPs []string
 	for _, cms := range v.cfg.Nodes.CMSFrontends {
 		if cms.IP != "" {
@@ -156,35 +204,52 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 	for _, r := range resApache {
 		if r.Err != nil || r.ExitCode != 0 {
 			pass = false
+			issues = append(issues, fmt.Sprintf("%s: apache2 or uploads mount failed", r.Host))
 		}
 	}
-	return CheckResult{"Phase 03", "Nginx & Apache & SSL", pass, ""}
+
+	details := ""
+	if len(issues) > 0 {
+		details = strings.Join(issues, "; ")
+	} else if len(lbIPs) > 0 {
+		details = fmt.Sprintf("certificate issued by %q, valid > %d days", caName, minDays)
+	}
+	return CheckResult{"Phase 03", "Nginx & Apache & SSL", pass, details}
 }
 
 func (v *Verifier) phase04(ctx context.Context) CheckResult {
 	// K3s cluster + MariaDB pod Running in single SSH session
 	if len(v.cfg.Nodes.Masters) > 0 {
-		cmd := `kubectl get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb`
+		cmd := `kubectl get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl -n kube-system get pods -o name 2>/dev/null | grep -c 'pod/etcd-' || true`
 		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, cmd)
 		parts := strings.Split(out, "---CMS_DELIM---")
 		nodesOut := ""
 		podOut := ""
+		etcdOut := ""
 		if len(parts) >= 2 {
 			nodesOut = parts[0]
 			podOut = parts[1]
 		} else {
 			nodesOut = out
 		}
+		if len(parts) >= 3 {
+			etcdOut = strings.TrimSpace(parts[2])
+		}
 		pass := err == nil && strings.Contains(nodesOut, "Ready") && strings.Contains(podOut, "Running")
-		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, ""}
+		// etcd must report one member per configured master, otherwise the
+		// cluster has no real quorum even though the nodes look Ready.
+		if want := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters)); etcdOut != want {
+			pass = false
+		}
+		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, fmt.Sprintf("etcd members: %s", etcdOut)}
 	}
 	return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
 }
 
 func (v *Verifier) phase05(ctx context.Context) CheckResult {
-	// Prometheus + Grafana + node-exporter
+	// Prometheus + Grafana: every listed unit must be active.
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Monitor.IP, "systemctl is-active prometheus grafana-server")
-	pass := err == nil && !strings.Contains(out, "inactive") && !strings.Contains(out, "failed")
+	pass := err == nil && serviceStatesActive(out)
 	return CheckResult{"Phase 05", "Prometheus & Grafana", pass, ""}
 }
 

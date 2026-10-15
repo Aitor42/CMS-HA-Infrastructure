@@ -3,7 +3,6 @@ package utils
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 	"sync"
 	"time"
@@ -48,13 +47,15 @@ func CheckSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, l *libvirt.C
 
 			sshStatus := "FAIL"
 			if state == "running" && node.IP != "" {
-				conn, err := net.DialTimeout("tcp", net.JoinHostPort(node.IP, "22"), 2*time.Second)
+				// A single SSH command proves both reachability and
+				// authentication, so no separate TCP pre-dial is needed. The
+				// bounded per-node budget stops a hung SSH command from
+				// blocking the whole status sweep forever.
+				probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				_, _, _, err := s.RunCommand(probeCtx, node.IP, "echo ok")
+				cancel()
 				if err == nil {
-					conn.Close()
-					_, _, _, err := s.RunCommand(ctx, node.IP, "echo ok")
-					if err == nil {
-						sshStatus = "OK"
-					}
+					sshStatus = "OK"
 				}
 			}
 
