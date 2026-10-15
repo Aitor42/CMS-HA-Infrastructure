@@ -1,13 +1,13 @@
-#
 # NAT Rules for the Router
-#   - DNAT: Redirects external HTTP/HTTPS traffic to the load balancer (main-lb)
+#   - DNAT: Redirects external HTTP/HTTPS traffic to the load balancer VIP
+#     (192.168.20.100), which keepalived floats between main-lb1 and main-lb2
 #   - MASQUERADE: Outbound NAT to allow internet access from the Main network
 #
 *nat
 :PREROUTING ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
 
-# DNAT: Internet -> main-lb (192.168.20.100)
+# DNAT: Internet -> LB VIP (keepalived floating address, main-lb1/main-lb2)
 -A PREROUTING -i ${WAN_IF} -p tcp --dport 80 -j DNAT --to-destination 192.168.20.100:80
 -A PREROUTING -i ${WAN_IF} -p tcp --dport 443 -j DNAT --to-destination 192.168.20.100:443
 
@@ -16,4 +16,3 @@
 -A POSTROUTING -s 192.168.20.0/24 -o ${WAN_IF} -j MASQUERADE
 
 COMMIT
-
