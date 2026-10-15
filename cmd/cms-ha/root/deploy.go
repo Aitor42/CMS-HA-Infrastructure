@@ -1,45 +1,55 @@
 package root
 
 import (
-
-    "github.com/spf13/cobra"
-    "github.com/Aitor42/CMS-HA-Infrastructure/internal/deploy"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/deploy"
+	"github.com/spf13/cobra"
 )
 
 var (
-    skipVMCreate bool
+	skipVMCreate bool
+	fromPhase    string
+	resume       bool
+	stateFile    string
 )
 
 var deployCmd = &cobra.Command{
-    Use:   "deploy",
-    Short: "Deploy infrastructure",
-    Run: func(cmd *cobra.Command, args []string) {
-        cfg, err := loadConfig()
-        if err != nil { handleError(err); return }
-        pool, err := newSSHPool(cfg)
-        if err != nil { handleError(err); return }
-        defer pool.Close()
-        
-        lv := newLibvirtClient(cfg)
-        
-        orchestrator := &deploy.Orchestrator{
-            Cfg:     cfg,
-            Libvirt: lv,
-            SSH:     pool,
-        }
-        
-        opts := deploy.DeployOpts{
-            SkipVMCreate: skipVMCreate,
-            DryRun:       dryRun, // from root.go
-        }
-        
-        if err := orchestrator.Deploy(cmd.Context(), opts); err != nil {
-            handleError(err)
-        }
-    },
+	Use:   "deploy",
+	Short: "Deploy infrastructure",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		pool, err := newSSHPool(cfg)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+
+		lv := newLibvirtClient(cfg)
+
+		orchestrator := &deploy.Orchestrator{
+			Cfg:     cfg,
+			Libvirt: lv,
+			SSH:     pool,
+		}
+
+		opts := deploy.DeployOpts{
+			SkipVMCreate: skipVMCreate,
+			DryRun:       dryRun, // from root.go
+			FromPhase:    fromPhase,
+			Resume:       resume,
+			StateFile:    stateFile,
+		}
+
+		return orchestrator.Deploy(cmd.Context(), opts)
+	},
 }
 
 func init() {
-    deployCmd.Flags().BoolVar(&skipVMCreate, "skip-vm-create", false, "Skip VM creation")
-    rootCmd.AddCommand(deployCmd)
+	deployCmd.Flags().BoolVar(&skipVMCreate, "skip-vm-create", false, "Skip VM creation")
+	deployCmd.Flags().StringVar(&fromPhase, "from-phase", "", "Run from this phase onwards (skips earlier phases)")
+	deployCmd.Flags().BoolVar(&resume, "resume", false, "Skip the phases already completed in the checkpoint file")
+	deployCmd.Flags().StringVar(&stateFile, "state-file", deploy.DefaultStateFile, "Checkpoint file recording phase progress")
+	rootCmd.AddCommand(deployCmd)
 }
