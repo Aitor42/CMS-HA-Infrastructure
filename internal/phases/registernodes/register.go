@@ -28,20 +28,22 @@ func (p *Phase) Run(ctx context.Context) error {
 	defer timer.End()
 
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
-	
+
 	var scriptBuilder strings.Builder
 	scriptBuilder.WriteString("set -e\n")
 
-	mainPrefix := getPrefix(p.cfg.Network.Main.CIDR)
+	mainPrefix := config.PrefixFromCIDR(p.cfg.Network.Main.CIDR, "192.168.20.")
 
 	for _, node := range p.cfg.AllNodes() {
 		if node.Name == p.cfg.Nodes.Jumpstart.Name || node.Name == "" {
 			continue
 		}
-		
+
 		mac := node.MAC
 		if mac == "" {
-			mac = "00:00:00:00:00:00"
+			// A zero-MAC cobbler system will never PXE-boot reliably and can
+			// collide silently with another entry; refuse to register it.
+			return fmt.Errorf("node %s has no MAC address; cannot register it in Cobbler", node.Name)
 		}
 
 		cobblerServerIP := jumpIP
@@ -58,25 +60,17 @@ func (p *Phase) Run(ctx context.Context) error {
 
 		logging.Info("Registering node %s...", node.Name)
 		scriptBuilder.WriteString(fmt.Sprintf("cobbler system remove --name=%s 2>/dev/null || true\n", node.Name))
-		scriptBuilder.WriteString(fmt.Sprintf("cobbler system add --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --server=%s --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n", 
+		scriptBuilder.WriteString(fmt.Sprintf("cobbler system add --name=%s --profile=ubuntu-24.04-x86_64 --hostname=%s --ip-address=%s --mac=%s --interface=ens3 --static=1 --server=%s --kernel-options=\"%s\" --autoinstall-meta='hostname=%s' --netboot-enabled=1\n",
 			node.Name, node.FQDN, node.IP, mac, cobblerServerIP, kernelOpts, node.Name))
 	}
-	
+
 	logging.Info("Synchronizing Cobbler...")
 	scriptBuilder.WriteString("cobbler sync\n")
-	
+
 	if _, err := p.pool.RunScript(ctx, jumpIP, scriptBuilder.String()); err != nil {
 		return fmt.Errorf("failed to register nodes in Cobbler: %w", err)
 	}
 
 	logging.Success("Nodes registered successfully")
 	return nil
-}
-
-func getPrefix(cidr string) string {
-	parts := strings.Split(cidr, ".")
-	if len(parts) >= 3 {
-		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
-	}
-	return "192.168.20."
 }
