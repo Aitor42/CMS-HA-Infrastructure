@@ -34,18 +34,20 @@ type Options struct {
 	Mode        string // "internal" or "external"
 	TargetIP    string // override IP
 	Duration    int    // seconds (default 60)
-	Concurrency int    // (default 5)
+	Concurrency int    // virtual users (default 5)
 	WithDB      bool
 	Verbose     bool
+	// K6Image overrides the pinned k6 image (air-gapped registries, CI mirror).
+	K6Image string
 }
 
-// Traffic phase implementation.
+// Traffic runs the k6 load profile against the CMS entry point.
 type Traffic struct {
 	cfg  *config.Config
 	opts Options
 }
 
-// New creates a new traffic generator.
+// New creates a new k6 traffic runner.
 func New(cfg *config.Config, opts Options) *Traffic {
 	if opts.Duration <= 0 {
 		opts.Duration = 60
@@ -59,274 +61,233 @@ func New(cfg *config.Config, opts Options) *Traffic {
 	}
 }
 
-var wpPaths = []string{
-	"/", "/wp-login.php", "/?s=test", "/?s=empresa", "/?s=proyecto",
-	"/hello-world/", "/sample-page/", "/wp-cron.php", "/wp-json/",
-	"/wp-json/wp/v2/posts", "/wp-json/wp/v2/pages", "/wp-json/wp/v2/users",
-	"/feed/", "/?s=ha",
-}
-
-func getPrefix(cidr string) string {
-	parts := strings.Split(cidr, ".")
-	if len(parts) >= 3 {
-		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
-	}
-	return "192.168.10."
-}
-
-// Run executes the traffic phase tests.
+// Run executes the k6 load profile and, optionally, a direct database check.
 func (t *Traffic) Run(ctx context.Context) error {
-	timer := logging.PhaseStart("Traffic Test Phase")
+	timer := logging.PhaseStart("Traffic Test Phase (k6)")
 	defer timer.End()
 
-	baseURL := ""
-	if t.opts.TargetIP != "" {
-		if strings.HasPrefix(t.opts.TargetIP, "http://") || strings.HasPrefix(t.opts.TargetIP, "https://") {
-			baseURL = t.opts.TargetIP
-		} else {
-			baseURL = fmt.Sprintf("https://%s", t.opts.TargetIP)
-		}
-	} else if t.opts.Mode == "internal" {
-		if len(t.cfg.Nodes.CMSFrontends) > 0 && t.cfg.Nodes.CMSFrontends[0].IP != "" {
-			baseURL = fmt.Sprintf("http://%s", t.cfg.Nodes.CMSFrontends[0].IP)
-		} else {
-			baseURL = fmt.Sprintf("http://%s", getPrefix(t.cfg.Network.Main.CIDR)+"101")
-		}
-	} else {
-		if t.cfg.Nodes.LB.IP != "" {
-			baseURL = fmt.Sprintf("https://%s", t.cfg.Nodes.LB.IP)
-		} else {
-			baseURL = fmt.Sprintf("https://%s", getPrefix(t.cfg.Network.Main.CIDR)+"100")
-		}
-	}
+	baseURL := resolveBaseURL(t.cfg, t.opts)
 	logging.Info("Target URL: %s", baseURL)
 
-	tlsConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
+	script, err := cms.TemplatesFS.ReadFile(k6ScriptPath)
+	if err != nil {
+		return fmt.Errorf("read embedded k6 script %s: %w", k6ScriptPath, err)
 	}
-	caCertPath := "/usr/local/share/ca-certificates/cms_root_ca.crt"
-	if caCert, err := os.ReadFile(filepath.Clean(caCertPath)); err == nil {
-		caCertPool := x509.NewCertPool()
-		if caCertPool.AppendCertsFromPEM(caCert) {
-			tlsConfig.RootCAs = caCertPool
-		}
-	} else {
-		tlsConfig.InsecureSkipVerify = true // #nosec G402 -- benchmark test against internal lab endpoint when root CA is not in host store
+	if err := t.runK6(ctx, baseURL, script); err != nil {
+		return err
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig:     tlsConfig,
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		},
-		Timeout: 5 * time.Second,
-	}
-
-	// Phase 1: Distributed random HTTP GET
-	logging.Info("Phase 1: Distributed random HTTP GET")
-	for i := 0; i < 18; i++ {
-		path := getRandomPath(wpPaths)
-		reqURL := baseURL + path
-		req, _ := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-		req.Host = "cms.fake-enterprise.com"
-		resp, err := client.Do(req)
-		if err != nil {
-			if t.opts.Verbose {
-				logging.Warn("GET %s failed: %v", reqURL, err)
-			}
-			continue
-		}
-		_ = resp.Body.Close()
-		if t.opts.Verbose {
-			logging.Info("GET %s -> %d", reqURL, resp.StatusCode)
-		}
-	}
-
-	// Phase 2: Concurrent stress test
-	logging.Info("Phase 2: Concurrent stress test")
-	t.runStressTest(ctx, client, baseURL)
-
-	// Phase 3: DB direct queries
 	if t.opts.WithDB {
-		logging.Info("Phase 3: Direct MariaDB SQL queries")
-		dbHost := getPrefix(t.cfg.Network.Internal.CIDR) + "10"
-		if len(t.cfg.Nodes.Masters) > 0 && t.cfg.Nodes.Masters[0].IP != "" {
-			dbHost = t.cfg.Nodes.Masters[0].IP
-		}
-		dbPort := t.cfg.Database.Port
-		if dbPort == 0 {
-			dbPort = 30306
-		}
-		dbName := t.cfg.Database.Name
-		if dbName == "" {
-			dbName = "wordpress"
-		}
-		dbUser := t.cfg.Database.User
-		if dbUser == "" {
-			dbUser = "wp_user"
-		}
-		dbPass := t.cfg.Database.Password
-		if dbPass == "" {
-			dbPass = "WpS3cur3P4ss!"
-		}
-		dbDSN := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", dbUser, dbPass, dbHost, dbPort, dbName)
-		if err := testDBQueries(ctx, dbDSN); err != nil {
-			rootPass := t.cfg.Database.RootPassword
-			if rootPass == "" {
-				rootPass = "mysqlrootpass"
-			}
-			rootDSN := fmt.Sprintf("root:%s@tcp(%s:%d)/%s", rootPass, dbHost, dbPort, dbName)
-			if errRoot := testDBQueries(ctx, rootDSN); errRoot != nil {
-				logging.Warn("DB direct queries failed: %v", err)
-			} else {
-				logging.Success("DB queries executed successfully (via root)")
-			}
-		} else {
-			logging.Success("DB queries executed successfully")
+		if err := t.runDBCheck(ctx); err != nil {
+			return err
 		}
 	}
-
-	// Phase 4: POST form simulations
-	logging.Info("Phase 4: POST form simulations")
-	formURL := baseURL + "/wp-login.php"
-	formData := url.Values{
-		"log": {"admin"},
-		"pwd": {"password"},
-	}
-	req, _ := http.NewRequestWithContext(ctx, "POST", formURL, strings.NewReader(formData.Encode()))
-	req.Host = "cms.fake-enterprise.com"
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := client.Do(req)
-	if err == nil {
-		resp.Body.Close()
-		if t.opts.Verbose {
-			logging.Info("POST login -> %d", resp.StatusCode)
-		}
-	}
-
 	return nil
 }
 
-func (t *Traffic) runStressTest(ctx context.Context, client *http.Client, baseURL string) {
-	var wg sync.WaitGroup
-	var successCount int64
-	var failCount int64
-	var mu sync.Mutex
-	var latencies []time.Duration
-
-	deadline := time.Now().Add(time.Duration(t.opts.Duration) * time.Second)
-	stressCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-
-	for i := 0; i < t.opts.Concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-stressCtx.Done():
-					return
-				default:
-					path := getRandomPath(wpPaths)
-					reqURL := baseURL + path
-					req, err := http.NewRequestWithContext(stressCtx, "GET", reqURL, nil)
-					if err != nil {
-						continue
-					}
-					req.Host = "cms.fake-enterprise.com"
-					
-					start := time.Now()
-					resp, err := client.Do(req)
-					elapsed := time.Since(start)
-
-					if err != nil {
-						atomic.AddInt64(&failCount, 1)
-						select {
-						case <-stressCtx.Done():
-							return
-						case <-time.After(20 * time.Millisecond):
-						}
-						continue
-					}
-
-					_ = resp.Body.Close()
-					if resp.StatusCode >= 400 {
-						atomic.AddInt64(&failCount, 1)
-						continue
-					}
-
-					atomic.AddInt64(&successCount, 1)
-					mu.Lock()
-					if len(latencies) < 10000 {
-						latencies = append(latencies, elapsed)
-					}
-					mu.Unlock()
-				}
-			}
-		}()
-	}
-	wg.Wait()
-
-	total := successCount + failCount
-	var mean time.Duration
-	var p99 time.Duration
-
-	if total > 0 && len(latencies) > 0 {
-		var totalLat time.Duration
-		for _, l := range latencies {
-			totalLat += l
+// resolveBaseURL derives the entry point to exercise from the options and the
+// configured topology.
+func resolveBaseURL(cfg *config.Config, opts Options) string {
+	if opts.TargetIP != "" {
+		if strings.HasPrefix(opts.TargetIP, "http://") || strings.HasPrefix(opts.TargetIP, "https://") {
+			return opts.TargetIP
 		}
-		mean = totalLat / time.Duration(len(latencies))
-
-		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-		p99Idx := int(float64(len(latencies)) * 0.99)
-		if p99Idx >= len(latencies) {
-			p99Idx = len(latencies) - 1
+		return "https://" + opts.TargetIP
+	}
+	if opts.Mode == "internal" {
+		if len(cfg.Nodes.CMSFrontends) > 0 && cfg.Nodes.CMSFrontends[0].IP != "" {
+			return "http://" + cfg.Nodes.CMSFrontends[0].IP
 		}
-		p99 = latencies[p99Idx]
+		return "http://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.10.") + "101"
 	}
-
-	durSec := t.opts.Duration
-	if durSec <= 0 {
-		durSec = 1
+	if cfg.LBVIP() != "" {
+		return "https://" + cfg.LBVIP()
 	}
-	rate := float64(total) / float64(durSec)
-	logging.Info("Stress Test Results: %d reqs (%.2f req/s)", total, rate)
-	logging.Info("Success: %d, Fail: %d", successCount, failCount)
-	if successCount > 0 {
-		logging.Info("Latency Mean: %v, P99: %v", mean, p99)
-	}
+	return "https://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.20.") + "100"
 }
 
-func getRandomPath(paths []string) string {
-	if len(paths) == 0 {
-		return "/"
-	}
-	n, err := crand.Int(crand.Reader, big.NewInt(int64(len(paths))))
-	if err != nil {
-		return paths[0]
-	}
-	return paths[n.Int64()]
+// k6Run groups the parameters that shape the container invocation.
+type k6Run struct {
+	baseURL  string
+	vhost    string
+	caCert   string // host path of the CA to mount, empty to skip verification
+	rwURL    string // Prometheus remote-write endpoint, empty to disable
+	vus      int
+	duration int
 }
 
-func testDBQueries(ctx context.Context, dsn string) error {
-	db, err := sql.Open("mysql", dsn)
+// buildArgs renders the container runtime arguments that run k6. It is a pure
+// function so the invocation can be asserted without a container runtime.
+func buildArgs(image string, r k6Run) []string {
+	args := []string{
+		"run", "--rm", "-i",
+		// The lab networks live on the hypervisor, so the container shares its
+		// network namespace to reach the VIP and the internal CIDR.
+		"--network", "host",
+		"-e", "BASE_URL=" + r.baseURL,
+		"-e", "VHOST=" + r.vhost,
+	}
+	if r.caCert != "" {
+		args = append(args,
+			"-v", r.caCert+":"+containerCACert+":ro",
+			"-e", "SSL_CERT_FILE="+containerCACert,
+		)
+	}
+	if r.rwURL != "" {
+		args = append(args, "-e", "K6_PROMETHEUS_RW_SERVER_URL="+r.rwURL)
+	}
+
+	args = append(args, image, "run")
+	if r.caCert == "" {
+		// No CA to mount: fall back to skipping TLS verification; the
+		// `cms-ha verify` command still asserts the certificate chain.
+		args = append(args, "--insecure")
+	}
+	args = append(args, "--vus", strconv.Itoa(r.vus), "--duration", fmt.Sprintf("%ds", r.duration))
+	if r.rwURL != "" {
+		args = append(args, "--out", "experimental-prometheus-rw")
+	}
+	// Read the script from stdin (it is embedded in the binary).
+	args = append(args, "-")
+	return args
+}
+
+// runK6 executes the embedded profile inside the pinned k6 container.
+func (t *Traffic) runK6(ctx context.Context, baseURL string, script []byte) error {
+	runtime, err := container.Runtime()
 	if err != nil {
-		return fmt.Errorf("connection: %w", err)
-	}
-	defer db.Close()
-
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("ping: %w", err)
+		return fmt.Errorf("the k6 load test requires a container runtime: %w", err)
 	}
 
-	rows, err := db.QueryContext(ctx, "SELECT option_value FROM wp_options LIMIT 5")
-	if err != nil {
-		return fmt.Errorf("query: %w", err)
+	image := t.opts.K6Image
+	if image == "" {
+		image = t.cfg.K6Image()
 	}
-	defer rows.Close()
 
+	caCert := ""
+	if _, statErr := os.Stat(hostCACertPath); statErr == nil {
+		caCert = hostCACertPath
+	} else if t.opts.Verbose {
+		logging.Warn("Root CA %s not found; k6 will skip TLS verification", hostCACertPath)
+	}
+
+	args := buildArgs(image, k6Run{
+		baseURL:  baseURL,
+		vhost:    t.cfg.TrafficVHost(),
+		caCert:   caCert,
+		rwURL:    t.cfg.Traffic.PrometheusRWURL,
+		vus:      t.opts.Concurrency,
+		duration: t.opts.Duration,
+	})
+
+	logging.Info("Running k6 (%s): vus=%d, duration=%ds", image, t.opts.Concurrency, t.opts.Duration)
+	cmd := exec.CommandContext(ctx, runtime, args...)
+	cmd.Stdin = bytes.NewReader(script)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("k6 load test failed: %w", err)
+	}
+	logging.Success("k6 load test completed")
 	return nil
+}
+
+// runDBCheck asserts WordPress data is reachable through the database service
+// (an end-to-end check the HTTP profile cannot cover). It validates the
+// orchestrator→NodePort network path with a raw TCP dial and then runs a real
+// query through the MariaDB pod's own client via SSH + `kubectl exec`, so no SQL
+// driver is embedded in the binary.
+func (t *Traffic) runDBCheck(ctx context.Context) error {
+	logging.Info("Direct MariaDB SQL check")
+	dbHost := config.PrefixFromCIDR(t.cfg.Network.Internal.CIDR, "192.168.10.") + "10"
+	masterHost := dbHost
+	if len(t.cfg.Nodes.Masters) > 0 && t.cfg.Nodes.Masters[0].IP != "" {
+		dbHost = t.cfg.Nodes.Masters[0].IP
+		masterHost = t.cfg.Nodes.Masters[0].IP
+	}
+	dbPort := t.cfg.Database.Port
+	if dbPort == 0 {
+		dbPort = 30306
+	}
+	dbName := t.cfg.Database.Name
+	if dbName == "" {
+		dbName = "wordpress"
+	}
+	dbUser := t.cfg.Database.User
+	if dbUser == "" {
+		dbUser = "wp_user"
+	}
+	if t.cfg.Database.Password == "" {
+		return fmt.Errorf("database.password is required for the --with-db check")
+	}
+
+	// End-to-end: the database NodePort must be reachable from the orchestrator.
+	if err := dialTCP(ctx, dbHost, dbPort, 10*time.Second); err != nil {
+		return fmt.Errorf("DB direct check failed: database NodePort %s is unreachable: %w", net.JoinHostPort(dbHost, strconv.Itoa(dbPort)), err)
+	}
+
+	pool, err := newTrafficSSHPool(t.cfg)
+	if err != nil {
+		return fmt.Errorf("DB direct check failed: %w", err)
+	}
+	defer pool.Close()
+
+	if err := testDBQueries(ctx, pool, masterHost, dbUser, t.cfg.Database.Password, dbName); err != nil {
+		return fmt.Errorf("DB direct queries failed: %w", err)
+	}
+	logging.Success("DB queries executed successfully")
+	return nil
+}
+
+func newTrafficSSHPool(cfg *config.Config) (*ssh.Pool, error) {
+	timeout := cfg.SSH.ConnectTimeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	return ssh.NewPoolWithOptions(cfg.SSH.PrivateKey, ssh.Options{
+		User:           cfg.SSHUser(),
+		KnownHostsFile: cfg.SSHKnownHostsFile(),
+		ConnectTimeout: timeout,
+	})
+}
+
+// dialTCP verifies that host:port accepts a TCP connection within timeout.
+func dialTCP(ctx context.Context, host string, port int, timeout time.Duration) error {
+	d := net.Dialer{Timeout: timeout}
+	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+// testDBQueries runs a query against the MariaDB pod using the `mysql` client
+// that ships inside the pod image (reached through kubectl on a control-plane
+// node). A non-empty result proves WordPress data is loaded.
+func testDBQueries(ctx context.Context, pool *ssh.Pool, master, user, password, dbName string) error {
+	const query = "SELECT option_value FROM wp_options LIMIT 5"
+	// Resolve the pod by label so the check does not hard-code the StatefulSet
+	// ordinal, then run the client inside it (the only place a mysql client is
+	// guaranteed to exist). MYSQL_PWD avoids the password landing in argv.
+	script := fmt.Sprintf(
+		"POD=$(kubectl get pod -n cms -l app=mariadb -o jsonpath='{.items[0].metadata.name}') && "+
+			"kubectl exec -n cms \"$POD\" -- env MYSQL_PWD=%s mysql -h 127.0.0.1 -P 3306 -u %s %s -N -B -e %s",
+		shellQuote(password), shellQuote(user), shellQuote(dbName), shellQuote(query))
+
+	stdout, stderr, exitCode, err := pool.RunCommand(ctx, master, script)
+	if err != nil || exitCode != 0 {
+		return fmt.Errorf("query through MariaDB pod (exit %d): %v %s", exitCode, err, strings.TrimSpace(stderr))
+	}
+	if strings.TrimSpace(stdout) == "" {
+		return fmt.Errorf("test query returned no data: wp_options is empty or the database is not loaded")
+	}
+	return nil
+}
+
+// shellQuote single-quotes s for a POSIX shell, escaping embedded quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
