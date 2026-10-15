@@ -37,10 +37,42 @@ func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 	defer timer.End()
 
 	f.testDRBDFailover(ctx, opts)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.testCMSFailover(ctx, opts)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.testK3sWorkerFailover(ctx, opts)
+	// Distinguish "all scenarios ran" from "interrupted halfway through" so
+	// callers never mistake a cancelled run for a successful one.
+	return ctx.Err()
+}
 
-	return nil
+// shutdownForTest shuts a VM down and verifies it actually reached "shut off".
+// A failed Shutdown must never be reported as PASS: without this check the
+// scenario would "verify" a failover that never happened.
+func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error {
+	if err := f.libvirt.Shutdown(ctx, name); err != nil {
+		return fmt.Errorf("shutdown %s: %w", name, err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		state, err := f.libvirt.DomainState(ctx, name)
+		if err != nil {
+			return fmt.Errorf("query state of %s after shutdown: %w", name, err)
+		}
+		if state == "shut off" {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s is still %s after 30s (test aborted so it cannot be reported as PASS)", name, state)
+		}
+		if !sleepCtx(ctx, 2*time.Second) {
+			return fmt.Errorf("context cancelled waiting for %s to shut off", name)
+		}
+	}
 }
 
 func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts) {
@@ -50,7 +82,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 
 	if len(f.cfg.Nodes.Masters) < 2 {
 		logging.Warn("Skipping DRBD failover test: requires at least 2 master nodes")
-		f.printSummary("DRBD Master Failover", false, 0)
+		f.printSkipped("DRBD Master Failover")
 		return
 	}
 
@@ -58,27 +90,34 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	master2 := f.cfg.Nodes.Masters[1]
 
 	// Shutdown master1
-	f.libvirt.Shutdown(ctx, master1.Name)
-	if !sleepCtx(ctx, 30*time.Second) {
+	if err := f.shutdownForTest(ctx, master1.Name); err != nil {
+		f.printSummary("DRBD Master Failover", false, time.Since(start))
+		logging.Error("%v", err)
 		return
 	}
-
-	// Verify master2 promotes & MariaDB migrates
-	out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -n cms | grep mariadb")
-	if err != nil || !strings.Contains(out, "Running") {
+	// Wait until master2 has promoted DRBD and the MariaDB pod is running there
+	// (poll until ready instead of sleeping a fixed 30s).
+	mariadbRunning := waitFor(ctx, 90*time.Second, 3*time.Second, func() bool {
+		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -n cms | grep mariadb")
+		return err == nil && strings.Contains(out, "Running")
+	})
+	if !mariadbRunning {
 		pass = false
 		logging.Warn("MariaDB pod not running on master2")
 	}
 
-	// Verify HTTP / HTTPS reachability
-	if !checkLBReachability(f.cfg.Nodes.LB.IP) {
+	// Verify HTTP / HTTPS reachability (via the keepalived VIP)
+	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool { return checkLBReachability(ctx, f.cfg.LBVIP()) }) {
 		pass = false
-		logging.Warn("CMS frontend not reachable on Load Balancer (HTTP 200/301/302)")
+		logging.Warn("CMS frontend not reachable on Load Balancer VIP (HTTP 200/301/302)")
 	}
 
 	if !opts.SkipRestore {
-		f.libvirt.Start(ctx, master1.Name)
-		sleepCtx(ctx, 30*time.Second)
+		if err := f.libvirt.Start(ctx, master1.Name); err != nil {
+			pass = false
+			logging.Error("failed to restore %s: %v", master1.Name, err)
+		}
+		f.waitForSSH(ctx, master1.IP, 120*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -92,27 +131,30 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 
 	if len(f.cfg.Nodes.CMSFrontends) < 2 {
 		logging.Warn("Skipping CMS failover test: requires at least 2 frontend nodes")
-		f.printSummary("CMS Frontend Failover", false, 0)
+		f.printSkipped("CMS Frontend Failover")
 		return
 	}
 
 	cms1 := f.cfg.Nodes.CMSFrontends[0]
 
 	// Shutdown cms1
-	f.libvirt.Shutdown(ctx, cms1.Name)
-	if !sleepCtx(ctx, 15*time.Second) {
+	if err := f.shutdownForTest(ctx, cms1.Name); err != nil {
+		f.printSummary("CMS Frontend Failover", false, time.Since(start))
+		logging.Error("%v", err)
 		return
 	}
-
-	// Verify HTTP / HTTPS reachability (routes to cms2)
-	if !checkLBReachability(f.cfg.Nodes.LB.IP) {
+	// Verify HTTP / HTTPS reachability (routes to cms2, via the VIP)
+	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool { return checkLBReachability(ctx, f.cfg.LBVIP()) }) {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200/301/302 after cms1 shutdown")
 	}
 
 	if !opts.SkipRestore {
-		f.libvirt.Start(ctx, cms1.Name)
-		sleepCtx(ctx, 15*time.Second)
+		if err := f.libvirt.Start(ctx, cms1.Name); err != nil {
+			pass = false
+			logging.Error("failed to restore %s: %v", cms1.Name, err)
+		}
+		f.waitForSSH(ctx, cms1.IP, 120*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -126,7 +168,7 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 
 	if len(f.cfg.Nodes.Workers) < 2 || len(f.cfg.Nodes.Masters) < 2 {
 		logging.Warn("Skipping Worker failover test: requires at least 2 workers and 2 masters")
-		f.printSummary("K3s Worker Failover", false, 0)
+		f.printSkipped("K3s Worker Failover")
 		return
 	}
 
@@ -135,21 +177,27 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	master2 := f.cfg.Nodes.Masters[1]
 
 	// Shutdown worker1
-	f.libvirt.Shutdown(ctx, worker1.Name)
-	if !sleepCtx(ctx, 45*time.Second) {
+	if err := f.shutdownForTest(ctx, worker1.Name); err != nil {
+		f.printSummary("K3s Worker Failover", false, time.Since(start))
+		logging.Error("%v", err)
 		return
 	}
-
-	// Verify pods reschedule to worker2
-	out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -o wide -A | grep -v Terminating")
-	if err != nil || !strings.Contains(out, worker2.Name) {
+	// Verify pods reschedule to worker2 (poll until rescheduled, up to 90s)
+	rescheduled := waitFor(ctx, 90*time.Second, 5*time.Second, func() bool {
+		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -o wide -A | grep -v Terminating")
+		return err == nil && strings.Contains(out, worker2.Name)
+	})
+	if !rescheduled {
 		pass = false
 		logging.Warn("Pods not rescheduled to worker2")
 	}
 
 	if !opts.SkipRestore {
-		f.libvirt.Start(ctx, worker1.Name)
-		sleepCtx(ctx, 30*time.Second)
+		if err := f.libvirt.Start(ctx, worker1.Name); err != nil {
+			pass = false
+			logging.Error("failed to restore %s: %v", worker1.Name, err)
+		}
+		f.waitForSSH(ctx, worker1.IP, 120*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -178,24 +226,63 @@ func (f *FailoverTester) printSummary(name string, pass bool, duration time.Dura
 	}
 }
 
-func checkLBReachability(lbIP string) bool {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- test failover on lab LB
+// printSkipped reports a scenario that did not run. It must never be counted
+// as FAIL: that would pollute the summary with failures that did not occur.
+func (f *FailoverTester) printSkipped(name string) {
+	logging.Warn("Scenario: %-25s | Status: %-4s | Duration: %s", name, "SKIP", "0s")
+}
+
+// waitFor polls fn until it returns true, the context is cancelled or the
+// timeout elapses. It replaces blind fixed sleeps so a failover that completes
+// early is detected immediately instead of after an arbitrary delay.
+func waitFor(ctx context.Context, timeout, interval time.Duration, fn func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if fn() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		if !sleepCtx(ctx, interval) {
+			return false
+		}
 	}
-	client := &http.Client{Timeout: 10 * time.Second, Transport: tr}
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://%s", lbIP), nil)
+}
+
+// waitForSSH blocks until host accepts a trivial SSH command or the timeout
+// elapses. Used after restoring a VM so the next scenario starts as soon as the
+// node is back, rather than after a fixed delay.
+func (f *FailoverTester) waitForSSH(ctx context.Context, host string, timeout time.Duration) {
+	waitFor(ctx, timeout, 5*time.Second, func() bool {
+		_, _, code, err := f.ssh.RunCommand(ctx, host, "true")
+		return err == nil && code == 0
+	})
+}
+
+// lbHTTPClient is shared across reachability probes so its connection pool is
+// reused instead of being rebuilt on every call.
+var lbHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- test failover on lab LB
+	},
+}
+
+func checkLBReachability(ctx context.Context, lbIP string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s", lbIP), nil)
 	if err == nil {
 		req.Host = "cms.fake-enterprise.com"
-		resp, err := client.Do(req)
+		resp, err := lbHTTPClient.Do(req)
 		if err == nil {
 			defer resp.Body.Close()
 			return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
 		}
 	}
-	reqHTTP, err := http.NewRequest("GET", fmt.Sprintf("http://%s", lbIP), nil)
+	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s", lbIP), nil)
 	if err == nil {
 		reqHTTP.Host = "cms.fake-enterprise.com"
-		resp, err := client.Do(reqHTTP)
+		resp, err := lbHTTPClient.Do(reqHTTP)
 		if err == nil {
 			defer resp.Body.Close()
 			return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
