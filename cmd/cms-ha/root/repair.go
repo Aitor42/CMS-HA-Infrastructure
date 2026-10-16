@@ -1,42 +1,49 @@
 package root
 
 import (
-
-    "github.com/spf13/cobra"
-    "github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
+	"github.com/spf13/cobra"
 )
 
 var repairCmd = &cobra.Command{
-    Use:   "repair",
-    Short: "Repair infrastructure",
+	Use:   "repair",
+	Short: "Repair infrastructure",
 }
 
 func init() {
-    rootCmd.AddCommand(repairCmd)
-    
-    k8sCmd := &cobra.Command{
-        Use: "k8s",
-        Run: func(cmd *cobra.Command, args []string) {
-            cfg, err := loadConfig()
-            if err != nil { handleError(err); return }
-            pool, err := newSSHPool(cfg)
-            if err != nil { handleError(err); return }
-            defer pool.Close()
-            if err := utils.RepairK8s(cmd.Context(), cfg, pool); err != nil { handleError(err) }
-        },
-    }
-    repairCmd.AddCommand(k8sCmd)
+	rootCmd.AddCommand(repairCmd)
 
-    clocksCmd := &cobra.Command{
-        Use: "clocks",
-        Run: func(cmd *cobra.Command, args []string) {
-            cfg, err := loadConfig()
-            if err != nil { handleError(err); return }
-            pool, err := newSSHPool(cfg)
-            if err != nil { handleError(err); return }
-            defer pool.Close()
-            if err := utils.SyncClocks(cmd.Context(), cfg, pool); err != nil { handleError(err) }
-        },
-    }
-    repairCmd.AddCommand(clocksCmd)
+	k8sCmd := &cobra.Command{
+		Use: "k8s",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			pool, err := newSSHPool(cfg)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			return utils.RepairK8s(cmd.Context(), cfg, pool)
+		},
+	}
+	repairCmd.AddCommand(k8sCmd)
+
+	clocksCmd := &cobra.Command{
+		Use: "clocks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig()
+			if err != nil {
+				return err
+			}
+			pool, err := newSSHPool(cfg)
+			if err != nil {
+				return err
+			}
+			defer pool.Close()
+			return utils.SyncClocks(cmd.Context(), cfg, pool)
+		},
+	}
+	repairCmd.AddCommand(clocksCmd)
 }
