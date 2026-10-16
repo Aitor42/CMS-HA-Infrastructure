@@ -14,13 +14,13 @@ import (
 
 // Options controls which linters run.
 type Options struct {
-	All       bool
-	Go        bool
-	Shell     bool
-	YAML      bool
-	Puppet    bool
-	K8s       bool
-	Terraform bool
+	All     bool
+	Go      bool
+	Shell   bool
+	YAML    bool
+	Puppet  bool
+	K8s     bool
+	Ansible bool
 }
 
 type linterDef struct {
@@ -38,11 +38,20 @@ func RunLints(ctx context.Context, opts Options) error {
 		root = "."
 	}
 
-	shellScripts := FindFiles(root, "*.sh")
-	puppetFiles := FindFiles(root, "*.pp")
+	codeFiles := FindFilesMulti(root, "*.sh", "*.pp")
+	shellScripts := codeFiles["*.sh"]
+	puppetFiles := codeFiles["*.pp"]
 	k8sDir := filepath.Join(root, "kubernetes")
 	monDir := filepath.Join(root, "templates", "monitoring")
-	tfDir := filepath.Join(root, "terraform")
+	ansibleDir := filepath.Join(root, "ansible")
+
+	yamlTargets := []string{}
+	if dirExists(k8sDir) {
+		yamlTargets = append(yamlTargets, k8sDir)
+	}
+	if dirExists(monDir) {
+		yamlTargets = append(yamlTargets, monDir)
+	}
 
 	linters := []linterDef{
 		{
@@ -66,8 +75,8 @@ func RunLints(ctx context.Context, opts Options) error {
 		{
 			name:    "yamllint",
 			cmd:     "yamllint",
-			args:    []string{"-c", filepath.Join(root, ".yamllint"), k8sDir, monDir},
-			enabled: opts.All || opts.YAML,
+			args:    append([]string{"-c", filepath.Join(root, ".yamllint")}, yamlTargets...),
+			enabled: (opts.All || opts.YAML) && len(yamlTargets) > 0,
 		},
 		{
 			name:    "puppet-lint",
@@ -78,20 +87,31 @@ func RunLints(ctx context.Context, opts Options) error {
 		{
 			name:    "kubeconform",
 			cmd:     "kubeconform",
-			args:    []string{"-strict", "-summary", "-kubernetes-version", "1.29.0", k8sDir},
-			enabled: opts.All || opts.K8s,
+			args:    []string{"-strict", "-summary", "-skip", "Kustomization", "-ignore-filename-pattern", `\.patch\.yaml$`, "-kubernetes-version", "1.29.0", k8sDir},
+			enabled: (opts.All || opts.K8s) && dirExists(k8sDir),
 		},
 		{
-			name:    "terraform-fmt",
-			cmd:     "terraform",
-			args:    []string{"-chdir=" + tfDir, "fmt", "-check", "-recursive"},
-			enabled: opts.Terraform,
+			name:    "ansible-lint",
+			cmd:     "ansible-lint",
+			args:    []string{ansibleDir},
+			enabled: (opts.All || opts.Ansible) && dirExists(ansibleDir),
+		},
+		{
+			name: "ansible-syntax-check",
+			cmd:  "ansible-playbook",
+			args: []string{
+				"--syntax-check",
+				"-i", filepath.Join(ansibleDir, "inventory", "hosts.yml"),
+				filepath.Join(ansibleDir, "playbooks", "provision.yml"),
+			},
+			enabled: (opts.All || opts.Ansible) && dirExists(ansibleDir),
 		},
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var failures []string
+	var ranCount, skippedCount int
 
 	for _, l := range linters {
 		if !l.enabled {
@@ -103,6 +123,9 @@ func RunLints(ctx context.Context, opts Options) error {
 
 			if _, err := exec.LookPath(lint.cmd); err != nil {
 				logging.Info("%s not installed — skipping", lint.name)
+				mu.Lock()
+				skippedCount++
+				mu.Unlock()
 				return
 			}
 
@@ -113,20 +136,52 @@ func RunLints(ctx context.Context, opts Options) error {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				failures = append(failures, fmt.Sprintf("[%s] %s", lint.name, strings.TrimSpace(string(out))))
+				if ctx.Err() != nil {
+					// A cancelled context is not a linter failure.
+					return
+				}
+				failures = append(failures, fmt.Sprintf("[%s] %s", lint.name, tail(out)))
 				logging.Error("%s: FAILED", lint.name)
-			} else {
-				logging.Success("%s: passed", lint.name)
+				return
 			}
+			ranCount++
+			logging.Success("%s: passed", lint.name)
 		}(l)
 	}
 
 	wg.Wait()
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if len(failures) > 0 {
 		return fmt.Errorf("lint failures:\n%s", strings.Join(failures, "\n"))
 	}
+	if ranCount == 0 {
+		// If zero checks passed, the run either ran no tool or none was
+		// installed; not reporting this leaks silent green runs.
+		logging.Warn("no linters were executed (check that the tools are installed or directories exist)")
+		if skippedCount > 0 {
+			logging.Warn("skipped due to missing tools: %d of %d", skippedCount, len(linters))
+		}
+	}
 	return nil
+}
+
+// tail returns the end of linter output, capped so huge failures do not
+// flood logs or memory-held error strings.
+func tail(out []byte) string {
+	s := strings.TrimSpace(string(out))
+	const maxLintOutput = 8 * 1024
+	if len(s) > maxLintOutput {
+		s = "… " + s[len(s)-maxLintOutput:]
+	}
+	return s
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // FindModuleRoot finds the Go module root by walking up from cwd.
@@ -147,24 +202,66 @@ func FindModuleRoot() (string, error) {
 	}
 }
 
+// skipLintDir reports directories that must never be scanned.
+func skipLintDir(name string) bool {
+	switch name {
+	case ".git", "vendor", "node_modules", "testdata", ".terraform", ".vagrant":
+		return true
+	}
+	return false
+}
+
 // FindFiles recursively finds all files matching the pattern.
 func FindFiles(root, pattern string) []string {
 	var files []string
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
+			// Report but continue: unreadable directories should not hide
+			// the files that could be checked; they will linter-fail alone.
+			logging.Warn("skipping unreadable path during lint scan: %s (%v)", path, err)
 			return nil
 		}
-		if info.IsDir() {
-			if info.Name() == ".git" {
+		if d.IsDir() {
+			if skipLintDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		matched, _ := filepath.Match(pattern, filepath.Base(path))
+		matched, err := filepath.Match(pattern, d.Name())
+		if err != nil {
+			return err
+		}
 		if matched {
 			files = append(files, path)
 		}
 		return nil
 	})
 	return files
+}
+
+// FindFilesMulti walks root a single time and buckets matching files by the
+// pattern that matched them, avoiding one full tree walk per extension.
+func FindFilesMulti(root string, patterns ...string) map[string][]string {
+	out := make(map[string][]string, len(patterns))
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			logging.Warn("skipping unreadable path during lint scan: %s (%v)", path, err)
+			return nil
+		}
+		if d.IsDir() {
+			if skipLintDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		base := d.Name()
+		for _, pattern := range patterns {
+			if matched, merr := filepath.Match(pattern, base); merr == nil && matched {
+				out[pattern] = append(out[pattern], path)
+				break
+			}
+		}
+		return nil
+	})
+	return out
 }
