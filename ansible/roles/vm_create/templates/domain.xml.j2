@@ -1,0 +1,58 @@
+{#-
+  Deterministic libvirt domain XML for one VM.
+  Everything is derived from the generated inventory (config.yaml) so the
+  domain definition is reproducible and reviewable.
+-#}
+{% set v = hostvars[vm] %}
+<domain type='kvm'>
+  <name>{{ v.vm_name }}</name>
+  <memory unit='MiB'>{{ v.vm_ram_install_mb }}</memory>
+  <currentMemory unit='MiB'>{{ v.vm_ram_install_mb }}</currentMemory>
+  <vcpu placement='static'>{{ v.vm_vcpus }}</vcpu>
+  <os>
+    <type arch='x86_64'>hvm</type>
+  </os>
+  <features>
+    <acpi/>
+  </features>
+  <cpu mode='host-passthrough' check='none'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>restart</on_crash>
+  <devices>
+    <emulator>{{ vm_create_emulator }}</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='{{ vm_storage_dir }}/{{ v.vm_name }}.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+{% if (v.vm_drbd_disk_gb | default(0) | int) > 0 %}
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='{{ vm_storage_dir }}/{{ v.vm_name }}-drbd.qcow2'/>
+      <target dev='vdb' bus='virtio'/>
+    </disk>
+{% endif %}
+{% if v.vm_cloud_init | default(false) %}
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{ vm_storage_dir }}/seed.iso'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+{% endif %}
+{% for iface in v.vm_interfaces %}
+    <interface type='network'>
+      <source network='{{ iface.network }}'/>
+      <mac address='{{ iface.mac }}'/>
+      <model type='virtio'/>
+    </interface>
+{% endfor %}
+    <graphics type='vnc' port='-1' autoport='yes'/>
+    <video>
+      <model type='virtio'/>
+    </video>
+    <console type='pty'/>
+  </devices>
+</domain>

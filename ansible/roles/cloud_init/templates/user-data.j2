@@ -1,0 +1,71 @@
+{#-
+  Jumpstart autoinstall user-data.
+  Mirrors templates/autoinstall/user-data.tmpl (the Go provisioning path) so
+  both provisioning engines converge on the same node configuration.
+-#}
+#cloud-config
+autoinstall:
+  version: 1
+  shutdown: poweroff
+  locale: es_ES.UTF-8
+  keyboard:
+    layout: es
+  identity:
+    hostname: {{ cloud_init_jumpstart.vm_name }}
+    username: ubuntu
+    password: "{{ jumpstart_password_hash }}"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - {{ cloud_init_pubkey.stdout }}
+  network:
+    version: 2
+    ethernets:
+      net0:
+        match:
+          macaddress: "{{ cloud_init_jumpstart.vm_interfaces | selectattr('network', 'equalto', 'internal') | map(attribute='mac') | first }}"
+        addresses:
+          - {{ cloud_init_jumpstart.ansible_host }}/24
+        nameservers:
+          addresses:
+            - {{ cloud_init_jumpstart.ansible_host }}
+        routes:
+          - to: default
+            via: {{ internal_gateway }}
+            metric: 200
+      net1:
+        match:
+          macaddress: "{{ cloud_init_jumpstart.vm_interfaces | selectattr('network', 'equalto', 'main') | map(attribute='mac') | first }}"
+        addresses:
+          - {{ cloud_init_jumpstart.vm_ip_main }}/24
+{% if cloud_init_wan_enabled %}
+      net2:
+        match:
+          macaddress: "{{ cloud_init_jumpstart.vm_interfaces | selectattr('network', 'equalto', 'default') | map(attribute='mac') | first }}"
+        dhcp4: true
+        dhcp4-overrides:
+          route-metric: 100
+          use-dns: true
+{% endif %}
+  storage:
+    layout:
+      name: direct
+  late-commands:
+    - echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ubuntu
+    - chmod 440 /target/etc/sudoers.d/ubuntu
+    - printf 'Defaults:ubuntu !requiretty\nDefaults log_output\n' > /target/etc/sudoers.d/90-cms-ha
+    - chmod 440 /target/etc/sudoers.d/90-cms-ha
+    - curtin in-target --target=/target -- passwd -l ubuntu
+    - curtin in-target --target=/target -- passwd -l root
+    - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
+    - echo "{{ jumpstart_pubkey.stdout }}" >> /target/root/.ssh/authorized_keys
+    - echo "{{ jumpstart_pubkey.stdout }}" >> /target/home/ubuntu/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+    - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin no/' /target/etc/ssh/sshd_config
+    - mkdir -p /target/etc/ssh/sshd_config.d
+    - echo 'PermitRootLogin no' > /target/etc/ssh/sshd_config.d/01-permitrootlogin.conf
+    - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config
+    - curtin in-target --target=/target -- systemctl enable ssh

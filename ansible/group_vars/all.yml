@@ -1,0 +1,23 @@
+# Global provisioning variables.
+#
+# Per-VM data (addresses, MACs, RAM, disks, interfaces) is NOT defined here:
+# it is generated into inventory/hosts.yml from config.yaml, which is the
+# single source of truth. Run `cms-ha inventory` after editing config.yaml.
+#
+# The libvirt networks mirror templates/libvirt/*.xml: a bridge with no DHCP
+# (addresses are static) — the UFW router is the gateway for both subnets.
+libvirt_networks:
+  - name: internal
+    bridge: "{{ internal_bridge | default('virbr-int') }}"
+    domain: "{{ internal_domain | default('internal.local') }}"
+    host_cidr: "{{ internal_cidr | regex_replace('[0-9]+/[0-9]+$', '254/24') }}"
+  - name: main
+    bridge: "{{ main_bridge | default('virbr-main') }}"
+    domain: "{{ main_domain | default('main.local') }}"
+    host_cidr: "{{ main_cidr | regex_replace('[0-9]+/[0-9]+$', '254/24') }}"
+
+# Password hash for the jumpstart admin user (cloud-init autoinstall).
+# Supply it out of band, e.g. via an ansible-vault encrypted file or
+# `--extra-vars jumpstart_password_hash="$(openssl passwd -6)"`.
+# It must never be committed: without it, provisioning the jumpstart fails
+# rather than shipping a guessable credential.

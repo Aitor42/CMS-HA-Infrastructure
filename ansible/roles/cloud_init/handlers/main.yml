@@ -1,0 +1,7 @@
+---
+- name: Build the cloud-init seed ISO
+  ansible.builtin.command:
+    cmd: >-
+      xorrisofs -output {{ vm_storage_dir }}/seed.iso -volid cidata
+      -joliet -rock {{ vm_storage_dir }}/autoinstall
+  changed_when: true

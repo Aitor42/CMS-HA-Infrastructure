@@ -1,0 +1,39 @@
+---
+# Provision the libvirt networks and VM domains declared in config.yaml.
+#
+# This is the ONLY path that creates infrastructure. Runtime operations
+# (start/stop/shrink, state queries) and fencing keep using the thin
+# libvirt/virsh primitive in the Go orchestrator — Ansible is never on the
+# fencing path (see ansible/README.md).
+#
+# Prerequisites:
+#   - Inventory generated:      cms-ha inventory
+#   - Hypervisor has libvirt,   qemu-img, xorrisofs and python3-libvirt
+#   - Collections installed:    ansible-galaxy collection install community.libvirt
+#   - For the jumpstart seed:   jumpstart_password_hash supplied out of band
+#
+# Usage:
+#   ansible-playbook playbooks/provision.yml
+#   ansible-playbook playbooks/provision.yml --tags networks
+#   ansible-playbook playbooks/provision.yml --limit hypervisor
+
+- name: Declare libvirt networks
+  hosts: hypervisor
+  gather_facts: false
+  tags: [networks]
+  roles:
+    - libvirt_networks
+
+- name: Provision the jumpstart cloud-init seed ISO
+  hosts: hypervisor
+  gather_facts: false
+  tags: [cloudinit]
+  roles:
+    - cloud_init
+
+- name: Declare VM domains
+  hosts: hypervisor
+  gather_facts: false
+  tags: [vms]
+  roles:
+    - vm_create

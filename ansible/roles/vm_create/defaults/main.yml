@@ -1,0 +1,7 @@
+---
+# vm_create — declare disks and VM domains from the generated inventory.
+#
+# Disks are created once with qemu-img (idempotent via `creates`); domains are
+# defined from a deterministic XML template and set to autostart so the lab
+# survives hypervisor reboots.
+vm_create_emulator: /usr/bin/qemu-system-x86_64

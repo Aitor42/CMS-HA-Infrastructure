@@ -1,0 +1,58 @@
+---
+# Declare VM disks and domains for every host in the `vms` group.
+#
+# Variables come from inventory/hosts.yml (generated from config.yaml):
+#   vm_name, vm_interfaces, vm_ram_install_mb, vm_disk_gb,
+#   vm_drbd_disk_gb, vm_cloud_init
+
+- name: Ensure the VM storage directory exists
+  ansible.builtin.file:
+    path: "{{ vm_storage_dir }}"
+    state: directory
+    mode: "0711"
+
+- name: Create the primary qcow2 disk for each VM
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2
+      {{ vm_storage_dir }}/{{ hostvars[vm].vm_name }}.qcow2
+      {{ hostvars[vm].vm_disk_gb }}G
+    creates: "{{ vm_storage_dir }}/{{ hostvars[vm].vm_name }}.qcow2"
+  loop: "{{ groups['vms'] | sort }}"
+  loop_control:
+    loop_var: vm
+    label: "{{ vm }}"
+
+- name: Create the DRBD qcow2 disk where configured
+  ansible.builtin.command:
+    cmd: >-
+      qemu-img create -f qcow2
+      {{ vm_storage_dir }}/{{ hostvars[vm].vm_name }}-drbd.qcow2
+      {{ hostvars[vm].vm_drbd_disk_gb }}G
+    creates: "{{ vm_storage_dir }}/{{ hostvars[vm].vm_name }}-drbd.qcow2"
+  loop: "{{ groups['vms'] | sort }}"
+  loop_control:
+    loop_var: vm
+    label: "{{ vm }}"
+  when: (hostvars[vm].vm_drbd_disk_gb | default(0) | int) > 0
+
+- name: Define the VM domains (deterministic XML)
+  community.libvirt.virt:
+    name: "{{ hostvars[vm].vm_name }}"
+    command: define
+    uri: "{{ libvirt_uri }}"
+    xml: "{{ lookup('template', 'domain.xml.j2') }}"
+  loop: "{{ groups['vms'] | sort }}"
+  loop_control:
+    loop_var: vm
+    label: "{{ vm }}"
+
+- name: Ensure VM domains are set to autostart
+  community.libvirt.virt:
+    name: "{{ hostvars[vm].vm_name }}"
+    autostart: true
+    uri: "{{ libvirt_uri }}"
+  loop: "{{ groups['vms'] | sort }}"
+  loop_control:
+    loop_var: vm
+    label: "{{ vm }}"

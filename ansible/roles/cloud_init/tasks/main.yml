@@ -1,0 +1,43 @@
+---
+# Build the cloud-init seed ISO used to bootstrap the jumpstart VM
+# (Ubuntu autoinstall). Other nodes are PXE-provisioned by Cobbler.
+
+- name: Require the jumpstart admin password hash
+  ansible.builtin.assert:
+    that:
+      - jumpstart_password_hash is defined
+      - jumpstart_password_hash | length > 0
+    fail_msg: >-
+      jumpstart_password_hash is required. Generate it with
+      `openssl passwd -6` and supply it via an ansible-vault encrypted file
+      or --extra-vars (never commit a password hash to the repository).
+
+- name: Resolve the jumpstart host variables
+  ansible.builtin.set_fact:
+    cloud_init_jumpstart: "{{ hostvars[cloud_init_host] }}"
+
+- name: Read the provisioning public key
+  ansible.builtin.command:
+    cmd: "ssh-keygen -y -f {{ ssh_private_key }}"
+  register: cloud_init_pubkey
+  changed_when: false
+
+- name: Create the cloud-init working directory
+  ansible.builtin.file:
+    path: "{{ vm_storage_dir }}/autoinstall"
+    state: directory
+    mode: "0700"
+
+- name: Render the autoinstall user-data
+  ansible.builtin.template:
+    src: user-data.j2
+    dest: "{{ vm_storage_dir }}/autoinstall/user-data"
+    mode: "0600"
+  notify: Build the cloud-init seed ISO
+
+- name: Create the empty meta-data file
+  ansible.builtin.copy:
+    content: ""
+    dest: "{{ vm_storage_dir }}/autoinstall/meta-data"
+    mode: "0600"
+  notify: Build the cloud-init seed ISO

@@ -1,0 +1,33 @@
+---
+# Declare and start the libvirt networks (internal + main).
+
+- name: Define and activate each libvirt network
+  community.libvirt.virt_net:
+    name: "{{ item.name }}"
+    state: active
+    autostart: true
+    uri: "{{ libvirt_uri }}"
+    xml: "{{ lookup('template', 'network.xml.j2') }}"
+  loop: "{{ libvirt_networks }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Assign the host bridge address for each network
+  ansible.builtin.command:
+    cmd: "ip addr add {{ item.host_cidr }} dev {{ item.bridge }}"
+  loop: "{{ libvirt_networks }}"
+  loop_control:
+    label: "{{ item.bridge }} {{ item.host_cidr }}"
+  register: libvirt_networks_bridge_addr
+  changed_when: libvirt_networks_bridge_addr.rc == 0
+  failed_when:
+    - libvirt_networks_bridge_addr.rc != 0
+    - "'File exists' not in (libvirt_networks_bridge_addr.stderr | default(''))"
+
+- name: Ensure each bridge link is up
+  ansible.builtin.command:
+    cmd: "ip link set dev {{ item.bridge }} up"
+  loop: "{{ libvirt_networks }}"
+  loop_control:
+    label: "{{ item.bridge }}"
+  changed_when: false

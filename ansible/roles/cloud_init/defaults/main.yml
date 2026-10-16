@@ -1,0 +1,8 @@
+---
+# Defaults for the jumpstart cloud-init seed.
+#
+# The admin password hash MUST be supplied out of band (vault or --extra-vars);
+# it is intentionally undefined here so provisioning fails loudly rather than
+# shipping a guessable credential.
+cloud_init_host: jumpstart
+cloud_init_wan_enabled: true
