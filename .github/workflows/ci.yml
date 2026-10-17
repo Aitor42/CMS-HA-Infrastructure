@@ -116,6 +116,19 @@ jobs:
           curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
             | tar xz -C /usr/local/bin kubeconform
 
+      - name: Install kustomize
+        run: |
+          KUSTOMIZE_VERSION="v5.4.3"
+          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kustomize
+
+      - name: Render kustomize roots (overlay/backups/jobs)
+        run: |
+          echo "Rendering kustomize roots..."
+          kustomize build kubernetes/overlays/lab > /dev/null
+          kustomize build kubernetes/backups    > /dev/null
+          kustomize build kubernetes/jobs       > /dev/null
+
       - name: Validate Kubernetes manifests
         run: |
           echo "Validating Kubernetes manifests in kubernetes/..."
@@ -123,8 +136,10 @@ jobs:
             -strict \
             -summary \
             -output json \
+            -skip Kustomization \
+            -ignore-filename-pattern '\.patch\.yaml$' \
             -kubernetes-version 1.29.0 \
-            kubernetes/*.yaml
+            kubernetes/
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 5. Puppet Manifest Validation
@@ -153,39 +168,101 @@ jobs:
             {} +
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 6. Terraform / OpenTofu Validation
+  # 6. Ansible Validation (ansible-lint + playbook syntax check)
   # ─────────────────────────────────────────────────────────────────────────────
-  validate-terraform:
-    name: Validate Terraform Configuration
+  validate-ansible:
+    name: Validate Ansible
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: terraform
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Libvirt development headers
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          terraform_version: '1.9'
+          python-version: '3.12'
 
-      - name: Terraform fmt — check formatting
-        run: terraform fmt -check -recursive
+      - name: Install ansible-core and ansible-lint
+        run: pip install ansible-core ansible-lint
 
-      - name: Terraform init — download providers
-        run: terraform init -backend=false
+      - name: Install required collections
+        run: ansible-galaxy collection install -r ansible/requirements.yml
 
-      - name: Terraform validate — check syntax
-        run: terraform validate
+      - name: ansible-lint
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+        run: ansible-lint ansible
+
+      - name: Playbook syntax check
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+        run: |
+          ansible-playbook --syntax-check \
+            -i ansible/inventory/hosts.yml \
+            ansible/playbooks/provision.yml
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 7. Summary Gate — all checks must pass for merge
+  # 7. Security Scanning — gosec + govulncheck + Trivy
+  #    Gate: no HIGH/CRITICAL findings in code (gosec), dependencies
+  #    (govulncheck/Trivy vuln) or secrets (Trivy). Kubernetes misconfig is
+  #    reported but not blocking (see docs/SECURITY.md).
+  # ─────────────────────────────────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (gosec, govulncheck, Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: true
+
+      - name: gosec — Go SAST (fails on HIGH)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -severity high -confidence medium -exclude-dir=tests -fmt sarif -out gosec.sarif ./...
+          echo "✔ gosec: no HIGH findings"
+
+      - name: Upload gosec SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gosec.sarif
+
+      - name: govulncheck — reachable vulnerabilities in dependencies
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Trivy — dependencies & secrets (BLOCKING on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      - name: Trivy — Kubernetes misconfig (report only)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig
+          severity: HIGH,CRITICAL
+          exit-code: '0'
+          format: table
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 8. Summary Gate — all checks must pass for merge
   # ─────────────────────────────────────────────────────────────────────────────
   ci-pass:
     name: CI Summary
@@ -196,7 +273,8 @@ jobs:
       - lint-yaml
       - validate-k8s
       - lint-puppet
-      - validate-terraform
+      - validate-ansible
+      - security-scan
     runs-on: ubuntu-latest
     steps:
       - name: Check results
@@ -207,7 +285,8 @@ jobs:
           echo "lint-yaml:          ${{ needs.lint-yaml.result }}"
           echo "validate-k8s:      ${{ needs.validate-k8s.result }}"
           echo "lint-puppet:        ${{ needs.lint-puppet.result }}"
-          echo "validate-terraform: ${{ needs.validate-terraform.result }}"
+          echo "validate-ansible:   ${{ needs.validate-ansible.result }}"
+          echo "security-scan:      ${{ needs.security-scan.result }}"
 
           # Fail if any required job failed
           for result in \
@@ -215,17 +294,13 @@ jobs:
             "${{ needs.lint-shell.result }}" \
             "${{ needs.lint-yaml.result }}" \
             "${{ needs.validate-k8s.result }}" \
-            "${{ needs.lint-puppet.result }}"; do
+            "${{ needs.lint-puppet.result }}" \
+            "${{ needs.validate-ansible.result }}" \
+            "${{ needs.security-scan.result }}"; do
             if [ "$result" = "failure" ]; then
               echo "::error::One or more CI checks failed"
               exit 1
             fi
           done
-
-          # Terraform validation is optional
-          if [ "${{ needs.validate-terraform.result }}" = "failure" ]; then
-            echo "::error::Terraform validation failed"
-            exit 1
-          fi
 
           echo "✔ All CI checks passed!"

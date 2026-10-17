@@ -1,0 +1,89 @@
+name: Integration (KVM lab)
+
+# End-to-end integration gate. Unlike ci.yml (static checks on GitHub-hosted
+# runners), this job needs a real hypervisor: it creates VMs with libvirt,
+# PXE-boots them, runs the full deployment, verifies the result and finally runs
+# the DRBD failover chaos exercise. It therefore targets a self-hosted runner
+# labelled `kvm` and is never triggered by an ordinary pull request.
+#
+# Runner prerequisites (see docs/MANUAL.md):
+#   - Linux x86_64 with hardware virtualisation and /dev/kvm
+#   - libvirt + QEMU installed and virsh able to connect
+#   - docker (or podman) for the pinned Garage/k6 tooling containers
+#   - a checkout-writable working directory with enough disk for the VM images
+on:
+  workflow_dispatch:
+    inputs:
+      resume:
+        description: "Resume from the deploy.state checkpoint instead of redeploying"
+        type: boolean
+        default: false
+      skip_chaos:
+        description: "Skip the DRBD failover chaos exercise"
+        type: boolean
+        default: false
+      teardown:
+        description: "Destroy the lab (VMs, disks, networks) after the run"
+        type: boolean
+        default: false
+  schedule:
+    # Nightly, so that drift in the hardware lab is caught without a human.
+    - cron: "0 3 * * *"
+
+# A single physical hypervisor cannot run two labs at once: serialise the runs.
+concurrency:
+  group: integration-kvm
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    name: Deploy + verify + failover
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 480
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      - name: Run integration test
+        env:
+          CONFIG: config.yaml
+          STATE_FILE: deploy.state
+          ARTIFACTS_DIR: integration-artifacts
+        run: |
+          args=()
+          if [ "${{ inputs.resume }}" = "true" ]; then
+            args+=(--resume)
+          fi
+          if [ "${{ inputs.skip_chaos }}" = "true" ]; then
+            args+=(--skip-chaos)
+          fi
+          tests/integration/run.sh "${args[@]}"
+
+      - name: Collect diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== deploy.state ===" || true
+          cat deploy.state 2>/dev/null || echo "(no checkpoint written)"
+          echo "=== libvirt domains ===" || true
+          virsh list --all || true
+          echo "=== libvirt networks ===" || true
+          virsh net-list --all || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-artifacts
+          path: integration-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Tear down the lab
+        if: ${{ always() && inputs.teardown }}
+        run: ./cms-ha -c config.yaml cleanup --yes || true
