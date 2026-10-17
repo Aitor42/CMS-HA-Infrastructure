@@ -25,8 +25,8 @@ BUILD_DIR   := .
 
 # ── Project paths ────────────────────────────────────────────────────────────
 PROJECT_DIR   := $(shell pwd)
-TERRAFORM_DIR := $(PROJECT_DIR)/terraform
 K8S_DIR       := $(PROJECT_DIR)/kubernetes
+ANSIBLE_DIR   := $(PROJECT_DIR)/ansible
 
 # ── Configurable variables ───────────────────────────────────────────────────
 CONFIG      ?= config.yaml
@@ -78,12 +78,20 @@ deploy-dry-run: build ## Dry-run deployment (no commands executed)
 	@echo "▶ Dry-run deployment..."
 	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create --dry-run
 
-.PHONY: deploy-terraform
-deploy-terraform: build ## Deploy VMs via Terraform, then run service phases
-	@echo "▶ Deploying infrastructure with Terraform..."
-	cd $(TERRAFORM_DIR) && terraform init && terraform apply -auto-approve
-	@echo "▶ Running service deployment phases..."
-	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create
+.PHONY: inventory
+inventory: build ## Generate the Ansible inventory from config.yaml
+	@echo "▶ Generating Ansible inventory..."
+	./$(BINARY) -c $(CONFIG) inventory
+
+.PHONY: provision
+provision: inventory ## Create networks and VMs via Ansible (infra as code)
+	@echo "▶ Provisioning infrastructure with Ansible..."
+	cd $(ANSIBLE_DIR) && ansible-playbook playbooks/provision.yml
+
+.PHONY: provision-check
+provision-check: inventory ## Dry-run Ansible provisioning (no changes)
+	@echo "▶ Dry-run Ansible provisioning..."
+	cd $(ANSIBLE_DIR) && ansible-playbook playbooks/provision.yml --check --diff
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASES (individual phase execution)
@@ -152,6 +160,16 @@ test-failover-norestore: build ## Run failover tests without restoring
 	@echo "▶ Running failover tests (skip-restore mode)..."
 	./$(BINARY) -c $(CONFIG) test failover --skip-restore
 
+.PHONY: integration
+integration: build ## End-to-end integration test on a real KVM host (deploy + verify + failover)
+	@echo "▶ Running end-to-end integration test..."
+	tests/integration/run.sh
+
+.PHONY: integration-resume
+integration-resume: build ## Resume the end-to-end integration test from the deploy checkpoint
+	@echo "▶ Resuming end-to-end integration test..."
+	tests/integration/run.sh --resume
+
 .PHONY: traffic
 traffic: build ## Run traffic mix test
 	@echo "▶ Running traffic generation..."
@@ -166,7 +184,7 @@ traffic-external: build ## Run external traffic test
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: lint
-lint: lint-go lint-shell lint-yaml lint-puppet lint-k8s ## Run all linters
+lint: lint-go lint-shell lint-yaml lint-puppet lint-k8s lint-ansible ## Run all linters
 
 .PHONY: lint-go
 lint-go: ## Lint Go code (go vet + staticcheck)
@@ -211,19 +229,61 @@ lint-puppet: ## Lint Puppet manifests (puppet-lint)
 	fi
 
 .PHONY: lint-k8s
-lint-k8s: ## Validate Kubernetes manifests (kubeconform)
+lint-k8s: ## Validate Kubernetes manifests (kustomize render + kubeconform)
 	@echo "▶ Validating Kubernetes manifests..."
+	@if command -v kustomize >/dev/null 2>&1; then \
+		kustomize build $(K8S_DIR)/overlays/lab >/dev/null && \
+		kustomize build $(K8S_DIR)/backups >/dev/null && \
+		kustomize build $(K8S_DIR)/jobs >/dev/null && \
+		echo "  ✓ kustomize roots render"; \
+	else \
+		echo "  ℹ kustomize not installed — skipping render check"; \
+	fi
 	@if command -v kubeconform >/dev/null 2>&1; then \
-		kubeconform -strict -summary -kubernetes-version 1.29.0 $(K8S_DIR)/*.yaml; \
+		kubeconform -strict -summary -skip Kustomization -ignore-filename-pattern '\.patch\.yaml$$' -kubernetes-version 1.29.0 $(K8S_DIR); \
 	else \
 		echo "  ℹ kubeconform not installed — skipping"; \
 	fi
 
-.PHONY: lint-terraform
-lint-terraform: ## Validate Terraform configuration
-	@echo "▶ Validating Terraform..."
-	cd $(TERRAFORM_DIR) && terraform fmt -check -recursive
-	cd $(TERRAFORM_DIR) && terraform init -backend=false && terraform validate
+.PHONY: security
+security: ## Security scan: gosec (Go SAST) + govulncheck (deps) + Trivy (fs)
+	@echo "▶ Security scan..."
+	@if command -v gosec >/dev/null 2>&1; then \
+		gosec -severity high -confidence medium -exclude-dir=tests ./... && \
+		echo "  ✓ gosec: no HIGH findings"; \
+	else \
+		echo "  ℹ gosec not installed — skipping (go install github.com/securego/gosec/v2/cmd/gosec@latest)"; \
+	fi
+	@if command -v govulncheck >/dev/null 2>&1; then \
+		govulncheck ./...; \
+	else \
+		echo "  ℹ govulncheck not installed — skipping (go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
+	fi
+	@if command -v trivy >/dev/null 2>&1; then \
+		echo "  · dependencies & secrets (blocking on HIGH/CRITICAL)"; \
+		trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .; \
+		echo "  · Kubernetes misconfig (report only)"; \
+		trivy fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 0 .; \
+	else \
+		echo "  ℹ trivy not installed — skipping"; \
+	fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+.PHONY: lint-ansible
+lint-ansible: ## Lint Ansible playbooks and roles (ansible-lint + syntax-check)
+	@echo "▶ Checking Ansible code..."
+	@if command -v ansible-lint >/dev/null 2>&1; then \
+		ANSIBLE_CONFIG=$(ANSIBLE_DIR)/ansible.cfg ansible-lint $(ANSIBLE_DIR); \
+	else \
+		echo "  ℹ ansible-lint not installed — skipping"; \
+	fi
+	@if command -v ansible-playbook >/dev/null 2>&1; then \
+		ANSIBLE_CONFIG=$(ANSIBLE_DIR)/ansible.cfg ansible-playbook --syntax-check \
+			-i $(ANSIBLE_DIR)/inventory/hosts.yml \
+			$(ANSIBLE_DIR)/playbooks/provision.yml; \
+	else \
+		echo "  ℹ ansible-playbook not installed — skipping"; \
+	fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAINTENANCE & OPERATIONS
@@ -235,13 +295,9 @@ start: build ## Start all VMs (resume paused / boot stopped)
 	./$(BINARY) -c $(CONFIG) vm start
 
 .PHONY: stop
-stop: ## Gracefully shut down all VMs
+stop: build ## Gracefully shut down all VMs
 	@echo "▶ Shutting down all VMs..."
-	@for vm in $$(virsh list --name 2>/dev/null); do \
-		echo "  Shutting down $$vm..."; \
-		virsh shutdown "$$vm" 2>/dev/null || true; \
-	done
-	@echo "✔ Shutdown signals sent to all running VMs"
+	./$(BINARY) -c $(CONFIG) vm stop
 
 .PHONY: shrink
 shrink: build ## Resize all VMs to production RAM sizing
@@ -287,15 +343,13 @@ secrets-decrypt: build ## Decrypt and display config
 # CLEANUP
 # ══════════════════════════════════════════════════════════════════════════════
 
-.PHONY: destroy
-destroy: build ## Destroy all VMs and networks (cleanup)
+.PHONY: cleanup
+cleanup: build ## Destroy all VMs, disks, and virtual networks
 	@echo "⚠ Destroying all infrastructure..."
-	./$(BINARY) -c $(CONFIG) phase init-vms --cleanup
+	./$(BINARY) -c $(CONFIG) cleanup
 
-.PHONY: destroy-terraform
-destroy-terraform: ## Destroy all Terraform-managed resources
-	@echo "⚠ Destroying all Terraform infrastructure..."
-	cd $(TERRAFORM_DIR) && terraform destroy
+.PHONY: destroy
+destroy: cleanup ## Alias for cleanup
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELP

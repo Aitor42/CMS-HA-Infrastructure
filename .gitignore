@@ -4,7 +4,6 @@ token.txt
 .env
 .env.*
 *-secret.yaml
-!kubernetes/mariadb-secret.yaml
 
 # Test files
 prueba
@@ -16,6 +15,7 @@ vendor/
 # Age encryption keys
 *.age-key
 age-key.txt
+/private.key
 
 # Binary files (per assignment requirement: avoid ISOs and binaries)
 *.pdf
@@ -35,12 +35,15 @@ age-key.txt
 /vm_storage/
 *.pdf
 
-# Terraform / OpenTofu state and providers
-terraform/.terraform/
-terraform/*.tfstate
-terraform/*.tfstate.backup
-terraform/.terraform.lock.hcl
-terraform/terraform.tfvars
+# Ansible local artefacts (the inventory itself is generated and committed)
+ansible/.ansible/
+ansible/*.retry
+ansible/**/*.retry
+ansible/.cache/
+
+# Orchestrator deployment checkpoint (resume state)
+deploy.state
+deploy.state.tmp
 
 # Strix runs
 strix_runs/
