@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # 10_setup_internal_ca.sh
 #
 # Phase 08: Internal Certificate Authority (PKI) with step-ca
@@ -26,7 +31,13 @@ source "${SCRIPT_DIR}/config.sh"
 # ── Configuration ─────────────────────────────────────────────────────────────
 CA_HOST="$JUMPSTART_IP"
 CA_PORT="8443"
-CA_PROVISIONER_PASSWORD="StepCA-Pr0v1s10ner!"
+# ⚠ Supply the provisioner password at runtime (same value as
+# pki.provisioner_password in config.yaml); never commit credentials.
+CA_PROVISIONER_PASSWORD="${CA_PROVISIONER_PASSWORD:-}"
+if [[ -z "$CA_PROVISIONER_PASSWORD" ]]; then
+    echo "[ERROR] Set CA_PROVISIONER_PASSWORD before the internal CA setup." >&2
+    exit 1
+fi
 CA_DIR="/etc/step-ca"
 STEP_VERSION="${STEP_VERSION:-0.27.5}"
 STEP_CA_VERSION="${STEP_CA_VERSION:-0.27.5}"

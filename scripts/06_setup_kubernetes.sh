@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # 06_setup_kubernetes.sh
 #
 #
@@ -20,10 +25,17 @@ trap 'echo -e "\n[!] Operación interrumpida por el usuario."; exit 130' INT TER
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
 
+if [ -z "$DB_PASS" ] || [ -z "$DB_ROOT_PASS" ] || [ -z "$DB_EXPORTER_PASS" ]; then
+  echo "[ERROR] Set DB_PASS, DB_ROOT_PASS, and DB_EXPORTER_PASS before deploying MariaDB." >&2
+  exit 1
+fi
+
 echo ">>> Iniciando despliegue de Kubernetes (K3s) para el Clúster HA <<<"
 
 # Ruta local de manifiestos YAML de Kubernetes
 K8S_MANIFESTS_DIR="${SCRIPT_DIR}/../kubernetes"
+STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "$STAGE_DIR"' EXIT
 
 # ==============================================================================
 # PASO 1: INSTALAR PRIMER MAESTRO (INICIALIZADOR DEL CLÚSTER K3s)
@@ -39,7 +51,7 @@ ssh ${SSH_OPTS} root@$MASTER1_IP << EOF
     else
         echo "[+] Ejecutando instalador de K3s Server..."
         # Habilitar etcd con almacenamiento interno redundante
-        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init \
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption \
             --node-external-ip ${MASTER1_IP} \
             --flannel-iface enp1s0 \
             --etcd-arg=heartbeat-interval=1000 \
@@ -105,7 +117,7 @@ ssh ${SSH_OPTS} root@$MASTER2_IP << EOF
         echo "[+] Ejecutando instalador en modo Server apuntando a Master 1..."
         curl -sfL https://get.k3s.io | K3S_URL=https://${MASTER1_IP}:6443 \
             K3S_TOKEN=${K3S_TOKEN} \
-            INSTALL_K3S_EXEC="server --node-ip ${MASTER2_IP} \
+            INSTALL_K3S_EXEC="server --secrets-encryption --node-ip ${MASTER2_IP} \
             --node-external-ip ${MASTER2_IP} \
             --flannel-iface enp1s0 \
             --etcd-arg=heartbeat-interval=1000 \
@@ -222,12 +234,32 @@ echo "[OK] Clúster sano para despliegue."
 
 echo ""
 echo "[+] Transfiriendo manifiestos YAML a Master 1..."
-scp ${SSH_OPTS} -r "${K8S_MANIFESTS_DIR}" root@${MASTER1_IP}:/tmp/k8s-manifests
+cp -R "${K8S_MANIFESTS_DIR}" "${STAGE_DIR}/k8s-manifests"
+umask 077
+DB_PASS_B64="$(printf %s "$DB_PASS" | base64 -w0)"
+DB_ROOT_PASS_B64="$(printf %s "$DB_ROOT_PASS" | base64 -w0)"
+DB_EXPORTER_PASS_B64="$(printf %s "$DB_EXPORTER_PASS" | base64 -w0)"
+cat > "${STAGE_DIR}/k8s-manifests/mariadb-secret.yaml" <<EOF_SECRET
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mariadb-secret
+  namespace: cms
+type: Opaque
+data:
+  MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS_B64}
+  MYSQL_WP_PASSWORD: ${DB_PASS_B64}
+  MYSQL_EXPORTER_PASSWORD: ${DB_EXPORTER_PASS_B64}
+EOF_SECRET
+chmod 600 "${STAGE_DIR}/k8s-manifests/mariadb-secret.yaml"
+unset DB_PASS_B64 DB_ROOT_PASS_B64 DB_EXPORTER_PASS_B64
+scp ${SSH_OPTS} -r "${STAGE_DIR}/k8s-manifests" root@${MASTER1_IP}:/tmp/k8s-manifests
 
 echo "[+] Aplicando manifiestos de MariaDB en el clúster..."
 ssh ${SSH_OPTS} root@$MASTER1_IP << 'EOF'
     set -euo pipefail
     MANIFESTS="/tmp/k8s-manifests"
+    trap 'rm -rf "$MANIFESTS"' EXIT
 
     # Lógica de reintentos ante colisiones en la API de Kubernetes durante el arranque
     apply_with_retry() {
