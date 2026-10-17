@@ -15,7 +15,7 @@ puppet/
         ├── manifests/            # Role classes (desired state per node type)
         │   ├── base.pp           # Applied to ALL nodes (node_exporter, chrony, UFW, swap, /etc/hosts)
         │   ├── router.pp         # ufw-router: IP forwarding, UFW perimeter + forwarding rules
-        │   ├── loadbalancer.pp   # main-lb: Nginx, SSL cert, UFW rules
+        │   ├── loadbalancer.pp   # main-lb1/main-lb2: Nginx, SSL cert, keepalived VIP, UFW rules
         │   ├── cms_frontend.pp   # main-cms*: Apache, PHP, WordPress, WP-CLI, UFW rules
         │   ├── monitor.pp        # internal-monitor: Prometheus, Grafana + provisioning, UFW rules
         │   ├── k3s_master.pp     # internal-master*: K3s deps, UFW rules (API, etcd, DRBD, Flannel)
@@ -42,7 +42,7 @@ puppet/
 | `internal-monitor` | `role::monitor` | Prometheus, Grafana, UFW |
 | `internal-master*` | `role::k3s_master` | K3s prereqs, UFW (API/etcd/DRBD/Flannel) |
 | `internal-worker*` | `role::k3s_worker` | K3s prereqs, UFW (kubelet/Flannel) |
-| `main-lb` | `role::loadbalancer` | Nginx, SSL cert, UFW |
+| `main-lb*` | `role::loadbalancer` | Nginx, SSL cert, keepalived VIP, UFW |
 | `main-cms*` | `role::cms_frontend` | Apache, PHP, WordPress, WP-CLI, UFW |
 | `main-hotdesk*` | `role::hotdesk` | XFCE desktop, LightDM |
 | `*` (default) | `role::base` | node_exporter, chrony, /etc/hosts, swap, UFW base |
@@ -94,18 +94,18 @@ always applied regardless of the node's specific role.
 ## Manual Operations
 
 ```bash
-# Force immediate Puppet run on a node
-ssh root@<NODE_IP> '/opt/puppetlabs/bin/puppet agent -t'
+# Force immediate Puppet run on a node (non-root deploy account + sudo)
+ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent -t'
 
 # Check Puppet agent status
-ssh root@<NODE_IP> '/opt/puppetlabs/bin/puppet agent --configprint runinterval'
+ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent --configprint runinterval'
 
 # Dry run (show what would change without applying)
-ssh root@<NODE_IP> '/opt/puppetlabs/bin/puppet agent -t --noop'
+ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent -t --noop'
 
 # View last Puppet run report
-ssh root@<NODE_IP> '/opt/puppetlabs/bin/puppet report last'
+ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet report last'
 
 # List all signed certificates (from jumpstart)
-ssh root@192.168.10.10 'puppetserver ca list --all'
+ssh ubuntu@192.168.10.10 'sudo puppetserver ca list --all'
 ```
