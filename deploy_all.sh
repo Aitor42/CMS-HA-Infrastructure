@@ -1,6 +1,10 @@
 #!/bin/bash
 # deploy_all.sh
 #
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha
+# deploy`) and by Ansible/Puppet. Kept for historical reference and NOT
+# maintained: new work must target the v2 path (see scripts/README.md).
+#
 # Orquestador principal y punto de entrada para desplegar la infraestructura CMS
 # de alta disponibilidad en el entorno simulado.
 #

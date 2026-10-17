@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # 00_init_vms.sh
 #
 # Creates all virtual networks and VMs for the CMS infrastructure.

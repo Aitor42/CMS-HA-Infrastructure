@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # 01_setup_cobbler.sh
 #
 #
@@ -347,6 +352,29 @@ mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
 rsync -a --progress "${MOUNT_POINT}/" /var/www/cobbler/distro_mirror/ubuntu-24.04/ 2>&1 | tail -5
 
 umount "$MOUNT_POINT" 2>/dev/null || true
+
+# Casper mounts the PXE NFS root over UDP by default (BusyBox nfsmount); with
+# several concurrent clients that yields SQASHFS I/O storms and no SSH during
+# install-batches. The helper also verifies the mirror with md5sum -c; a
+# failure here aborts the setup instead of shipping a broken PXE boot.
+# Single canonical copy lives in templates/cobbler/ (the one embedded into the
+# cms-ha binary and uploaded by the Go phase); it is intentionally not
+# duplicated under scripts/.
+HELPER_CANDIDATES=(
+    "$(cd "$(dirname "$0")/.." && pwd)/templates/cobbler/casper_initrd_tcp.sh"
+    /usr/local/bin/casper_initrd_tcp.sh
+    /tmp/casper_initrd_tcp.sh
+)
+for helper in "${HELPER_CANDIDATES[@]}"; do
+    if [ -x "$helper" ]; then
+        "$helper" /var/www/cobbler/distro_mirror/ubuntu-24.04
+        HELPER_OK=1
+        break
+    fi
+done
+[ -n "${HELPER_OK:-}" ] || {
+    echo "  [WARN] casper_initrd_tcp.sh not found, casper NFS mount stays UDP"
+}
 
 # Registrar la distribución en Cobbler
 cobbler distro add \

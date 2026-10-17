@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # 04_setup_puppet.sh
 #
 # Installs and configures Puppet Server 8.x on the Jumpstart node (Puppet Master)
@@ -20,6 +25,22 @@ trap 'echo -e "\n[!] Operación interrumpida por el usuario."; exit 130' INT TER
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_DIR="${SCRIPT_DIR}/../templates"
 source "${SCRIPT_DIR}/config.sh"
+
+if [[ -z "$DB_PASS" || -z "$DB_EXPORTER_PASS" || -z "$WP_ADMIN_PASS" ]]; then
+    echo "[ERROR] Set DB_PASS, DB_EXPORTER_PASS, and WP_ADMIN_PASS before Puppet setup." >&2
+    exit 1
+fi
+
+CMS_RUNTIME_SECRETS="$(mktemp)"
+EXPORTER_RUNTIME_SECRETS="$(mktemp)"
+chmod 600 "$CMS_RUNTIME_SECRETS" "$EXPORTER_RUNTIME_SECRETS"
+trap 'rm -f "${CMS_RUNTIME_SECRETS:-}" "${EXPORTER_RUNTIME_SECRETS:-}"' EXIT
+DB_PASS="$DB_PASS" WP_ADMIN_PASS="$WP_ADMIN_PASS" \
+    python3 -c 'import json,os; print(json.dumps({"cms_ha":{"database_password":os.environ["DB_PASS"],"wordpress_admin_password":os.environ["WP_ADMIN_PASS"]}}))' \
+    > "$CMS_RUNTIME_SECRETS"
+DB_EXPORTER_PASS="$DB_EXPORTER_PASS" \
+    python3 -c 'import json,os; print(json.dumps({"cms_ha":{"database_exporter_password":os.environ["DB_EXPORTER_PASS"]}}))' \
+    > "$EXPORTER_RUNTIME_SECRETS"
 
 echo ">>> Iniciando despliegue de Puppet (Configuration Management) <<<"
 
@@ -300,6 +321,7 @@ CODEDIR="/etc/puppetlabs/code/environments/production"
 ssh ${SSH_OPTS} root@${PUPPET_MASTER_IP} \
     "mkdir -p ${CODEDIR}/modules/role/files/nginx \
               ${CODEDIR}/modules/role/files/apache \
+              ${CODEDIR}/modules/role/files/cms-ha \
               ${CODEDIR}/modules/role/files/prometheus \
               ${CODEDIR}/modules/role/files/grafana"
 
@@ -316,6 +338,8 @@ scp ${SSH_OPTS} "${PUPPET_DIR}/modules/role/files/nginx/cms-lb.conf" \
     root@${PUPPET_MASTER_IP}:"${CODEDIR}/modules/role/files/nginx/cms-lb.conf"
 scp ${SSH_OPTS} "${PUPPET_DIR}/modules/role/files/apache/"* \
     root@${PUPPET_MASTER_IP}:"${CODEDIR}/modules/role/files/apache/"
+scp ${SSH_OPTS} "${PUPPET_DIR}/modules/role/files/cms-ha/"* \
+    root@${PUPPET_MASTER_IP}:"${CODEDIR}/modules/role/files/cms-ha/"
 scp ${SSH_OPTS} "${PUPPET_DIR}/modules/role/files/prometheus/prometheus.yml" \
     root@${PUPPET_MASTER_IP}:"${CODEDIR}/modules/role/files/prometheus/prometheus.yml"
 scp ${SSH_OPTS} "${PUPPET_DIR}/modules/role/files/grafana/"* \
@@ -341,6 +365,16 @@ PUPPET_BIN="/opt/puppetlabs/bin/puppet"
 for NODE_NAME in "${SUCCESSFUL_NODES[@]}"; do
     NODE_IP="${AGENT_NODES[$NODE_NAME]}"
     if ssh ${SSH_OPTS} -o ConnectTimeout=5 root@"$NODE_IP" true 2>/dev/null; then
+        if [[ "$NODE_NAME" == internal-master* || "$NODE_NAME" == main-cms* ]]; then
+            if [[ "$NODE_NAME" == internal-master* ]]; then
+                SECRET_FILE="$EXPORTER_RUNTIME_SECRETS"
+            else
+                SECRET_FILE="$CMS_RUNTIME_SECRETS"
+            fi
+            scp ${SSH_OPTS} "$SECRET_FILE" root@"$NODE_IP":/tmp/runtime-secrets.json
+            ssh ${SSH_OPTS} root@"$NODE_IP" \
+                "install -d -m 0700 /etc/cms-ha && install -o root -g root -m 0600 /tmp/runtime-secrets.json /etc/cms-ha/runtime-secrets.json && rm -f /tmp/runtime-secrets.json"
+        fi
         echo "    → $NODE_NAME ($NODE_IP)"
         ssh ${SSH_OPTS} root@"$NODE_IP" "$PUPPET_BIN agent -t || [ \$? -eq 2 ]" 2>&1 | \
             tail -3 | sed 's/^/        /'
