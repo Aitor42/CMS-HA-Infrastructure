@@ -42,7 +42,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 | Hostname | IP | Network | Role | RAM | Disk | MAC |
 |:---------|:---|:--------|:-----|:----|:-----|:----|
-| ufw-router | eth0: DHCP (WAN) | WAN | Perimeter router / firewall | 512 MB | 5 GB | (auto) |
+| ufw-router | eth0: DHCP (WAN) | WAN | Perimeter router / firewall | 768 MB | 5 GB | (auto) |
 | | eth1: 192.168.10.1 | internal | Internal network gateway | | | (auto) |
 | | eth2: 192.168.20.1 | main | Client network gateway | | | (auto) |
 
@@ -60,25 +60,28 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 |:---------|:---|:--------|:-----|:----|:-----|:----|
 | internal-master1 | 192.168.10.11 | internal | K3s Server (master), DRBD Primary | 1024 MB | 8 GB + 3 GB (DRBD) | 52:54:00:10:01:11 |
 | internal-master2 | 192.168.10.12 | internal | K3s Server (master), DRBD Secondary | 1024 MB | 8 GB + 3 GB (DRBD) | 52:54:00:10:01:12 |
+| internal-master3 | 192.168.10.16 | internal | K3s Server (master), etcd quorum (no DRBD) | 1024 MB | 8 GB | 52:54:00:10:01:16 |
 | internal-worker1 | 192.168.10.13 | internal | K3s Agent (worker) | 768 MB | 8 GB | 52:54:00:10:01:13 |
 | internal-worker2 | 192.168.10.14 | internal | K3s Agent (worker) | 768 MB | 8 GB | 52:54:00:10:01:14 |
 | internal-storage | 192.168.10.15 | internal | Centralised NFS storage server (WordPress uploads) | 1024 MB | 8 GB | 52:54:00:10:01:15 |
-| internal-monitor | 192.168.10.20 | internal | Prometheus + Grafana | 512 MB | 4 GB | 52:54:00:10:01:10 |
+| internal-monitor | 192.168.10.20 | internal | Prometheus + Grafana | 1024 MB | 10 GB | 52:54:00:10:01:10 |
 
 ### Client Network (192.168.20.0/24)
 
 | Hostname | IP | Network | Role | RAM | Disk | MAC |
 |:---------|:---|:--------|:-----|:----|:-----|:----|
-| main-lb | 192.168.20.100 | main | Load balancer (Nginx reverse proxy) | 512 MB | 8 GB | 52:54:00:10:02:64 |
-| main-cms1 | 192.168.20.101 | main | CMS frontend (WordPress + Apache) | 512 MB | 8 GB | 52:54:00:10:02:65 |
-| main-cms2 | 192.168.20.102 | main | CMS frontend (WordPress + Apache) | 512 MB | 8 GB | 52:54:00:10:02:66 |
-| main-hotdesk1 | 192.168.20.201 | main | Hot-desk workstation (dynamic) | 768 MB | 3 GB | 52:54:00:10:02:c9 |
-| main-hotdesk2 | 192.168.20.202 | main | Hot-desk workstation (dynamic) | 768 MB | 3 GB | 52:54:00:10:02:ca |
-| main-hotdesk3 | 192.168.20.203 | main | Hot-desk workstation (dynamic) | 768 MB | 3 GB | 52:54:00:10:02:cb |
+| main-lb1 | 192.168.20.103 | main | Load balancer 1 (Nginx reverse proxy, keepalived MASTER) | 768 MB | 8 GB | 52:54:00:10:02:67 |
+| main-lb2 | 192.168.20.104 | main | Load balancer 2 (Nginx reverse proxy, keepalived BACKUP) | 768 MB | 8 GB | 52:54:00:10:02:68 |
+| *(VIP)* | 192.168.20.100 | main | Floating keepalived address (clients + router DNAT) | — | — | — |
+| main-cms1 | 192.168.20.101 | main | CMS frontend (WordPress + Apache) | 1024 MB | 8 GB | 52:54:00:10:02:65 |
+| main-cms2 | 192.168.20.102 | main | CMS frontend (WordPress + Apache) | 1024 MB | 8 GB | 52:54:00:10:02:66 |
+| main-hotdesk1 | 192.168.20.201 | main | Hot-desk workstation (dynamic) | 768 MB | 10 GB | 52:54:00:10:02:c9 |
+| main-hotdesk2 | 192.168.20.202 | main | Hot-desk workstation (dynamic) | 768 MB | 10 GB | 52:54:00:10:02:ca |
+| main-hotdesk3 | 192.168.20.203 | main | Hot-desk workstation (dynamic) | 768 MB | 10 GB | 52:54:00:10:02:cb |
 | ... | ... | ... | ... | ... | ... | ... |
-| main-hotdesk8 | 192.168.20.208 | main | Hot-desk workstation (dynamic) | 512 MB | 3 GB | 52:54:00:10:02:d0 |
+| main-hotdesk8 | 192.168.20.208 | main | Hot-desk workstation (dynamic) | 768 MB | 10 GB | 52:54:00:10:02:d0 |
 
-**Total:** 1 router + 1 jumpstart + 6 internal nodes + 3 fixed main nodes + N hot-desks (default 1 to 3, dynamically scalable up to 8).
+**Total:** 1 router + 1 jumpstart + 6 internal nodes + 4 fixed main nodes + N hot-desks (default 1 to 3, dynamically scalable up to 8).
 
 ---
 
@@ -135,11 +138,13 @@ The deployment can be executed end-to-end via either engine, preserving identica
 | **01.8**| `cms-ha phase repair-ssh` | `03_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
 | **02** | `cms-ha phase setup-puppet` | `04_setup_puppet.sh` | Parallel Puppet catalog execution (worker pool) | Phase 01, Phase 09 |
 | **03** | `cms-ha phase setup-drbd` | `05_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
+| **03.5** | `cms-ha phase setup-backup` | *(new, no legacy script)* | Off-DRBD Garage S3 backup store on the hypervisor (container) | Phase 03 |
 | **04** | `cms-ha phase setup-kubernetes` | `06_setup_kubernetes.sh` | K3s HA clustering & MariaDB deployment on DRBD storage | Phase 03 |
 | **05** | `cms-ha phase setup-nginx-wordpress` | `07_setup_nginx_wordpress.sh` | Nginx Load Balancer, NFS shared storage & WordPress frontends | Phase 05 |
 | **06** | `cms-ha phase setup-monitoring` | `08_setup_monitoring.sh` | Prometheus monitoring, exporters, Grafana & alerts | Phase 07, Phase 08 |
 | **07** | `cms-ha phase setup-ufw` | `09_setup_ufw.sh` | Perimeter routing (router) & per-node firewall policies | Phase 04, Phase 06 |
 | **08** | `cms-ha phase setup-ca` | `10_setup_internal_ca.sh` | Step-CA PKI deployment, TLS cert issuance and trust sync | Phase 04 |
+| **09** | `cms-ha traffic` | `11_traffic_mix.sh` | HTTP traffic generation & end-to-end load testing | Phase 10 |
 
 ---
 
@@ -167,6 +172,7 @@ graph TB
         subgraph K3S["K3s HA Cluster"]
             M1["🟢 master1<br/>.11 · DRBD Primary"]
             M2["🟢 master2<br/>.12 · DRBD Secondary"]
+            M3["🟢 master3<br/>.16 · etcd quorum"]
             W1["🔵 worker1 · .13"]
             W2["🔵 worker2 · .14"]
         end
@@ -176,10 +182,12 @@ graph TB
     end
 
     subgraph MAIN["🟦 Client Network — 192.168.20.0/24"]
-        LB["⚖ main-lb · .100<br/>Nginx LB"]
+        VIP(("★ VIP · .100<br/>keepalived"))
+        LB1["⚖ main-lb1 · .103<br/>Nginx LB"]
+        LB2["⚖ main-lb2 · .104<br/>Nginx LB"]
         CMS1["🌐 cms1 · .101<br/>WordPress"]
         CMS2["🌐 cms2 · .102<br/>WordPress"]
-        HD["💻 hotdesk1..8<br/>.201-.208"]
+        HD["💻 hotdesk1..3 (up to 8)<br/>.201-.203"]
     end
 
     INET -->|"HTTP/S"| R_ETH0
@@ -189,12 +197,17 @@ graph TB
 
     M1 <-->|"DRBD sync<br/>tcp/7788"| M2
     ST ---|"shared data"| M1
-    LB --> CMS1
-    LB --> CMS2
+    VIP --> LB1
+    VIP --> LB2
+    LB1 --> CMS1
+    LB1 --> CMS2
+    LB2 --> CMS1
+    LB2 --> CMS2
     CMS1 -->|"tcp/3306"| M1
     CMS2 -->|"tcp/3306"| M1
     MON -.->|"scrape :9100"| M1
-    MON -.->|"scrape :9100"| LB
+    MON -.->|"scrape :9100"| LB1
+    MON -.->|"scrape :9100"| LB2
 ```
 
 > For detailed topology, service architecture, and deployment sequence diagrams see [`NETWORK_DIAGRAM.md`](NETWORK_DIAGRAM.md).
@@ -213,20 +226,23 @@ Configurable parameters used throughout the deployment scripts:
 | `MAIN_NET` | `192.168.20.0/24` | Client network CIDR |
 | `GW_INTERNAL` | `192.168.10.1` | Internal network gateway (router eth1) |
 | `GW_MAIN` | `192.168.20.1` | Client network gateway (router eth2) |
-| `DNS_SERVER` | `192.168.10.10` | DNS server (Cobbler/dnsmasq) |
+| `DNS_SERVER` | `192.168.10.10` | DNS server (BIND9 on jumpstart) |
 
 ### Core Nodes
 
 | Variable | Value | Description |
 |:---------|:------|:------------|
 | `JUMPSTART_IP` | `192.168.10.10` | Jumpstart node (Cobbler + Puppet) |
-| `MASTER1_IP` | `192.168.10.11` | First K3s master node |
-| `MASTER2_IP` | `192.168.10.12` | Second K3s master node |
+| `MASTER1_IP` | `192.168.10.11` | First K3s master node (DRBD Primary) |
+| `MASTER2_IP` | `192.168.10.12` | Second K3s master node (DRBD Secondary) |
+| `MASTER3_IP` | `192.168.10.16` | Third K3s server (etcd quorum, no DRBD) |
 | `WORKER1_IP` | `192.168.10.13` | First K3s worker node |
 | `WORKER2_IP` | `192.168.10.14` | Second K3s worker node |
 | `STORAGE_IP` | `192.168.10.15` | Storage node |
 | `MONITOR_IP` | `192.168.10.20` | Monitoring node (Prometheus + Grafana) |
-| `LB_IP` | `192.168.20.100` | Nginx load balancer |
+| `LB1_IP` | `192.168.20.103` | Nginx load balancer 1 (keepalived MASTER) |
+| `LB2_IP` | `192.168.20.104` | Nginx load balancer 2 (keepalived BACKUP) |
+| `LB_VIP` | `192.168.20.100` | Floating keepalived VIP (clients + router DNAT target) |
 | `CMS1_IP` | `192.168.20.101` | CMS frontend 1 |
 | `CMS2_IP` | `192.168.20.102` | CMS frontend 2 |
 | `ROUTER_IP` | `192.168.10.1` | Router internal interface |
@@ -241,7 +257,7 @@ Configurable parameters used throughout the deployment scripts:
 | `NODE_EXPORTER_PORT` | `9100` | node_exporter port on each node |
 | `DRBD_PORT` | `7788` | DRBD synchronisation port |
 | `K3S_API_PORT` | `6443` | Kubernetes API server port |
-| `MARIADB_PORT` | `3306` | MariaDB database port |
+| `MARIADB_PORT` | `30306` | MariaDB NodePort (in-cluster service listens on 3306) |
 
 ### Virtualisation
 

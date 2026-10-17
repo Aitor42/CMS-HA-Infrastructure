@@ -1,7 +1,7 @@
 # Software & Firmware Baseline — CMS High-Availability Infrastructure
 
-> **Reference date:** June 2026  
-> **Revision:** 2.0
+> **Reference date:** October 2026  
+> **Revision:** 2.1
 
 This document records the complete, unified inventory of all operating systems, software components, dependencies, and hardware/virtualisation firmware used in the CMS infrastructure.
 
@@ -33,12 +33,14 @@ In a virtualised environment, device firmware selection is critical for compatib
 
 | Software | Version / Release | Function | Key Dependencies | Source URL | Node(s) |
 |:---------|:------------------|:---------|:-----------------|:-----------|:--------|
-| **cms-ha (Go CLI)** | 1.22+ | Unified infrastructure orchestrator & CLI | Cobra, Viper, age (X25519), slog | [GitHub Repo](https://github.com/Aitor42/CMS-HA-Infrastructure) | Hypervisor Host |
+| **cms-ha (Go CLI)** | Go 1.26 | Unified infrastructure orchestrator & CLI | Cobra, Viper, age (X25519), `golang.org/x/crypto` ≥ 0.56.0, slog | [GitHub Repo](https://github.com/Aitor42/CMS-HA-Infrastructure) | Hypervisor Host |
 | **Cobbler** | 3.3.7 | Zero-touch bare-metal provisioning | Python 3.12, Apache2, pyyaml, django | [Cobbler Project](https://cobbler.github.io/) | `jumpstart` |
 | **Puppet Server** | 8.4.0 | Central configuration management server | OpenJDK 17, Ruby, openssl | [Puppet Server](https://www.puppet.com/) | `jumpstart` |
-| **Puppet Agent** | 8.4.0 | Local configuration enforcement client | OpenSSL, libc6 | [Puppet Agent](https://www.puppet.com/) | All nodes except router |
-| **Nginx** | 1.24.0 | Reverse proxy and load balancer | OpenSSL 3.0.x, zlib, pcre2 | [Nginx News](https://nginx.org/) | `main-lb` |
-| **K3s** | v1.29.3+k3s1 | Lightweight high-availability Kubernetes cluster | Containerd, Flannel CNI, Traefik, SQLite | [K3s Official](https://k3s.io/) | `master1/2`, `worker1/2` |
+| **Puppet Agent** | 8.4.0 | Local configuration enforcement client | OpenSSL, libc6 | [Puppet Agent](https://www.puppet.com/) | All nodes (incl. router) |
+| **Nginx** | 1.24.0 | Reverse proxy and load balancer | OpenSSL 3.0.x, zlib, pcre2 | [Nginx News](https://nginx.org/) | `main-lb1`, `main-lb2` |
+| **keepalived** | 2.2.x | VRRP failover for the shared LB VIP (192.168.20.100) | libc6, iproute2 | [keepalived.org](https://keepalived.org/) | `main-lb1`, `main-lb2` |
+| **K3s** | v1.29.3+k3s1 | Lightweight high-availability Kubernetes cluster | Containerd, Flannel CNI, Traefik, embedded etcd | [K3s Official](https://k3s.io/) | `master1/2/3`, `worker1/2` |
+| **etcd** | 3.5.x (embedded in K3s) | Distributed key-value store providing the control-plane quorum (3 members tolerate 1 failure) | Bundled with K3s (no separate install) | [etcd.io](https://etcd.io/) | `master1/2/3` |
 | **MariaDB** | 10.11.7 (LTS) | CMS relational database (K3s StatefulSet) | DRBD 9 Volume, libc6 | [MariaDB Foundation](https://mariadb.org/) | K3s cluster (replicated) |
 | **WordPress** | 6.5.2 | Content Management System (CMS) | PHP 8.3, Apache2, MySQL/MariaDB | [WordPress.org](https://wordpress.org/) | `main-cms1`, `main-cms2` |
 | **Apache HTTP Server** | 2.4.58 | Web server hosting WordPress | `libapache2-mod-php8.3`, OpenSSL | [Apache HTTP Server](https://httpd.apache.org/) | `main-cms1`, `main-cms2` |
@@ -46,12 +48,20 @@ In a virtualised environment, device firmware selection is critical for compatib
 | **DRBD** | 9.2.8 | Synchronous network block-level replication | Linux kernel module `drbd.ko` | [LINBIT DRBD](https://linbit.com/) | `master1`, `master2` |
 | **drbd-utils** | 9.27.0 | DRBD management tools and CLI | `rpcbind`, `keyutils` | [LINBIT GitHub](https://github.com/LINBIT/) | `master1`, `master2` |
 | **Prometheus** | 2.45.3 | Time-series metrics collection engine | Static Go binaries | [Prometheus](https://prometheus.io/) | `internal-monitor` |
-| **Grafana** | 10.4.1 | Data visualisation and operational dashboards | prometheus-datasource | [Grafana Labs](https://grafana.com/) | `internal-monitor` |
+| **Alertmanager** | 0.23.0 | Alert routing, grouping and deduplication for Prometheus | `prometheus-alertmanager` (APT) | [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/) | `internal-monitor` |
+| **Grafana** | 11.x | Data visualisation and operational dashboards | prometheus-datasource | [Grafana Labs](https://grafana.com/) | `internal-monitor` |
+| **blackbox_exporter** | 0.24.x | End-to-end HTTP/TCP reachability probes (LB and CMS frontends) | None (standalone) | [Prometheus blackbox](https://github.com/prometheus/blackbox_exporter) | `internal-monitor` |
 | **UFW** | 0.36.2 | Perimeter and per-node firewall management | `iptables`, `nftables`, `python3` | [Launchpad UFW](https://launchpad.net/ufw) | `ufw-router`, all nodes |
 | **step-ca** | 0.27.5 | Private Certificate Authority for internal PKI | step CLI, SQLite | [Smallstep CA](https://github.com/smallstep/certificates) | `jumpstart` |
 | **step** | 0.27.5 | Command-line tool for interacting with step-ca | libc6 | [Smallstep CLI](https://github.com/smallstep/cli) | All nodes |
-| **Terraform** | 1.9.x | Declarative VM/network infrastructure provisioning | `libvirt` daemon, KVM support | [HashiCorp Terraform](https://www.terraform.io/) | Hypervisor Host (alternative) |
-| **terraform-provider-libvirt** | 0.8.0 | Libvirt/KVM integration provider for Terraform | `libvirt-dev` library, Go runtime | [dmacvicar/libvirt](https://github.com/dmacvicar/terraform-provider-libvirt) | Hypervisor Host (alternative) |
+| **Ansible** | 2.16.x | Declarative creation of networks, disks and VM domains (infra as code) | Python 3, SSH, libvirt daemon | [Ansible](https://www.ansible.com/) | Hypervisor Host |
+| **community.libvirt** | 1.2.x | Ansible collection for libvirt networks and domains | Ansible core, `libvirt-python` | [community.libvirt](https://github.com/ansible-collections/community.libvirt) | Hypervisor Host |
+| **Garage** | v2.4.1 | S3-compatible object store for off-DRBD backups | Container runtime (Docker/Podman), SQLite | [Garage](https://garagehq.deuxfleurs.fr/) | Hypervisor Host |
+| **rclone** | 1.68.2 | S3 client used by the backup/restore CronJobs | Alpine libc | [rclone](https://rclone.org/) | K3s cluster (Jobs) |
+| **k6** | 0.55.0 | HTTP load/smoke generator for the CMS (`cms-ha traffic`) | Container runtime (Docker/Podman) | [k6](https://k6.io/) | Hypervisor Host |
+| **gosec** | latest | Go static analysis (SAST) in CI (`security-scan`) | Go toolchain | [gosec](https://github.com/securego/gosec) | CI runner |
+| **govulncheck** | latest | Reachable-vulnerability scanner for Go dependencies | Go toolchain, vuln DB | [govulncheck](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) | CI runner |
+| **Trivy** | latest | Filesystem vulnerability/secret/misconfig scanner | vuln DB | [Trivy](https://trivy.dev/) | CI runner |
 
 ---
 
@@ -74,6 +84,7 @@ For the baseline to function consistently, the following system libraries and de
 
 ## 5. Consistency Guarantee Notes
 
-1.  **Container Images**: The MariaDB image in Kubernetes uses the stable tag `mariadb:10.11` from Docker Hub.
+1.  **Container Images**: The MariaDB image in Kubernetes is pinned **by digest** (`mariadb:10.11@sha256:0d0945c5…`) so a re-tagged `10.11` cannot silently change the deployed bits; the off-DRBD backup stack pins `dxflrs/garage:v2.4.1` and `rclone/rclone:1.68.2`, and the load generator pins `grafana/k6:0.55.0` (`traffic.k6_version` in `config.yaml`; a floating `latest` tag is rejected at config validation).
 2.  **System Patches**: All client nodes and the Jumpstart server apply the latest security patches from Ubuntu's `noble-security` repository during unattended installation.
 3.  **Virtualisation Firmware (SeaBIOS)**: Ensures non-UEFI VMs boot deterministically using legacy PXE bootstrap code (`pxelinux.0`) without requiring Secure Boot certificate management.
+4.  **Dependency Security**: `golang.org/x/crypto` is held at **≥ 0.56.0** to clear GO-2026-6354 / GO-2026-6355; `govulncheck` and Trivy enforce this in CI (see `docs/SECURITY.md`).

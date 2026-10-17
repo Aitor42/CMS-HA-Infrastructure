@@ -32,17 +32,23 @@ graph TB
             direction LR
             M1["🟢 internal-master1<br/>192.168.10.11<br/>K3s Server · DRBD Primary"]
             M2["🟢 internal-master2<br/>192.168.10.12<br/>K3s Server · DRBD Secondary"]
+            M3["🟢 internal-master3<br/>192.168.10.16<br/>K3s Server · etcd quorum"]
             W1["🔵 internal-worker1<br/>192.168.10.13<br/>K3s Agent"]
             W2["🔵 internal-worker2<br/>192.168.10.14<br/>K3s Agent"]
         end
 
         ST["💾 internal-storage<br/>192.168.10.15<br/>Centralised Storage"]
-        MON["📊 internal-monitor<br/>192.168.10.20<br/>Prometheus · Grafana · Alertmanager"]
+        MON["📊 internal-monitor<br/>192.168.10.20<br/>Prometheus · Grafana · alert rules"]
     end
 
     subgraph MAIN["🟦 Client Network — 192.168.20.0/24"]
         direction TB
-        LB["⚖ main-lb<br/>192.168.20.100<br/>Nginx Reverse Proxy"]
+        VIP(("★ VIP · 192.168.20.100<br/>keepalived"))
+
+        subgraph LB_POOL["Load Balancers (VRRP)"]
+            LB1["⚖ main-lb1<br/>192.168.20.103<br/>Nginx Reverse Proxy"]
+            LB2["⚖ main-lb2<br/>192.168.20.104<br/>Nginx Reverse Proxy"]
+        end
 
         subgraph CMS_POOL["CMS Frontends"]
             CMS1["🌐 main-cms1<br/>192.168.20.101<br/>WordPress + Apache"]
@@ -52,7 +58,7 @@ graph TB
         subgraph HOTDESKS["Hot-desk Workstations"]
             HD1["💻 main-hotdesk1<br/>192.168.20.201"]
             HD2["💻 main-hotdesk2<br/>192.168.20.202"]
-            HD38["💻 main-hotdesk3..8<br/>192.168.20.203-208"]
+            HD38["💻 main-hotdesk3 (up to 8)<br/>192.168.20.203"]
         end
     end
 
@@ -76,8 +82,12 @@ graph TB
     ST ---|"shared data"| M2
 
     %% --- Load balancing ---
-    LB -->|"proxy_pass :80"| CMS1
-    LB -->|"proxy_pass :80"| CMS2
+    VIP ---|"VRRP"| LB1
+    VIP ---|"VRRP"| LB2
+    LB1 -->|"proxy_pass :80"| CMS1
+    LB1 -->|"proxy_pass :80"| CMS2
+    LB2 -->|"proxy_pass :80"| CMS1
+    LB2 -->|"proxy_pass :80"| CMS2
 
     %% --- CMS to DB ---
     CMS1 -->|"tcp/3306"| M1
@@ -90,7 +100,8 @@ graph TB
     MON -.->|"scrape :9100"| W1
     MON -.->|"scrape :9100"| W2
     MON -.->|"scrape :9100"| ST
-    MON -.->|"scrape :9100/:9113/:9117"| LB
+    MON -.->|"scrape :9100/:9113/:9117"| LB1
+    MON -.->|"scrape :9100/:9113/:9117"| LB2
     MON -.->|"scrape :9100/:9117"| CMS1
     MON -.->|"scrape :9100/:9117"| CMS2
     MON -.->|"scrape :9100"| ETH1
@@ -108,7 +119,7 @@ graph TB
 | `🟢` | K3s master node (DRBD) |
 | `🔵` | K3s worker node |
 | `💾` | Storage node |
-| `📊` | Monitoring node (Prometheus · Grafana · Alertmanager) |
+| `📊` | Monitoring node (Prometheus · Grafana · alert rules) |
 | `🌐` | CMS frontend (WordPress + Apache) |
 | `💻` | Hot-desk workstation |
 | `:9100` | node_exporter |
@@ -132,7 +143,9 @@ graph LR
     end
 
     subgraph LB_LAYER["⚖ Load Balancing"]
-        NGINX["Nginx<br/>192.168.20.100<br/>Round-Robin upstream"]
+        VIP2(("★ VIP<br/>192.168.20.100<br/>keepalived"))
+        NGINX1["Nginx<br/>192.168.20.103<br/>main-lb1"]
+        NGINX2["Nginx<br/>192.168.20.104<br/>main-lb2"]
     end
 
     subgraph WEB_LAYER["🌐 Web Layer"]
@@ -141,7 +154,7 @@ graph LR
     end
 
     subgraph DB_LAYER["🗄 Data Layer — K3s Cluster"]
-        MARIA["MariaDB 10.11<br/>K3s StatefulSet<br/>PV: /mnt/drbd"]
+        MARIA["MariaDB 10.11<br/>K3s StatefulSet<br/>PV: /mnt/data/mariadb"]
         DRBD["DRBD 9<br/>Protocol C — Synchronous<br/>tcp/7788"]
     end
 
@@ -157,14 +170,18 @@ graph LR
 
     subgraph PROVISION["🖥 Provisioning & PKI"]
         COBBLER["Cobbler + Puppet<br/>192.168.10.10"]
-        STEPCA["step-ca<br/>Internal PKI<br/>:443 ACME"]
+        STEPCA["step-ca<br/>Internal PKI<br/>:8443"]
     end
 
     %% --- Request path ---
     USER -->|"HTTP/S"| ROUTER
-    ROUTER -->|"DNAT"| NGINX
-    NGINX -->|"upstream :80"| APACHE1
-    NGINX -->|"upstream :80"| APACHE2
+    ROUTER -->|"DNAT"| VIP2
+    VIP2 --> NGINX1
+    VIP2 --> NGINX2
+    NGINX1 -->|"upstream :80"| APACHE1
+    NGINX1 -->|"upstream :80"| APACHE2
+    NGINX2 -->|"upstream :80"| APACHE1
+    NGINX2 -->|"upstream :80"| APACHE2
     APACHE1 -->|"tcp/3306"| MARIA
     APACHE2 -->|"tcp/3306"| MARIA
     MARIA ---|"block device"| DRBD
@@ -173,35 +190,36 @@ graph LR
     STORE ---|"shared data"| MARIA
 
     %% --- Monitoring ---
-    PROM -.->|"scrape :9113"| NGINX
+    PROM -.->|"scrape :9113"| NGINX1
+    PROM -.->|"scrape :9113"| NGINX2
     PROM -.->|"scrape :9117"| APACHE1
     PROM -.->|"scrape :9117"| APACHE2
     PROM -.->|"scrape :9104"| MARIA
-    PROM -->|"alerting rules"| ALERT
+    PROM -->|"fires alerts"| ALERT
     GRAF -.->|"datasource"| PROM
 
     %% --- Provisioning ---
-    COBBLER -.->|"PXE + Puppet"| NGINX
+    COBBLER -.->|"PXE + Puppet"| NGINX1
+    COBBLER -.->|"PXE + Puppet"| NGINX2
     COBBLER -.->|"PXE + Puppet"| APACHE1
     COBBLER -.->|"PXE + Puppet"| APACHE2
-    STEPCA -.->|"TLS certs"| NGINX
-    STEPCA -.->|"TLS certs"| APACHE1
-    STEPCA -.->|"TLS certs"| APACHE2
+    STEPCA -.->|"issues/renews TLS cert"| NGINX1
+    STEPCA -.->|"issues/renews TLS cert"| NGINX2
 ```
 
 ### HTTP Traffic Flow
 
 1. The **client** sends an HTTP/S request to the router's public IP.
-2. The **router (UFW)** applies DNAT to redirect traffic on ports 80/443 to the load balancer `main-lb` (192.168.20.100).
+2. The **router (UFW)** applies DNAT to redirect traffic on ports 80/443 to the keepalived **VIP** `192.168.20.100`, which is held by one of the two Nginx balancers (`main-lb1`/`main-lb2`).
 3. **Nginx** distributes the request between `main-cms1` and `main-cms2` using round-robin.
 4. The **Apache + WordPress** frontend processes the PHP request and queries **MariaDB** in the K3s cluster.
 5. **DRBD** maintains synchronous replication of MariaDB data between `internal-master1` and `internal-master2`.
 
 ### Monitoring Flow
 
-- **Prometheus** (192.168.10.20:9090) performs periodic scraping (every 15s) of all exporters.
-- **Grafana** (192.168.10.20:3000) consumes Prometheus as a datasource and renders operational dashboards.
-- **Alertmanager** (192.168.10.20:9093) routes alerts based on severity to configured webhook receivers.
+- **Prometheus** (192.168.10.20:9090) performs periodic scraping (every 15s) of all exporters and evaluates 19 alert rules (availability, service, backup/restore and HA — DRBD, etcd quorum, keepalived VIP).
+- **Grafana** (192.168.10.20:3000) consumes Prometheus as a datasource and renders operational dashboards (node overview and HA overview).
+- **Alertmanager** (192.168.10.20:9093) receives firing alerts from Prometheus and groups/deduplicates them for its UI and `amtool`; it ships with a no-op receiver, so add a webhook/email/Slack receiver to enable delivery.
 
 ---
 
@@ -234,7 +252,7 @@ graph TD
     end
 
     subgraph OBSERVE["📊 Observability"]
-        STEP06["Step 06 · Prometheus + Grafana + Alertmanager<br/>08_setup_monitoring.sh"]
+        STEP06["Step 06 · Prometheus + Grafana + alert rules<br/>08_setup_monitoring.sh"]
     end
 
     subgraph SECURITY["🔒 Security"]

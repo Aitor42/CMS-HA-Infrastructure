@@ -1,9 +1,11 @@
 # Operations Manual — CMS High-Availability Infrastructure
 
-> **Version:** 2.0  
-> **Date:** June 2026
+> **Version:** 2.1  
+> **Date:** October 2026
 
 This manual describes the procedures to deploy, administer, and maintain the WordPress CMS high-availability infrastructure. The solution is optimised to run on a KVM hypervisor host under physical memory constraints (~27 GB RAM).
+
+> **What's new in 2.1** — Hardened CLI error handling (errors to stderr, exit code 1), strict configuration validation on load, dry-run restricted to `cms-ha deploy`, per-command remote exit-code verification in every provisioning phase (DRBD, Cobbler, PKI, Kubernetes fail the deployment on real errors instead of reporting success with broken state), K3s join token distributed as a protected file, Prometheus bound to a least-privilege ClusterRole with a rotatable 1-year token, and an idempotent SSH/SFTP layer (atomic remote writes, bounded reads/waits).
 
 ---
 
@@ -40,11 +42,56 @@ sudo usermod -aG libvirt $USER
 newgrp libvirt
 ```
 
+### 1.3 CLI Behaviour and Configuration Validation (v2.1)
+
+*   **Error handling**: command errors are printed once to **stderr** and the process exits with code `1`. Nothing is retried silently; failures surface where they occur.
+*   **`--dry-run` is only implemented by `cms-ha deploy`.** Passing it to any other command is rejected up front, so no other operation runs with real effects while pretending to simulate.
+*   **Configuration validation** runs on every `cms-ha` invocation before any network or VM operation. The load aborts with a precise message (naming the offending node) when:
+    - `network.internal.cidr` / `network.main.cidr` are not valid CIDRs;
+    - any node IP is not a valid IPv4 address, FQDN contains characters outside letters/digits/dots/hyphens, or a MAC address is malformed — these fields are interpolated into SSH commands, Cobbler registrations and `awk` filters;
+    - the hotdesk IP range would overflow (base octet + count must stay ≤ 254, e.g. 40 hotdesks from octet 250 is rejected before generating `192.168.20.256`);
+    - `vm.storage_dir` is missing, fewer than 3 master nodes (or an even number) are configured (etcd quorum), the LB IP is unset, or there is no CMS frontend.
+*   **`NUM_HOTDESKS`** overrides the hotdesk count dynamically; an invalid value is ignored with a `WARN` instead of silently altering the topology.
+*   **Quality gate**: `./cms-ha lint` runs the Go linters (`go vet`, `staticcheck`) plus ShellCheck/yamllint/puppet-lint/kubeconform/ansible-lint for the subsets that are installed and whose directories exist; if nothing could run, it warns instead of reporting a false green.
+*   **Security gate**: `make security` runs **gosec** (Go SAST), **govulncheck** (reachable dependency CVEs) and **Trivy** (filesystem vulns/secrets/misconfig). CI fails on any HIGH/CRITICAL finding in code, dependencies or secrets; Kubernetes misconfig is reported but not blocking (see the *Security Hardening* subsection above and `docs/SECURITY.md`).
+
+### 1.4 Security Hardening (Non-Root Access, Host Keys, Scanning)
+
+*   **Non-root deploy account.** `cms-ha` never logs in as `root`. Every VM connection uses `ssh.user` (default `ubuntu`, provisioned by the installers with an authorised key) and privileged commands are elevated transparently with `sudo -n -H`. Direct root SSH is disabled on every provisioned node (`PermitRootLogin no`).
+*   **Host-key pinning (TOFU).** VM host keys are pinned on first contact and stored in `ssh.known_hosts_file` (default `~/.ssh/cms_known_hosts`). A later mismatch **fails closed** instead of silently trusting a changed key (MITM protection).
+*   **Secrets at rest.** Service passwords and `backup.secret_key` are age-encrypted on first load; the identity and recipient live outside the repository (`${HOME}/.config/cms-ha`).
+*   See `docs/SECURITY.md` for the full model, the accepted risks, and the CI scanner configuration.
+
 ---
 
 ## 2. Deployment Procedure (Batch Mode)
 
-Due to the **27 GB RAM limit**, launching all 14 VMs simultaneously with the Ubuntu 24.04 installer's minimum requirements (3-4 GB per node) would cause the host to run out of memory (OOM). Therefore, the initial deployment is performed **interactively in batches**.
+Due to the **27 GB RAM limit**, launching all 16 VMs simultaneously with the Ubuntu 24.04 installer's minimum requirements (3-4 GB per node) would cause the host to run out of memory (OOM). Therefore, the initial deployment is performed **interactively in batches**.
+
+### Before the First Deployment: Set Service Passwords
+
+Edit `config.yaml` and enter the desired service passwords in plain text:
+
+```yaml
+database:
+  password: "<contraseña-para-wp_user>"
+  root_password: "<contraseña-de-root>"
+  exporter_password: "<contraseña-del-exporter>"
+
+wordpress:
+  admin_password: "<contraseña-del-administrador>"
+
+pki:
+  provisioner_password: "<contraseña-de-la-CA>"
+```
+
+No separate encryption command is needed. The first `cms-ha` operation that loads the config automatically creates a local `age` key outside the repository, encrypts non-empty secret fields in `config.yaml` in place, and then loads the decrypted values for deployment. Keep the local key at `~/.config/cms-ha/age.key` safe and backed up; without it, the encrypted configuration cannot be used. A legacy project-local `private.key` is migrated to this directory (or retained there as `legacy.age.key` if another key is already in use). Do not commit `config.yaml` until the first `cms-ha` operation that loads it has completed.
+
+K3s is installed with Kubernetes Secret encryption at rest enabled. This protects Secrets stored in etcd for newly initialized clusters; an already running cluster that the setup script skips is not retroactively migrated by this option. Follow the K3s secrets-encryption migration procedure before relying on it for an existing cluster.
+
+For the legacy Bash workflow, provide `DB_PASS`, `DB_ROOT_PASS`, `DB_EXPORTER_PASS`, and `WP_ADMIN_PASS` as environment variables (and `CA_PROVISIONER_PASSWORD` when running `scripts/10_setup_internal_ca.sh`). That workflow does not automatically encrypt `config.yaml`, and no credential is stored in any script.
+
+Changing `database.password` or `database.exporter_password` later requires rerunning the database initialization Job and Puppet setup so MariaDB and the clients receive the same credentials. `database.root_password` initializes the MariaDB data directory; changing it in the config does not rotate the root account in an existing persistent volume. Rotate that account in MariaDB first, then update the config, or the initialization Job will no longer be able to authenticate. `wordpress.admin_password` is used only during the first WordPress installation; changing it later does not change the existing administrator account. Keep `pki.provisioner_password` stable after CA initialization because it unlocks the existing CA key.
 
 ### Step 1: Provision the Jumpstart Node and Configure Cobbler
 On the hypervisor terminal, run the Go CLI (or legacy scripts) to create virtual networks and install the central provisioning node (`jumpstart`):
@@ -73,16 +120,15 @@ Run the command that automates the creation and installation of client nodes in 
 ```
 **Key Operational Decisions During Batch Provisioning:**
 *   **Installation RAM Allocation:** VMs are spawned with 3–4 GB RAM so the Subiquity installer does not trigger Linux kernel OOM killer events.
-*   **Production Disk Sizing:** The web frontends (`main-cms1`, `main-cms2`) and load balancer (`main-lb`) are provisioned with **8 GB virtual disks** (upgraded from earlier 4 GB baseline) to provide ample room for Apache, PHP 8.3 modules, WordPress core files, Nginx logs, and OS kernel updates without risk of root partition exhaustion.
-*   **Automated Memory Shrinking:** Once a batch finishes OS installation, its memory is adjusted down to production footprint (512 MB – 1024 MB):
+*   **Production Disk Sizing:** The web frontends (`main-cms1`, `main-cms2`) and load balancers (`main-lb1`, `main-lb2`) are provisioned with **8 GB virtual disks** (upgraded from earlier 4 GB baseline) to provide ample room for Apache, PHP 8.3 modules, WordPress core files, Nginx logs, and OS kernel updates without risk of root partition exhaustion.
+*   **Automated Memory Shrinking:** Once a batch finishes OS installation, its memory is adjusted down to production footprint (768 MB – 2048 MB):
     ```bash
     ./cms-ha vm shrink
-    # (Legacy v1: bash scripts/utils/shrink_vms_ram.sh)
+    # (Legacy v1: bash scripts/utils/shrink_vm_ram.sh)
     ```
 *   **Boot Order Hardening:** To ensure rebooted VMs boot directly from disk instead of re-entering PXE bootstrap loops:
     ```bash
     ./cms-ha vm fix-boot-order
-    # (Legacy v1: bash scripts/utils/fix_boot_order.sh)
     ```
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
@@ -92,12 +138,25 @@ The following screenshot shows the automated PXE network installation process vi
 ### Step 3: Service and Application Deployment
 Once all VMs are running and adjusted to production profiles, run the deployment orchestrator:
 ```bash
-# Go CLI:
+# Go CLI (VMs already installed; skips VM creation):
 ./cms-ha deploy --skip-vm-create
 
+# Full run (creates the networks and VMs first):
+./cms-ha deploy
+
+# The orchestrator writes a checkpoint (deploy.state) after every phase, so a
+# failed run can resume instead of starting over:
+./cms-ha deploy --resume                    # skip phases already completed
+./cms-ha deploy --from-phase drbd-setup     # start at a named phase
+./cms-ha deploy --state-file /var/tmp/deploy.state
+
 # (Or Makefile: make deploy-resume)
-# (Legacy v1: ./deploy_all.sh --skip-vm-create)
+# (Deprecated v1: ./deploy_all.sh --skip-vm-create)
 ```
+
+Phase names for `--from-phase` are the normalised phase names (e.g.
+`00-init-vms`, `drbd-setup`, `kubernetes-setup`, `setup-monitoring`); an
+unknown value is rejected with the list of valid phases.
 
 **Orchestration Logic & Concurrency Design:**
 1. **Jumpstart Prerequisite Enforcement:** Automatically applies `role::jumpstart` first to ensure Puppet Server (8140), DNS (53), Cobbler (25151), DHCP (67), and TFTP (69) are active and accepting connections before clients run.
@@ -108,6 +167,8 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 6. **Perimeter Firewall & Routing:** Router detects dynamic WAN interface by MAC (`enp3s0`), clears stale tables, and injects clean `*nat` forwarding rules before `*filter` in `/etc/ufw/before.rules`.
 7. **Cluster Observability & PKI:** Exporters, Prometheus, Grafana, and Smallstep CA certificates converge in parallel across all cluster nodes.
 
+**Strict failure semantics (v2.1):** Every phase verifies the exit code of each remote command (previously several steps tolerated `|| true`). A real provisioning failure — e.g. `apt-get install drbd-utils` failing, DRBD metadata creation or Primary promotion failing, a replica that is not `Connected/UpToDate`, or the MariaDB initialization Job not completing — **aborts the deployment** with the failing step and diagnostics on stderr. This can make previously "successful" runs fail when the underlying DRBD/Kubernetes state was actually broken; the phases remain idempotent, so a healthy environment still passes cleanly (steps like `drbdadm create-md --force` accept "already present" output).
+
 ---
 
 ## 3. Deployment Verification
@@ -115,12 +176,12 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 ### 3.1 VM Status on the Hypervisor
 ```bash
 virsh -c qemu:///system list --all
-# You should see 14 active VMs (jumpstart, ufw-router, monitor, storage, masters, workers, lb, cms, hotdesks)
+# You should see 16 active VMs (jumpstart, ufw-router, monitor, storage, masters, workers, lb1, lb2, cms, hotdesks)
 ```
 
 ### 3.2 Network Connectivity and Isolation (DTE-to-DTE Tests)
 1.  **Internal Connectivity**: `ping` from `internal-master1` (`192.168.10.11`) to `jumpstart` (`192.168.10.10`) → **Allowed** (0% loss).
-2.  **Allowed Inter-VLAN Connectivity**: `ping` from `internal-master1` (`192.168.10.11`) to `main-lb` (`192.168.20.100`) → **Allowed** (routed).
+2.  **Allowed Inter-VLAN Connectivity**: `ping` from `internal-master1` (`192.168.10.11`) to the LB VIP (`192.168.20.100`) → **Allowed** (routed).
 3.  **Security Isolation (Main → Internal)**: `ping` from a hotdesk (`192.168.20.201`) to `internal-master1` (`192.168.10.11`) → **Denied/Blocked** by UFW on the router (100% loss).
 4.  **Internet Access**: `ping -c 3 8.8.8.8` from any node → **Allowed** (NAT masqueraded by the router).
 
@@ -136,7 +197,7 @@ The health check validates all infrastructure phases. The Go CLI executes these 
 
 ```bash
 # Go CLI (parallel execution across all phases):
-./cms-ha verify all
+./cms-ha verify
 
 # (Or Makefile: make verify)
 # (Legacy v1: bash scripts/utils/verify_all.sh)
@@ -145,8 +206,8 @@ The health check validates all infrastructure phases. The Go CLI executes these 
 **Go CLI Concurrent Verification Output:**
 ```text
 ℹ Starting phase: Infrastructure Verification
-✓ Phase 00 - Libvirt VMs & Networks: [PASS] (12 running VMs)
-✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 11)
+✓ Phase 00 - Libvirt VMs & Networks: [PASS] (15 running VMs)
+✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 13)
 ✓ Phase 02 - Puppet Server & Certs: [PASS] (Certs: 13)
 ✓ Phase 03 - Nginx & Apache & SSL: [PASS]
 ✓ Phase 04 - K3s & MariaDB Pod: [PASS]
@@ -171,17 +232,25 @@ ufw-router           192.168.10.1    running    OK
 jumpstart            192.168.10.10   running    OK        
 internal-master1     192.168.10.11   running    OK        
 internal-master2     192.168.10.12   running    OK        
+internal-master3     192.168.10.16   running    OK        
 internal-worker1     192.168.10.13   running    OK        
 internal-worker2     192.168.10.14   running    OK        
 internal-storage     192.168.10.15   running    OK        
 internal-monitor     192.168.10.20   running    OK        
-main-lb              192.168.20.100  running    OK        
+main-lb1             192.168.20.103  running    OK        
+main-lb2             192.168.20.104  running    OK        
 main-cms1            192.168.20.101  running    OK        
 main-cms2            192.168.20.102  running    OK        
 main-hotdesk1        192.168.20.201  running    OK        
+main-hotdesk2        192.168.20.202  running    OK        
+main-hotdesk3        192.168.20.203  running    OK        
 ```
 
 ### 3.6 Legacy Verification Output (`verify_all.sh`)
+
+> **Deprecated (v1).** The `scripts/` tree is reference-only and unmaintained;
+> see [`scripts/README.md`](../scripts/README.md). Use `./cms-ha verify` (or
+> `make verify`) instead.
 
 For environments running the legacy Bash toolchain:
 
@@ -197,12 +266,16 @@ For environments running the legacy Bash toolchain:
 [OK] VM internal-storage is: running
 [OK] VM internal-master1 is: running
 [OK] VM internal-master2 is: running
+[OK] VM internal-master3 is: running
 [OK] VM internal-worker1 is: running
 [OK] VM internal-worker2 is: running
-[OK] VM main-lb is: running
+[OK] VM main-lb1 is: running
+[OK] VM main-lb2 is: running
 [OK] VM main-cms1 is: running
 [OK] VM main-cms2 is: running
 [OK] VM main-hotdesk1 is: running
+[OK] VM main-hotdesk2 is: running
+[OK] VM main-hotdesk3 is: running
 [OK] Virtual network 'internal' is active
 [OK] Virtual network 'main' is active
 
@@ -213,24 +286,29 @@ For environments running the legacy Bash toolchain:
 [OK] Service isc-dhcp-server on jumpstart is active
 [OK] Service bind9 on jumpstart is active
 [OK] Service tftpd-hpa on jumpstart is active
-[OK] Cobbler has 13 registered systems (correct)
+[OK] Cobbler has 14 registered systems (correct)
 
 [INFO] === Phase 02: Puppet Server and Agents ===
 [OK] Puppet Server is active on jumpstart
-[OK] Puppet has 11 signed certificates (correct)
+[OK] Puppet has 14 signed certificates (correct)
 [OK] Puppet Agent active on internal-monitor (192.168.10.20)
 [OK] Puppet Agent active on internal-master1 (192.168.10.11)
 [OK] Puppet Agent active on internal-master2 (192.168.10.12)
+[OK] Puppet Agent active on internal-master3 (192.168.10.16)
 [OK] Puppet Agent active on internal-worker1 (192.168.10.13)
 [OK] Puppet Agent active on internal-worker2 (192.168.10.14)
 [OK] Puppet Agent active on internal-storage (192.168.10.15)
-[OK] Puppet Agent active on main-lb (192.168.20.100)
+[OK] Puppet Agent active on main-lb1 (192.168.20.103)
+[OK] Puppet Agent active on main-lb2 (192.168.20.104)
 [OK] Puppet Agent active on main-cms1 (192.168.20.101)
 [OK] Puppet Agent active on main-cms2 (192.168.20.102)
 
 [INFO] === Phase 03: Nginx Load Balancer and WordPress Servers ===
-[OK] Nginx Load Balancer active on main-lb (192.168.20.100)
-[OK] SSL certificate exists on main-lb
+[OK] Nginx Load Balancer active on main-lb1 (192.168.20.103)
+[OK] Nginx Load Balancer active on main-lb2 (192.168.20.104)
+[OK] keepalived VIP 192.168.20.100 is owned by main-lb1
+[OK] SSL certificate exists on main-lb1
+[OK] SSL certificate exists on main-lb2
 [OK] Apache2 CMS active on 192.168.20.101
 [OK] WordPress installed on 192.168.20.101
 [OK] NFS uploads volume mounted on 192.168.20.101
@@ -241,10 +319,11 @@ For environments running the legacy Bash toolchain:
 [INFO] === Phase 04: K3s HA Cluster ===
 [OK] kubectl operational on internal-master1
 NAME               STATUS   ROLES                         AGE   VERSION
-internal-master1   Ready    control-plane,master          22h   v1.27.4+k3s1
-internal-master2   Ready    control-plane,master          22h   v1.27.4+k3s1
-internal-worker1   Ready    <none>                        22h   v1.27.4+k3s1
-internal-worker2   Ready    <none>                        22h   v1.27.4+k3s1
+internal-master1   Ready    control-plane,master          22h   v1.29.3+k3s1
+internal-master2   Ready    control-plane,master          22h   v1.29.3+k3s1
+internal-master3   Ready    control-plane,master          22h   v1.29.3+k3s1
+internal-worker1   Ready    <none>                        22h   v1.29.3+k3s1
+internal-worker2   Ready    <none>                        22h   v1.29.3+k3s1
 [OK] MariaDB pod in namespace cms is Running
 
 [INFO] === Phase 05: Prometheus and Grafana ===
@@ -253,6 +332,7 @@ internal-worker2   Ready    <none>                        22h   v1.27.4+k3s1
 [OK] node_exporter active on internal-monitor (192.168.10.20)
 [OK] node_exporter active on internal-master1 (192.168.10.11)
 [OK] node_exporter active on internal-master2 (192.168.10.12)
+[OK] node_exporter active on internal-master3 (192.168.10.16)
 [OK] node_exporter active on internal-worker1 (192.168.10.13)
 [OK] node_exporter active on internal-worker2 (192.168.10.14)
 [OK] node_exporter active on internal-storage (192.168.10.15)
@@ -279,18 +359,129 @@ Disk State: UpToDate/UpToDate
   ✔ All checks passed
 ```
 
+### 3.7 End-to-End Integration Test
+
+`tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
+a real KVM host — **build → `deploy` → `verify` → `test failover`** — and is the
+entry point of the `Integration (KVM lab)` workflow, which runs on a self-hosted
+runner labelled `kvm` (nightly and on demand):
+
+```bash
+make integration                 # full deploy + verify + DRBD failover
+make integration-resume          # resume from the deploy.state checkpoint
+tests/integration/run.sh --skip-deploy --skip-chaos   # verify only
+```
+
+It requires `/dev/kvm`, a working libvirt connection, and a container runtime
+(docker/podman) for the pinned tooling images. The checkpoint and the
+`verify`/`failover` logs are uploaded as CI artifacts.
+
 ---
 
 ## 4. Monitoring and Metrics
 
 The `internal-monitor` node centralises metrics collection and visualisation:
-*   **Prometheus**: `http://192.168.10.20:9090` (verify target status at `/targets`).
-*   **Grafana**: `http://192.168.10.20:3000` (User: `admin` / Password: `admin`).
-*   **Alertmanager**: `http://192.168.10.20:9093` (alert routing and notification).
+*   **Prometheus**: `http://192.168.10.20:9090` (target status at `/targets`, firing alerts at `/alerts`).
+*   **Grafana**: `http://192.168.10.20:3000` (User: `admin` / Password: `admin`). Two dashboards are provisioned: **Node Exporter Overview** and **HA Overview** (DRBD replication/role, etcd quorum, keepalived VIP ownership, blackbox probes and k6 load metrics).
+*   **Alertmanager**: `http://192.168.10.20:9093`. Receives firing alerts from Prometheus, groups and deduplicates them, and exposes them through its UI and `amtool`. It ships with a no-op receiver, so alerts are visible but not delivered out of the box: add a webhook/email/Slack receiver in `/etc/prometheus/alertmanager.yml` (managed by Puppet, `role::monitor`) and let Puppet re-apply.
+
+**Where the monitoring configuration lives.** The scrape configuration, the Alertmanager and blackbox modules, and the Grafana provisioning/dashboards are managed by **Puppet** (`role::monitor`; files under `puppet/modules/role/files/`). The alert rules are deployed by the monitoring phase to `/etc/prometheus/alert-rules.yml`, which Puppet's `prometheus.yml` loads via `rule_files`.
+
+**Alert rules (19).** Availability (nodes, MariaDB/Nginx/Apache exporters, HTTP 5xx), resource pressure (disk/memory), backup/restore health, and the high-availability set: `EtcdNoQuorum` (fewer than two of the three etcd members reachable), `DRBDPeerDown`, `DRBDSplitBrain`, `DRBDNoPrimary` and `KeepalivedState` (the VIP must be held by exactly one balancer). DRBD and keepalived metrics are published through node_exporter's textfile collector, so no extra exporter is required.
+
+**Load testing.** `./cms-ha traffic` runs a k6 profile in a pinned `grafana/k6` container against the VIP or an internal frontend and reports RPS, p95/p99 and error rate. With `traffic.prometheus_rw_url` set in `config.yaml`, those metrics are streamed into Prometheus so they appear on the HA Overview dashboard during the test.
 
 ### Critical Monitored Metrics
 *   **Infrastructure**: CPU usage (`node_cpu_seconds_total`), available memory (`node_memory_MemAvailable_bytes`), disk usage (`node_filesystem_avail_bytes`), and network traffic (`node_network_receive_bytes_total`).
 *   **Services**: Nginx active connections (`nginx_connections_active`), Apache workers (`apache_workers`), MariaDB queries (`mysql_global_status_queries`), and K3s pod replicas.
+
+### Alertmanager Notifications
+
+Prometheus forwards every firing alert to Alertmanager, which groups and
+deduplicates them, but the shipped configuration uses a **no-op receiver**: by
+default nothing leaves the node. To be notified (webhook, email, Slack, …) you
+add a receiver to the Alertmanager configuration.
+
+**The file is managed by Puppet.** The source of truth lives in the repository;
+editing `/etc/prometheus/alertmanager.yml` directly on `internal-monitor` gets
+overwritten on the next Puppet run:
+
+```bash
+# 1. Edit the source of truth (repository root)
+$EDITOR puppet/modules/role/files/prometheus/alertmanager.yml
+
+# 2. Re-converge internal-monitor (Puppet server is jumpstart)
+ssh internal-monitor 'sudo puppet agent -t'
+
+# 3. Validate and reload on internal-monitor
+ssh internal-monitor
+amtool check-config /etc/prometheus/alertmanager.yml
+sudo systemctl reload prometheus-alertmanager
+```
+
+Replace the `default` receiver with one of the following. Keep the name
+`default`, or point the existing `route` at your own receiver.
+
+**Webhook** — any HTTP endpoint that accepts the Alertmanager JSON payload:
+
+```yaml
+receivers:
+  - name: 'default'
+    webhook_configs:
+      - url: 'https://hooks.example.com/alertmanager'
+        send_resolved: true
+```
+
+**Email** — requires a reachable SMTP relay:
+
+```yaml
+receivers:
+  - name: 'default'
+    email_configs:
+      - to: 'ops@example.com'
+        from: 'alertmanager@internal.local'
+        smarthost: 'smtp.example.com:587'
+        auth_username: 'alertmanager@example.com'
+        auth_password: 'CHANGE_ME'
+        require_tls: true
+```
+
+**Slack** — via an incoming-webhook URL:
+
+```yaml
+receivers:
+  - name: 'default'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/XXX/YYY/ZZZ'
+        channel: '#alerts'
+        send_resolved: true
+```
+
+**Send a test alert** and confirm it reaches the receiver (it also shows up at
+`http://192.168.10.20:9093`):
+
+```bash
+ssh internal-monitor
+amtool alert add alertname=TestAlert severity=warning
+amtool alert query
+```
+
+To throttle or split notifications, extend `route` with child routes. The
+`matchers` syntax requires Alertmanager ≥ 0.22, which Ubuntu 22.04 ships:
+
+```yaml
+route:
+  receiver: 'default'
+  routes:
+    - matchers: [ severity = "warning" ]
+      receiver: 'default'
+      repeat_interval: 12h
+```
+
+> **Secrets.** `alertmanager.yml` is committed to the repository, so do not
+> hard-code real tokens or passwords: treat webhook/Slack URLs and SMTP
+> credentials as secrets, keep them out of the repo, and rotate them if they
+> leak.
 
 ---
 
@@ -315,7 +506,7 @@ The `internal-monitor` node centralises metrics collection and visualisation:
       --connect qemu:///system \
       --name=main-hotdesk4 \
       --ram=768 --vcpus=1 \
-      --disk path=/home/$USER/vm_storage/main-hotdesk4.qcow2,size=3,format=qcow2,bus=virtio \
+      --disk path=/home/$USER/vm_storage/main-hotdesk4.qcow2,size=10,format=qcow2,bus=virtio \
       --network network=main,mac="52:54:00:10:02:cc",model=virtio \
       --pxe \
       --boot network,hd \
@@ -330,15 +521,46 @@ The `internal-monitor` node centralises metrics collection and visualisation:
 
 ### 6.1 Database Backups (MariaDB)
 
-**Automated backups** run daily at 02:00 UTC via a Kubernetes CronJob (`kubernetes/mariadb-backup-cronjob.yaml`). Backups are stored at `/mnt/data/mariadb-backups` on the DRBD-replicated volume with 7-day retention.
+**Automated backups** run daily at 02:00 UTC via a Kubernetes CronJob (`kubernetes/backups/mariadb-backup-cronjob.yaml`):
+
+1. `mysqldump` writes a compressed dump to the local staging volume
+   (`mariadb-backup-pvc`, `/mnt/data/mariadb-backups`), rotating files older
+   than `backup.retention_days` (default 7).
+2. An `rclone` container uploads the dump to the **off-DRBD Garage S3 bucket**
+   (`backup.bucket`, default `cms-backups`) running as a container on the
+   hypervisor, and deletes bucket objects older than the retention window.
+
+Because the authoritative copies live **outside the DRBD device**, a
+split-brain on the replicated volume cannot take the backups with it.
+
+**Restore drill.** A second CronJob (`mariadb-restore-test-cronjob.yaml`) runs
+daily at 03:30 UTC: it downloads the newest object from the bucket, restores it
+into a throwaway MariaDB instance, and validates that the WordPress schema was
+recovered (`wp_posts`, `wp_options`, `wp_users`). It records the restore time
+and duration as metrics.
+
+**Alerts.** Both jobs publish metrics through the node-exporter textfile
+collector:
+
+- `BackupMissing` — no successful offsite backup in the last 26 hours.
+- `BackupRestoreTestFailing` — the restore drill has not succeeded in 48 hours.
+
+**Configuration.** The endpoint/bucket/region are injected into a
+`backup-config` ConfigMap and the credentials into a `backup-secret` Secret by
+the `kubernetes` phase, all derived from the `backup:` block in `config.yaml`
+(the S3 secret must be encrypted: `cms-ha secrets encrypt`).
 
 To perform a manual backup:
 ```bash
-# Via Go CLI:
+# Via Go CLI (writes a local .sql file):
 ./cms-ha backup db
 
 # Or direct command from the internal network:
-mysqldump -h 192.168.10.11 -P 30306 -u root -pmysqlrootpass wordpress | gzip > backup_wordpress.sql.gz
+mysqldump -h 192.168.10.11 -P 30306 -u root -p wordpress | gzip > backup_wordpress.sql.gz
+
+# Or pull the latest offsite copy with rclone (any node):
+rclone --s3-endpoint "http://192.168.10.254:3900" --s3-provider Other \
+  ls s3:cms-backups
 ```
 
 ### 6.2 WordPress Media and File Backups
@@ -366,10 +588,10 @@ tar -czf wp-files-backup.tar.gz --exclude='wp-content/uploads' /var/www/html/
 If `internal-master1` goes down completely, the MariaDB pod will enter `Unknown` state. Manual recovery steps:
 ```bash
 # 1. Check cluster status from master2
-ssh root@192.168.10.12 'kubectl get nodes; kubectl get pods -n cms'
+ssh ubuntu@192.168.10.12 'sudo -H kubectl get nodes; sudo -H kubectl get pods -n cms'
 
 # 2. Force-delete the zombie pod
-ssh root@192.168.10.12 'kubectl delete pod mariadb-0 -n cms --force --grace-period=0'
+ssh ubuntu@192.168.10.12 'sudo -H kubectl delete pod mariadb-0 -n cms --force --grace-period=0'
 
 # 3. If MariaDB does not start on master2, promote DRBD there and migrate the PV
 # (requires manual intervention — see full procedure in section 8)
@@ -396,7 +618,7 @@ Run the chaos engineering test suite to validate HA behaviour:
 # Legacy v1:
 bash scripts/utils/test_failover.sh
 ```
-This tests DRBD master failover, CMS frontend failover, and K3s worker failover with timing metrics.
+This tests DRBD master failover, CMS frontend failover, and K3s worker failover with timing metrics. Scenarios that cannot run (fewer than 2 masters, 2 frontends, or 2 workers) are reported as **`SKIP`** — they are no longer counted as failures. Every scenario first verifies that the node actually reached `shut off`; a shutdown that never completes is reported as a failure, so an interrupted test can never be mistaken for a PASS. Cancelled runs return an error instead of a silent success.
 
 ---
 
@@ -430,7 +652,7 @@ From the hypervisor server, run in order:
 #### Step 1 — Resume Paused VMs
 ```bash
 # Resume all paused VMs at once
-for vm in ufw-router jumpstart internal-monitor main-lb main-cms1 main-cms2 main-hotdesk1; do
+for vm in ufw-router jumpstart internal-monitor main-lb1 main-lb2 main-cms1 main-cms2 main-hotdesk1; do
   sudo virsh resume "$vm" 2>/dev/null && echo "OK: $vm"
 done
 ```
@@ -438,7 +660,7 @@ done
 #### Step 2 — Start Stopped VMs (K3s nodes)
 ```bash
 # Order matters: masters first, then workers and storage
-for vm in internal-master1 internal-master2 internal-storage internal-worker1 internal-worker2; do
+for vm in internal-master1 internal-master2 internal-master3 internal-storage internal-worker1 internal-worker2; do
   sudo virsh start "$vm" && sleep 6
 done
 ```
@@ -452,10 +674,10 @@ This script: (1) synchronises clocks on all nodes, (2) cleans up stale K3s proce
 #### Step 4 — Verify MariaDB
 ```bash
 # The pod should reach 1/1 Running within ~2 minutes
-ssh root@192.168.10.11 'kubectl get pod mariadb-0 -n cms -w'
+ssh ubuntu@192.168.10.11 'sudo -H kubectl get pod mariadb-0 -n cms -w'
 ```
 
-If MariaDB enters `CrashLoopBackOff`, see section §8.4.
+If MariaDB enters `CrashLoopBackOff`, see section 8.4.
 
 ### 8.3 Permanent Boot-time Configurations
 
@@ -541,7 +763,7 @@ Mounted in the StatefulSet as `/etc/mysql/conf.d/custom.cnf`.
 
 ```bash
 # Verify the ConfigMap exists
-ssh root@192.168.10.11 'kubectl get configmap mariadb-config -n cms'
+ssh ubuntu@192.168.10.11 'sudo -H kubectl get configmap mariadb-config -n cms'
 ```
 
 #### e) Automatic DRBD Failover Watchdog (`drbd-failover-watchdog.service`)
@@ -607,23 +829,22 @@ Cause: the data directory contains files from an incomplete initialisation (the 
 Solution:
 ```bash
 # 1. On internal-master1, clean up corrupted data
-ssh root@192.168.10.11
-rm -rf /mnt/data/mariadb/*
-chown 999:999 /mnt/data/mariadb
+ssh ubuntu@192.168.10.11
+sudo rm -rf /mnt/data/mariadb/*
+sudo chown 999:999 /mnt/data/mariadb
 
 # 2. Force pod recreation
-kubectl delete pod mariadb-0 -n cms --force --grace-period=0
+sudo -H kubectl delete pod mariadb-0 -n cms --force --grace-period=0
 
 # 3. Wait for clean reinitialisation (~2 min)
-kubectl get pod mariadb-0 -n cms -w
+sudo -H kubectl get pod mariadb-0 -n cms -w
 ```
 
-After reinitialisation, recreate the WordPress database:
+After reinitialisation, recreate the WordPress database and user by rerunning
+the idempotent Kubernetes initialization Job. It reads the credentials from
+the existing `mariadb-secret`; there is no need to enter a MariaDB prompt:
 ```bash
-CID=$(crictl ps 2>/dev/null | grep mariadb | awk "{print \$1}" | head -1)
-crictl exec $CID mysql -uroot -pmysqlrootpass -e "CREATE DATABASE IF NOT EXISTS wordpress CHARACTER SET utf8mb4;"
-crictl exec $CID mysql -uroot -pmysqlrootpass -e "CREATE USER IF NOT EXISTS 'wp_user'@'%' IDENTIFIED BY 'WpS3cur3P4ss!';"
-crictl exec $CID mysql -uroot -pmysqlrootpass -e "GRANT ALL PRIVILEGES ON wordpress.* TO 'wp_user'@'%'; FLUSH PRIVILEGES;"
+bash scripts/utils/init_mariadb_db.sh
 ```
 
 #### K3s Pods in `Unknown` State After Boot
@@ -632,8 +853,8 @@ Symptom: `kubectl get pods -A` shows pods in `Unknown` on nodes that were powere
 
 Solution: these are zombie pods from the previous state. K3s cleans them automatically within ~5 minutes, or they can be force-deleted:
 ```bash
-ssh root@192.168.10.11 \
-  'kubectl get pods -A --field-selector=status.phase=Unknown -o json | \
+ssh ubuntu@192.168.10.11 \
+  'sudo -H kubectl get pods -A --field-selector=status.phase=Unknown -o json | \
    python3 -c "import json,sys,subprocess; [subprocess.run([\"kubectl\",\"delete\",\"pod\",\"-n\",i[\"metadata\"][\"namespace\"],i[\"metadata\"][\"name\"],\"--force\",\"--grace-period=0\"]) for i in json.load(sys.stdin)[\"items\"]]"'
 ```
 
@@ -645,13 +866,13 @@ Solution: export from a node that has it (e.g., master2) and import:
 ```bash
 # On the hypervisor
 source ~/scripts/config.sh
-scp $SSH_OPTS root@$MASTER2_IP:/tmp/pause-3.6.tar /tmp/pause-3.6.tar 2>/dev/null || \
-  ssh $SSH_OPTS root@$MASTER2_IP 'ctr -n k8s.io images export /tmp/pause-3.6.tar docker.io/rancher/mirrored-pause:3.6' && \
-  scp $SSH_OPTS root@$MASTER2_IP:/tmp/pause-3.6.tar /tmp/pause-3.6.tar
+scp $SSH_OPTS ubuntu@$MASTER2_IP:/tmp/pause-3.6.tar /tmp/pause-3.6.tar 2>/dev/null || \
+  ssh $SSH_OPTS ubuntu@$MASTER2_IP 'sudo -H ctr -n k8s.io images export /tmp/pause-3.6.tar docker.io/rancher/mirrored-pause:3.6' && \
+  scp $SSH_OPTS ubuntu@$MASTER2_IP:/tmp/pause-3.6.tar /tmp/pause-3.6.tar
 
 # Import on the affected node (example: master1)
-scp $SSH_OPTS /tmp/pause-3.6.tar root@$MASTER1_IP:/tmp/pause-3.6.tar
-ssh $SSH_OPTS root@$MASTER1_IP 'ctr -n k8s.io images import /tmp/pause-3.6.tar'
+scp $SSH_OPTS /tmp/pause-3.6.tar ubuntu@$MASTER1_IP:/tmp/pause-3.6.tar
+ssh $SSH_OPTS ubuntu@$MASTER1_IP 'sudo -H ctr -n k8s.io images import /tmp/pause-3.6.tar'
 ```
 
 #### Puppet SSL Certificate Mismatch (`certificate signature failure`)
@@ -671,10 +892,10 @@ The Go CLI (`cms-ha phase setup-puppet`) automatically detects this condition, r
 Manual Solution:
 ```bash
 # 1. Clean certificate on Jumpstart
-ssh root@192.168.10.10 "/opt/puppetlabs/bin/puppetserver ca clean --certname <NODE_FQDN>"
+ssh ubuntu@192.168.10.10 "sudo /opt/puppetlabs/bin/puppetserver ca clean --certname <NODE_FQDN>"
 
 # 2. Reset SSL state and request fresh certificate on client node
-ssh root@<NODE_IP> "rm -rf /etc/puppetlabs/puppet/ssl && /opt/puppetlabs/bin/puppet agent -t || [ \$? -eq 2 ]"
+ssh ubuntu@<NODE_IP> "sudo -H rm -rf /etc/puppetlabs/puppet/ssl && sudo -H /opt/puppetlabs/bin/puppet agent -t || [ \$? -eq 2 ]"
 ```
 
 #### DRBD Hostname Mismatch & Kubernetes Node Affinity
@@ -722,5 +943,5 @@ Run the idempotent UFW phase:
 
 Manual Verification:
 ```bash
-ssh root@192.168.10.1 "ufw status verbose && grep -A 10 '^\*nat' /etc/ufw/before.rules"
+ssh ubuntu@192.168.10.1 "sudo -H ufw status verbose && sudo -H grep -A 10 '^\*nat' /etc/ufw/before.rules"
 ```
