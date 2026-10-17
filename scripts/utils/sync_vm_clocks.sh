@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # sync_vm_clocks.sh
 # Sincroniza los relojes de todas las máquinas virtuales con la hora actual del hipervisor.
 # Útil después de pausar/reanudar las VMs para evitar desajustes en K3s/etcd.

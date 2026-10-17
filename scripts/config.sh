@@ -1,4 +1,9 @@
 #!/bin/bash
+# ---------------------------------------------------------------------------
+# DEPRECATED (v1, reference only). Superseded by the Go orchestrator (`cms-ha`)
+# and by Ansible/Puppet. Kept for historical reference and NOT maintained: new
+# work must target the v2 path (see scripts/README.md).
+# ---------------------------------------------------------------------------
 # config.sh
 #
 # Centralised environment variables, IP addressing, database credentials,
@@ -48,9 +53,20 @@ export MAX_HOTDESKS=8                    # Maximum allowed by IP address range
 
 # ⚠ SEGURIDAD: Las credenciales siguientes tienen valores por defecto de laboratorio.
 # En producción, sobreescribirlas SIEMPRE mediante variables de entorno:
-#   export DB_PASS="MiPasswordSeguro" bash scripts/07_setup_nginx_wordpress.sh
+#   DB_PASS="MiPasswordSeguro" bash scripts/07_setup_nginx_wordpress.sh
 # ── CMS Database Credentials and Parameters ──────────────────────────────────
-export DB_PASS="${DB_PASS:-WpS3cur3P4ss!}" # WordPress password for MariaDB
+export DB_PASS="${DB_PASS:-}"              # Supply via environment; never commit credentials
+export DB_ROOT_PASS="${DB_ROOT_PASS:-}"     # MariaDB root password, supplied at runtime
+export DB_EXPORTER_PASS="${DB_EXPORTER_PASS:-}" # Dedicated mysqld_exporter password
+export WP_ADMIN_PASS="${WP_ADMIN_PASS:-}"       # WordPress administrator password
+
+for secret_name in DB_PASS DB_ROOT_PASS DB_EXPORTER_PASS WP_ADMIN_PASS; do
+    secret_value="${!secret_name:-}"
+    if [[ "$secret_value" == *$'\n'* || "$secret_value" == *$'\r'* ]]; then
+        echo "[ERROR] ${secret_name} cannot contain line breaks." >&2
+        return 1 2>/dev/null || exit 1
+    fi
+done
 export DB_NAME="${DB_NAME:-wordpress}"     # Database schema name
 export DB_USER="${DB_USER:-wp_user}"       # WordPress connection user
 export DB_HOST="${DB_HOST:-${MASTER1_IP}}" # Master node IP for MariaDB access
