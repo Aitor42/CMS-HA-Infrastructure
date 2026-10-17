@@ -20,8 +20,8 @@
 Installed on all managed nodes via the `prometheus-node-exporter` apt package. Port: 9100.
 
 **Monitored Nodes:**
-- 192.168.10.10 (jumpstart), 192.168.10.11-15 (internal subnet), 192.168.10.20 (monitor itself)
-- 192.168.20.100-102 (main-lb, cms1, cms2)
+- 192.168.10.1 (ufw-router), 192.168.10.10 (jumpstart), 192.168.10.11-16 (internal subnet), 192.168.10.20 (monitor itself)
+- 192.168.20.101-104 (cms1, cms2, main-lb1, main-lb2)
 
 ### Prometheus Configuration
 
@@ -36,11 +36,13 @@ scrape_configs:
         - '192.168.10.10:9100'
         - '192.168.10.11:9100'
         - '192.168.10.12:9100'
+        - '192.168.10.16:9100'
         - '192.168.10.13:9100'
         - '192.168.10.14:9100'
         - '192.168.10.15:9100'
         - '192.168.10.20:9100'
-        - '192.168.20.100:9100'
+        - '192.168.20.103:9100'
+        - '192.168.20.104:9100'
         - '192.168.20.101:9100'
         - '192.168.20.102:9100'
 ```

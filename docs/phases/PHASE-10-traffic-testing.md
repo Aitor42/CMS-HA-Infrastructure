@@ -12,7 +12,17 @@
 
 ### TrafficMix Script
 
-The script `scripts/11_traffic_mix.sh` generates simulated traffic against the CMS web infrastructure. It supports two modes:
+> **Current implementation:** `cms-ha traffic` runs a **k6** profile
+> (`templates/traffic/cms-smoke.js`) inside a pinned `grafana/k6` container and
+> reports RPS, p95/p99 and error rate (optionally streamed to Prometheus).
+> ```bash
+> ./cms-ha traffic --external --duration 120
+> ./cms-ha traffic --internal --duration 60 --with-db
+> ```
+> The v1 shell script `scripts/11_traffic_mix.sh` shown below is **deprecated**
+> (reference only, see `scripts/README.md`).
+
+The legacy script `scripts/11_traffic_mix.sh` generates simulated traffic against the CMS web infrastructure. It supports two modes:
 
 **External Mode** (simulates client traffic from the Internet):
 ```bash
@@ -38,15 +48,15 @@ The script `scripts/11_traffic_mix.sh` generates simulated traffic against the C
 ```bash
 # 1. Verify everything works before shutdown
 curl -sk https://192.168.20.100/
-ssh root@192.168.10.11 "kubectl get nodes"
+ssh ubuntu@192.168.10.11 "sudo -H kubectl get nodes"
 
 # 2. Shut down the jumpstart provisioning node
 sudo virsh shutdown jumpstart
 
 # 3. Verify that the entire CMS infrastructure CONTINUES functioning
 curl -sk https://192.168.20.100/           # CMS remains accessible
-ssh root@192.168.10.11 "kubectl get nodes"  # K3s cluster operational
-ssh root@192.168.10.11 "kubectl get pods -n cms"  # MariaDB running
+ssh ubuntu@192.168.10.11 "sudo -H kubectl get nodes"  # K3s cluster operational
+ssh ubuntu@192.168.10.11 "sudo -H kubectl get pods -n cms"  # MariaDB running
 
 # 4. Generate post-shutdown traffic
 ./scripts/11_traffic_mix.sh --internal --duration 30

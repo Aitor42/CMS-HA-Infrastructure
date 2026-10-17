@@ -2,7 +2,7 @@
 
 ## Objectives to Achieve
 
-- [x] Deploy 8 hot-desk workstations connected to the `main` subnet.
+- [x] Deploy 3 hot-desk workstations (scalable up to 8) connected to the `main` subnet.
 - [x] Verify internal ping connectivity to the CMS load balancer.
 
 ---
@@ -11,16 +11,15 @@
 
 ### Deployed Hot-desks
 
+`config.yaml` defines `hotdesks.count: 3` (with `max: 8`). The IP last octet, FQDN and MAC are derived deterministically from the index, so adding hot-desks up to 8 needs no per-node MAC/IP bookkeeping:
+
 | Hostname | IP | MAC | RAM | Disk |
 |:---------|:---|:---|:----|:-----|
-| main-hotdesk1 | 192.168.20.201 | 52:54:00:10:02:c9 | 512 MB | 5 GB |
-| main-hotdesk2 | 192.168.20.202 | 52:54:00:10:02:ca | 512 MB | 5 GB |
-| main-hotdesk3 | 192.168.20.203 | 52:54:00:10:02:cb | 512 MB | 5 GB |
-| main-hotdesk4 | 192.168.20.204 | 52:54:00:10:02:cc | 512 MB | 5 GB |
-| main-hotdesk5 | 192.168.20.205 | 52:54:00:10:02:cd | 512 MB | 5 GB |
-| main-hotdesk6 | 192.168.20.206 | 52:54:00:10:02:ce | 512 MB | 5 GB |
-| main-hotdesk7 | 192.168.20.207 | 52:54:00:10:02:cf | 512 MB | 5 GB |
-| main-hotdesk8 | 192.168.20.208 | 52:54:00:10:02:d0 | 512 MB | 5 GB |
+| main-hotdesk1 | 192.168.20.201 | 52:54:00:10:02:c9 | 768 MB | 10 GB |
+| main-hotdesk2 | 192.168.20.202 | 52:54:00:10:02:ca | 768 MB | 10 GB |
+| main-hotdesk3 | 192.168.20.203 | 52:54:00:10:02:cb | 768 MB | 10 GB |
+
+> Hot-desks 4-8 (up to `192.168.20.208`, MAC `…:cc`-`…:d0`) are provisioned on demand by raising `hotdesks.count` (see MANUAL section 5).
 
 ### Provisioning
 
@@ -41,11 +40,11 @@ See [`docs/MANUAL.md`](../MANUAL.md) → Section 5 "Scaling and Node Expansion" 
 
 ```bash
 # Ping the load balancer from a hot-desk
-ssh root@192.168.20.201 "ping -c 2 192.168.20.100"
+ssh ubuntu@192.168.20.201 "sudo ping -c 2 192.168.20.100"
 
 # Access CMS
-ssh root@192.168.20.201 "curl -sk https://192.168.20.100/ | head -5"
+ssh ubuntu@192.168.20.201 "curl -sk https://192.168.20.100/ | head -5"
 
 # Access internet
-ssh root@192.168.20.201 "curl -s http://example.com | head -5"
+ssh ubuntu@192.168.20.201 "curl -s http://example.com | head -5"
 ```

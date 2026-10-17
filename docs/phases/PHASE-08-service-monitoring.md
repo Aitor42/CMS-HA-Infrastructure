@@ -15,7 +15,7 @@
 | Exporter | Node(s) | Port | Monitored Metrics |
 |:---------|:--------|:-----|:------------------|
 | **mysqld_exporter** | internal-master1 (192.168.10.11) | 9104 | Queries/s, active connections, replication status, InnoDB metrics |
-| **nginx-prometheus-exporter** | main-lb (192.168.20.100) | 9113 | Active connections, requests/s, upstream status |
+| **nginx-prometheus-exporter** | main-lb1/2 (192.168.20.103-104) | 9113 | Active connections, requests/s, upstream status |
 | **apache_exporter** | main-cms1/2 (192.168.20.101-102) | 9117 | Busy/idle workers, accesses/s, traffic rate |
 
 ### Prometheus Configuration — Service Scrape Configs
@@ -28,7 +28,7 @@ scrape_configs:
 
   - job_name: 'nginx'
     static_configs:
-      - targets: ['192.168.20.100:9113']
+      - targets: ['192.168.20.103:9113', '192.168.20.104:9113']
 
   - job_name: 'apache'
     static_configs:
@@ -37,14 +37,17 @@ scrape_configs:
 
 ### mysqld_exporter
 
-Configured with the `.my.cnf` file:
+Credentials are **not** stored in Puppet code or repository files. The manifest installs `/usr/local/sbin/cms-ha-configure-mysqld-exporter.py`, a helper that writes the client config from a root-protected runtime fact (`/etc/cms-ha/runtime-secrets.json`, provisioned by `04_setup_puppet.sh` with `0600` permissions):
+
 ```ini
 [client]
 user=exporter
-password=exporterpass
-host=localhost
-port=3306
+password=<runtime secret>
+host=127.0.0.1
+port=30306
 ```
+
+The file is written with `0640` mode and group `prometheus` via an atomic `mkstemp`+`rename`; `check` mode makes the Puppet exec idempotent, and the exporter service is reloaded only when the credentials change.
 
 **Key Metrics:**
 - `mysql_global_status_queries` — Total queries executed
@@ -99,8 +102,8 @@ Requires the `mod_status` module enabled in Apache:
 # Query mysqld_exporter metrics
 curl -s http://192.168.10.11:9104/metrics | grep mysql_global_status_queries
 
-# Query nginx_exporter metrics
-curl -s http://192.168.20.100:9113/metrics | grep nginx_connections_active
+# Query nginx_exporter metrics (either balancer)
+curl -s http://192.168.20.103:9113/metrics | grep nginx_connections_active
 
 # Query apache_exporter metrics on cms1
 curl -s http://192.168.20.101:9117/metrics | grep apache_workers
