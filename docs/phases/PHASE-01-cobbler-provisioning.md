@@ -18,7 +18,7 @@
 
 ### Cobbler: Configuration
 
-1. **Packages:** cobbler, cobbler-web, isc-dhcp-server, tftpd-hpa, apache2, xinetd
+1. **Packages:** cobbler, apache2, isc-dhcp-server, tftpd-hpa, nfs-kernel-server, libapache2-mod-wsgi-py3, python3-yaml, bind9, bind9utils, pxelinux, ipxe, shim-signed, grub-efi-amd64-signed, syslinux-common, curl, wget, rsync
 2. **Configuration file:** `/etc/cobbler/settings.yaml` (YAML format in Cobbler 3.x)
 3. **Key parameters:**
    - `server: 192.168.10.10`
@@ -33,6 +33,7 @@
 - **Autoinstall:** cloud-init template for unattended installation
 - **DHCP:** Configured for both subnets with MAC address reservations
 - **DNS:** Zones `internal.local` and `main.local`
+- **Node registration (`phase register-nodes`):** every node requires a MAC address — a node without one is rejected instead of being registered as a zero-MAC Cobbler system that would never PXE-boot reliably. The Cobbler system creation and the `cobbler sync` run with `set -e` and verified exit codes.
 
 Below is a screenshot of the automated network installation process (PXE) managed by Cobbler:
 
@@ -46,8 +47,8 @@ Below is a screenshot of the automated network installation process (PXE) manage
 ### Verification
 
 ```bash
-ssh root@192.168.10.10 "cobbler check"
-ssh root@192.168.10.10 "cobbler system list"
-ssh root@192.168.10.10 "cobbler distro list"
-ssh root@192.168.10.10 "systemctl status cobblerd"
+ssh ubuntu@192.168.10.10 "sudo cobbler check"
+ssh ubuntu@192.168.10.10 "sudo cobbler system list"
+ssh ubuntu@192.168.10.10 "sudo cobbler distro list"
+ssh ubuntu@192.168.10.10 "sudo systemctl status cobblerd"
 ```

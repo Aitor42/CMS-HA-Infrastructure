@@ -24,21 +24,24 @@
 
 | Hostname | IP | MAC | Role | RAM |
 |:---------|:---|:---|:-----|:----|
-| internal-monitor | 192.168.10.20 | 52:54:00:10:01:10 | Prometheus + Grafana | 512 MB |
+| internal-monitor | 192.168.10.20 | 52:54:00:10:01:10 | Prometheus + Grafana | 1024 MB |
 | internal-master1 | 192.168.10.11 | 52:54:00:10:01:11 | K3s master + DRBD | 1024 MB |
 | internal-master2 | 192.168.10.12 | 52:54:00:10:01:12 | K3s master + DRBD | 1024 MB |
+| internal-master3 | 192.168.10.16 | 52:54:00:10:01:16 | K3s master (etcd quorum) | 1024 MB |
 | internal-worker1 | 192.168.10.13 | 52:54:00:10:01:13 | K3s worker | 768 MB |
 | internal-worker2 | 192.168.10.14 | 52:54:00:10:01:14 | K3s worker | 768 MB |
 | internal-storage | 192.168.10.15 | 52:54:00:10:01:15 | Centralized storage | 1024 MB |
 
-**Client Network / Main (3 nodes + 8 hot-desks):**
+**Client Network / Main (4 nodes + 3 hot-desks):**
 
 | Hostname | IP | MAC | Role | RAM |
 |:---------|:---|:---|:-----|:----|
-| main-lb | 192.168.20.100 | 52:54:00:10:02:64 | Nginx LB | 512 MB |
-| main-cms1 | 192.168.20.101 | 52:54:00:10:02:65 | WordPress + Apache | 512 MB |
-| main-cms2 | 192.168.20.102 | 52:54:00:10:02:66 | WordPress + Apache | 512 MB |
-| main-hotdesk1..8 | 192.168.20.201..208 | dynamic | Employee workstation | 768 MB |
+| main-lb1 | 192.168.20.103 | 52:54:00:10:02:67 | Nginx LB (keepalived MASTER) | 768 MB |
+| main-lb2 | 192.168.20.104 | 52:54:00:10:02:68 | Nginx LB (keepalived BACKUP) | 768 MB |
+| *(VIP)* | 192.168.20.100 | — | Floating keepalived address (clients + router DNAT) | — |
+| main-cms1 | 192.168.20.101 | 52:54:00:10:02:65 | WordPress + Apache | 1024 MB |
+| main-cms2 | 192.168.20.102 | 52:54:00:10:02:66 | WordPress + Apache | 1024 MB |
+| main-hotdesk1..3 (up to 8) | 192.168.20.201..203 | dynamic | Employee workstation | 768 MB |
 
 **Others:**
 
@@ -57,5 +60,5 @@
 
 ```bash
 sudo virsh net-list --all      # Verify internal and main networks
-sudo virsh list --all          # Verify all 20 VMs created
+sudo virsh list --all          # Verify all 16 VMs created
 ```
