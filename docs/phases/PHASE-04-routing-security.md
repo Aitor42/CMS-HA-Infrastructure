@@ -36,7 +36,7 @@ ufw default allow outgoing
 
 ### NAT Rules (/etc/ufw/before.rules)
 
-**DNAT (External access → LB):**
+**DNAT (External access → LB VIP, floated between main-lb1/main-lb2 by keepalived):**
 ```
 *nat
 :PREROUTING ACCEPT [0:0]
@@ -65,14 +65,14 @@ COMMIT
 
 ```bash
 # On the router:
-ssh root@192.168.10.1 "ufw status verbose"
-ssh root@192.168.10.1 "iptables -t nat -L -n -v"
+ssh ubuntu@192.168.10.1 "sudo ufw status verbose"
+ssh ubuntu@192.168.10.1 "sudo iptables -t nat -L -n -v"
 
 # From a hot-desk node: should access the internet and the internal subnet
-ssh root@192.168.20.201 "curl -s http://example.com"
-ssh root@192.168.20.201 "ping -c 2 192.168.10.11"
+ssh ubuntu@192.168.20.201 "sudo curl -s http://example.com"
+ssh ubuntu@192.168.20.201 "sudo ping -c 2 192.168.10.11"
 
 # From internal subnet: must not access the internet
-ssh root@192.168.10.11 "curl -s --connect-timeout 5 http://example.com"  # Should fail
-ssh root@192.168.10.11 "ping -c 2 192.168.20.100"  # Should work
+ssh ubuntu@192.168.10.11 "sudo curl -s --connect-timeout 5 http://example.com"  # Should fail
+ssh ubuntu@192.168.10.11 "sudo ping -c 2 192.168.20.100"  # Should work
 ```

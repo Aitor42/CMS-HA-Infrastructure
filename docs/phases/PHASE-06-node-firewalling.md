@@ -24,9 +24,10 @@ Each node has UFW configured with:
 | **internal-monitor** | 22, 9090, 3000, 9100 | SSH, Prometheus, Grafana, node_exporter |
 | **internal-master1** | 22, 6443, 30306, 9100, 9104, 7788 | SSH, K3s API, MariaDB NodePort, exporters, DRBD |
 | **internal-master2** | 22, 6443, 9100, 7788 | SSH, K3s API, node_exporter, DRBD |
+| **internal-master3** | 22, 6443, 9100, 2379:2380 | SSH, K3s API, node_exporter, etcd |
 | **internal-worker1/2** | 22, 9100, 10250 | SSH, node_exporter, kubelet |
 | **internal-storage** | 22, 111, 2049, 9100 | SSH, RPCbind, NFS (from Main subnet), node_exporter |
-| **main-lb** | 22, 80, 443, 9100, 9113 | SSH, HTTP, HTTPS, node_exporter, nginx_exporter |
+| **main-lb1/2** | 22, 80, 443, 9100, 9113, 112 | SSH, HTTP, HTTPS, node_exporter, nginx_exporter, VRRP (keepalived) |
 | **main-cms1/2** | 22, 80, 9100, 9117 | SSH, Apache, node_exporter, apache_exporter |
 
 ### Associated Scripts
@@ -37,9 +38,9 @@ Each node has UFW configured with:
 
 ```bash
 # Verify rules on each node type
-ssh root@192.168.10.20 "ufw status numbered"
-ssh root@192.168.10.11 "ufw status numbered"
-ssh root@192.168.20.100 "ufw status numbered"
+ssh ubuntu@192.168.10.20 "sudo ufw status numbered"
+ssh ubuntu@192.168.10.11 "sudo ufw status numbered"
+ssh ubuntu@192.168.20.103 "sudo ufw status numbered"
 
 # Port isolation test (from an external node):
 # MariaDB direct port 3306 on master1 should NOT be accessible directly (only 30306 NodePort)
