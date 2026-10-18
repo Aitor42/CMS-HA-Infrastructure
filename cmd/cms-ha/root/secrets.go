@@ -51,14 +51,19 @@ func init() {
 
 	decryptCmd := &cobra.Command{
 		Use:   "decrypt",
-		Short: "Decrypt config.yaml secrets in place for editing",
+		Short: "Verify that config.yaml secrets decrypt (read-only)",
+		Long: `Load config.yaml in memory with its secrets decrypted and print a short summary.
+
+The file on disk is never modified: plaintext secrets are re-encrypted
+automatically on the next load, so writing them out would only weaken the
+at-rest protection without changing the validated configuration.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			keyPath, _ := cmd.Flags().GetString("key")
 			decrypted, err := config.DecryptConfig(configPath, keyPath)
 			if err != nil {
 				return err
 			}
-			logging.Success("Configuration file %s decrypted successfully (validated %d node definitions)", configPath, len(decrypted.AllNodes()))
+			logging.Success("Configuration file %s loaded with secrets decrypted (read-only; validated %d node definitions)", configPath, len(decrypted.AllNodes()))
 			fmt.Fprintf(cmd.OutOrStdout(), "Database: %s (user: %s, password: [MASKED])\n", decrypted.Database.Name, decrypted.Database.User)
 			fmt.Fprintf(cmd.OutOrStdout(), "PKI Domain: %s (provisioner: [CONFIGURED])\n", decrypted.PKI.Domain)
 			return nil
