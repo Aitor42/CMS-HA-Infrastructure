@@ -116,6 +116,9 @@ jobs:
           run_case() {
             local label="$1"; shift
             local name="probe-$label" out rc boots state
+            # GitHub runs `run:` blocks with `bash -e`; a failing virt-install
+            # must not abort the whole matrix.
+            set +e
             out="$(virt-install --connect qemu:///system --name "$name" \
               --memory 3072 --vcpus 1 --os-variant ubuntu24.04 \
               --disk "path=/tmp/$name.qcow2,size=5,format=qcow2,bus=virtio" \
@@ -124,6 +127,7 @@ jobs:
               --network network=default,model=virtio,mac=52:54:00:11:22:03 \
               "$@" --wait 0 --noautoconsole 2>&1)"
             rc=$?
+            set -e
             printf 'RESULT|case=%s|rc=%s|out=%s\n' "$label" "$rc" \
               "$(printf '%s' "$out" | tr '\n' ' ' | tr -s ' ' | cut -c1-220)"
             boots="$(virsh -c qemu:///system dumpxml "$name" 2>/dev/null \
