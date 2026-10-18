@@ -337,9 +337,12 @@ jobs:
               ' 2>&1 || true
           } > "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
 
-          # Serial console and screen of the stalled installers. They are
-          # headless for `virsh console` but the clients also carry a SPICE
-          # display, so a screenshot shows whatever the installer last drew.
+          # Serial console and screen of the stalled installers. The serial
+          # port is a pty chardev, so `virsh console` refuses to run without a
+          # controlling TTY; reading the pty the domain holds gets the same
+          # output (the kernel logs there too, see the console=ttyS0 kernel
+          # option). The clients also carry a SPICE display, so a screenshot
+          # shows whatever the installer last drew on the VGA.
           command -v convert >/dev/null 2>&1 \
             || sudo apt-get install -y -qq imagemagick >/dev/null 2>&1 || true
           {
@@ -349,9 +352,16 @@ jobs:
                 2>&1 | sed "s/^/screenshot $d: /" || true
               convert "$ARTIFACTS_DIR/console-$d.ppm" "$ARTIFACTS_DIR/console-$d.png" \
                 2>/dev/null || true
-              (sleep 2; printf "\n"; sleep 5) \
-                | timeout 15 virsh -c qemu:///system console "$d" --force \
+              pty=$(virsh -c qemu:///system dumpxml "$d" 2>/dev/null \
+                | grep -oE "source path='[^']+'" | head -n1 | cut -d"'" -f2)
+              if [ -n "$pty" ]; then
+                sudo timeout 6 cat "$pty" 2>/dev/null | tr -d "\000" | tail -60 \
+                  > "$ARTIFACTS_DIR/console-$d.txt" || true
+              else
+                (sleep 2; printf "\n"; sleep 5) | timeout 15 script -qec \
+                  "virsh -c qemu:///system console $d --force" /dev/null \
                   > "$ARTIFACTS_DIR/console-$d.txt" 2>&1 || true
+              fi
               echo "-- $d serial console (tail) --"
               tr -d "\000" < "$ARTIFACTS_DIR/console-$d.txt" | tail -40 || true
             done

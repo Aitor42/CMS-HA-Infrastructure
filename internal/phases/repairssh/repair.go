@@ -80,69 +80,11 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 
 	var firstErr error
 	for _, knownHostsPath := range paths {
-		if err := removeHostsFromKnownHosts(knownHostsPath, ips); err != nil && firstErr == nil {
+		if err := ssh.RemoveHostsFromKnownHosts(knownHostsPath, ips); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
-}
-
-func removeHostsFromKnownHosts(knownHostsPath string, ips []string) error {
-	data, err := os.ReadFile(filepath.Clean(knownHostsPath)) // #nosec G304 -- operator's own ssh known_hosts paths
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	var newLines []string
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			newLines = append(newLines, line)
-			continue
-		}
-		fields := strings.Fields(trimmed)
-		if len(fields) == 0 {
-			newLines = append(newLines, line)
-			continue
-		}
-		hostPart := fields[0]
-		match := false
-		for _, ip := range ips {
-			if ip != "" && hostMatchesIP(hostPart, ip) {
-				match = true
-				break
-			}
-		}
-		if !match {
-			newLines = append(newLines, line)
-		}
-	}
-
-	return os.WriteFile(filepath.Clean(knownHostsPath), []byte(strings.Join(newLines, "\n")), 0600) // #nosec G703 G304 -- safely write cleaned known_hosts in user ssh dir
-}
-
-func hostMatchesIP(hostToken, targetIP string) bool {
-	hostToken = strings.TrimPrefix(hostToken, "@cert-authority ")
-	hostToken = strings.TrimPrefix(hostToken, "@revoked ")
-	parts := strings.Split(hostToken, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == targetIP {
-			return true
-		}
-		if strings.HasPrefix(p, "[") && strings.Contains(p, "]:") {
-			idx := strings.Index(p, "]:")
-			if p[1:idx] == targetIP {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error {

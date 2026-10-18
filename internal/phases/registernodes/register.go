@@ -55,7 +55,11 @@ func (p *Phase) Run(ctx context.Context) error {
 			}
 		}
 
-		kernelOpts := fmt.Sprintf("autoinstall ds=nocloud-net;s=http://%s/cblr/svc/op/autoinstall/system/%s/ netboot=nfs nfsroot=%s:/var/www/cobbler/distro_mirror/ubuntu-24.04 boot=casper ip=dhcp",
+		// console=ttyS0 comes first so the kernel still logs to the serial
+		// port (which the host can read through the domain's pty) while
+		// console=tty0 stays last, keeping /dev/console on the VGA where the
+		// installer draws its screen.
+		kernelOpts := fmt.Sprintf("autoinstall ds=nocloud-net;s=http://%s/cblr/svc/op/autoinstall/system/%s/ netboot=nfs nfsroot=%s:/var/www/cobbler/distro_mirror/ubuntu-24.04 boot=casper ip=dhcp console=ttyS0 console=tty0",
 			cobblerServerIP, node.Name, cobblerServerIP)
 
 		logging.Info("Registering node %s...", node.Name)

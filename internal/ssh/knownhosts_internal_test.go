@@ -1,4 +1,4 @@
-package repairssh
+package ssh
 
 import (
 	"os"
@@ -23,7 +23,7 @@ func TestRemoveHostsFromKnownHosts(t *testing.T) {
 	}
 
 	// Remove two of the three hosts (one via a multi-host token).
-	if err := removeHostsFromKnownHosts(path, []string{"192.168.10.11", "192.168.20.101"}); err != nil {
+	if err := RemoveHostsFromKnownHosts(path, []string{"192.168.10.11", "192.168.20.101"}); err != nil {
 		t.Fatalf("removeHostsFromKnownHosts: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestRemoveHostsFromKnownHosts(t *testing.T) {
 }
 
 func TestRemoveHostsFromKnownHostsMissingFile(t *testing.T) {
-	if err := removeHostsFromKnownHosts(filepath.Join(t.TempDir(), "does-not-exist"), []string{"192.168.10.11"}); err != nil {
+	if err := RemoveHostsFromKnownHosts(filepath.Join(t.TempDir(), "does-not-exist"), []string{"192.168.10.11"}); err != nil {
 		t.Fatalf("missing file should be a no-op, got: %v", err)
 	}
 }

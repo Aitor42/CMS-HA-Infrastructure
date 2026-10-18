@@ -236,10 +236,10 @@ deploy:
   # A hosted runner has 4 vCPU for the whole lab, so a batch of three to five
   # installers takes far longer than on the reference host. Give the batch
   # installer room for it instead of letting it give up at the 15m default.
-  # (Temporarily 12m: while the hosted lab is under diagnosis a quick failure
-  # is more useful than a long wait, and the diagnostics are collected either
-  # way. Raise it back to 30m once the first batch installs reliably.)
-  node_install_timeout: 12m
+  # One budget covers every batch of a provision run, and the later batches
+  # pack more nodes into the runner's 4 vCPUs than batch 1 does, so this is
+  # sized for the slowest of them.
+  node_install_timeout: 20m
 
 drbd:
   # STONITH fencing (split-brain prevention). Before a node promotes itself it

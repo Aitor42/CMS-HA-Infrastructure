@@ -775,6 +775,60 @@ func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duratio
 	}
 }
 
+// IsListening reports whether host accepts a TCP connection on the SSH port,
+// without attempting to authenticate. During a batch install this is what
+// tells the live installer (reachable, but refusing our key by design) apart
+// from a guest whose network has already gone away.
+func IsListening(ctx context.Context, host string, timeout time.Duration) bool {
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", ensurePort(host, "22"))
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// CanLogin reports whether the pool can authenticate and open a session on
+// host, i.e. whether the system answering is the installed one (which trusts
+// the deployment key) rather than the live installer.
+func (p *Pool) CanLogin(ctx context.Context, host string) bool {
+	if err := ctx.Err(); err != nil {
+		return false
+	}
+	client, err := p.getClient(host)
+	if err != nil {
+		return false
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		p.invalidateClient(host)
+		return false
+	}
+	_ = session.Close()
+	return true
+}
+
+// ForgetHost drops any host key pinned for host, so a machine whose identity
+// legitimately changed (a node that was reinstalled) is trusted again on first
+// contact. It is a no-op when no pinned store is configured.
+func (p *Pool) ForgetHost(host string) {
+	p.invalidateClient(host)
+
+	if p.knownHostsPath == "" {
+		return
+	}
+
+	if err := RemoveHostsFromKnownHosts(p.knownHostsPath, []string{host}); err != nil {
+		slog.Warn("could not drop the pinned host key",
+			"host", host, "path", p.knownHostsPath, "error", err)
+	}
+
+	p.knownHostsMu.Lock()
+	p.knownHostsCallback = nil
+	p.knownHostsMu.Unlock()
+}
+
 // AptLockWaitSnippet is the shared shell preamble that waits for
 // unattended-upgrades, dpkg or cloud-init to release apt locks before apt
 // operations; callers embed it at the top of their install scripts.

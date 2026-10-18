@@ -365,6 +365,123 @@ func reorderBootElements(xml string) (string, bool) {
 }
 
 // InstallByBatches provisions VMs in batches using PXE.
+// Batch install waits. The live installer a node PXE-boots also listens on
+// port 22, but by design it does not trust the deployment key: only the
+// installed system does. So "port open, key refused" means the installer is
+// still working, and only a successful login means the node reached its disk.
+const (
+	// nodePollInterval is how often a node is probed while installing.
+	nodePollInterval = 5 * time.Second
+	// installerGoneGrace is how long a node may stay silent, after its live
+	// installer was answering, before the batch treats the installer's
+	// shutdown as wedged. A node that reboots normally reopens port 22 in well
+	// under this, so the restart only ever happens on a stuck one.
+	installerGoneGrace = 2 * time.Minute
+	// maxNodeRestarts bounds the restarts per node: a node that needs more has
+	// a real problem (no bootable disk, wrong boot order) and must fail the
+	// batch instead of looping.
+	maxNodeRestarts = 3
+)
+
+// installBatchSSH waits for every node in a batch to answer SSH as its
+// installed system.
+//
+// A node that stops listening right after its installer was answering is stuck
+// in the installer's shutdown instead of rebooting: the live media is an NFS
+// mount (nfsroot=...) whose squashfs stays loop-mounted, so /cdrom cannot be
+// unmounted and the guest can wedge before it ever boots the installed system.
+// No guest-side action can recover from that, but a restart can: the
+// definition already boots disk-first (see FixBootOrder), so the node comes
+// back straight into the installed system.
+func installBatchSSH(ctx context.Context, l *libvirt.Client, s *ssh.Pool, names, ips []string, budget time.Duration) error {
+	if len(names) != len(ips) {
+		return fmt.Errorf("batch has %d node names and %d IPs", len(names), len(ips))
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
+	errs := make([]error, len(ips))
+	var wg sync.WaitGroup
+	for i := range ips {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = waitForInstalledNode(waitCtx, l, s, names[i], ips[i])
+		}(i)
+	}
+	wg.Wait()
+
+	var failures []string
+	for i, err := range errs {
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s (%s): %v", names[i], ips[i], err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// waitForInstalledNode waits for one node to reach its installed system,
+// restarting it when the installer's shutdown wedges (see installBatchSSH).
+func waitForInstalledNode(ctx context.Context, l *libvirt.Client, s *ssh.Pool, name, ip string) error {
+	logging.Info("Waiting for %s (%s) to boot its installed system...", name, ip)
+
+	var installerSeen time.Time
+	restarts := 0
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("timed out after %d restart(s): %w", restarts, err)
+		}
+
+		if s.CanLogin(ctx, ip) {
+			logging.Success("Node %s is up on %s", name, ip)
+			return nil
+		}
+
+		if ssh.IsListening(ctx, ip, nodePollInterval) {
+			// The live installer is answering: the install is still running.
+			installerSeen = time.Now()
+		} else if !installerSeen.IsZero() && time.Since(installerSeen) > installerGoneGrace {
+			if restarts >= maxNodeRestarts {
+				return fmt.Errorf("node went silent after its installer finished and %d restart(s) did not bring it back", restarts)
+			}
+			restarts++
+			logging.Warn("Node %s stopped answering after its installer went away: the installer's shutdown is wedged. Restarting it to boot the installed disk (%d/%d)", name, restarts, maxNodeRestarts)
+			// The installed system may present a new host key; the pinned one
+			// must not make the next login fail closed.
+			s.ForgetHost(ip)
+			if err := restartNode(ctx, l, name); err != nil {
+				logging.Warn("Could not restart %s: %v", name, err)
+			}
+			// A fresh boot, including its own brief silence, gets a new grace
+			// window before another restart is considered.
+			installerSeen = time.Now()
+		}
+
+		select {
+		case <-ctx.Done():
+		case <-time.After(nodePollInterval):
+		}
+	}
+}
+
+// restartNode hard-stops and starts a VM. A guest wedged in its own shutdown
+// cannot be asked to reboot, so the host resets it instead; nothing is lost
+// because the installed system is already on its disk.
+func restartNode(ctx context.Context, l *libvirt.Client, name string) error {
+	if err := l.Destroy(ctx, name); err != nil {
+		logging.Warn("Could not force stop %s: %v", name, err)
+	}
+	if err := l.Start(ctx, name); err != nil {
+		return fmt.Errorf("start %s: %w", name, err)
+	}
+	return nil
+}
+
 func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s *ssh.Pool) error {
 	timer := logging.PhaseStart("Install By Batches")
 	defer timer.End()
@@ -455,9 +572,11 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
 		}
 
-		// 2. Wait for SSH across the batch
+		// 2. Wait for each installed system to answer SSH. The live installer
+		// answers on port 22 too but refuses our key, and a node whose
+		// installer wedges in its shutdown is restarted from here.
 		logging.Info("Waiting for SSH on all VMs in Batch %d (budget %s)...", i+1, sshBudget)
-		if err := s.WaitForAllSSH(ctx, ips, sshBudget); err != nil {
+		if err := installBatchSSH(ctx, l, s, batchNamesList, ips, sshBudget); err != nil {
 			return fmt.Errorf("wait for SSH in batch %d: %w", i+1, err)
 		}
 
