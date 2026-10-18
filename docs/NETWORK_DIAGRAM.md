@@ -225,42 +225,43 @@ graph LR
 
 ## 3. Deployment Sequence
 
-Diagram showing the execution order of deployment scripts when running the solution.
+Diagram showing the execution order of deployment phases when running the solution.
 
 ```mermaid
 graph TD
-    START(["▶ Start Deployment<br/>deploy_all.sh"])
+    START(["▶ Start Deployment<br/>cms-ha deploy"])
 
     subgraph VM_PROVISION["🖥 VM Provisioning"]
-        STEP00A["Step 00a · Create networks + Jumpstart VM<br/>00_init_vms.sh --jumpstart-only"]
+        STEP00A["Step 00a · Create networks + Jumpstart VM<br/>cms-ha phase init-vms --jumpstart-only"]
         WAIT_JS["⏳ Wait for Jumpstart SSH"]
-        STEP01["Step 01 · Install Cobbler on Jumpstart<br/>01_setup_cobbler.sh"]
-        STEP015["Step 01.5 · Register all nodes in Cobbler<br/>02_register_cobbler_nodes.sh"]
-        STEP00B["Step 00b · Batch PXE install all client VMs<br/>install_by_batches.sh"]
+        STEP01["Step 01 · Install Cobbler on Jumpstart<br/>cms-ha phase setup-cobbler"]
+        STEP015["Step 01.5 · Register all nodes in Cobbler<br/>cms-ha phase register-nodes"]
+        STEP00B["Step 00b · Batch PXE install all client VMs<br/>cms-ha vm install-batches"]
         WAIT_NODES["⏳ Wait for all VMs SSH"]
-        STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>03_repair_ssh_puppet.sh"]
+        STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>cms-ha phase repair-ssh"]
     end
 
     subgraph CONFIG_MGMT["⚙ Configuration Management"]
-        STEP02["Step 02 · Puppet Server + Agent convergence<br/>04_setup_puppet.sh<br/>(includes hot-desk provisioning)"]
+        STEP02["Step 02 · Puppet Server + Agent convergence<br/>cms-ha phase setup-puppet<br/>(includes hot-desk provisioning)"]
     end
 
     subgraph HA_INFRA["🔧 HA Infrastructure"]
-        STEP03["Step 03 · DRBD HA block replication<br/>05_setup_drbd.sh"]
-        STEP04["Step 04 · K3s HA cluster + MariaDB StatefulSet<br/>06_setup_kubernetes.sh"]
-        STEP05["Step 05 · Nginx LB + Apache WordPress frontends<br/>07_setup_nginx_wordpress.sh"]
+        STEP03["Step 03 · DRBD HA block replication<br/>cms-ha phase setup-drbd"]
+        STEP035["Step 03.5 · Off-DRBD backups (Garage S3)<br/>cms-ha phase setup-backup"]
+        STEP04["Step 04 · K3s HA cluster + MariaDB StatefulSet<br/>cms-ha phase setup-kubernetes"]
+        STEP05["Step 05 · Nginx LB + Apache WordPress frontends<br/>cms-ha phase setup-nginx-wordpress"]
     end
 
     subgraph OBSERVE["📊 Observability"]
-        STEP06["Step 06 · Prometheus + Grafana + alert rules<br/>08_setup_monitoring.sh"]
+        STEP06["Step 06 · Prometheus + Grafana + alert rules<br/>cms-ha phase setup-monitoring"]
     end
 
     subgraph SECURITY["🔒 Security"]
-        STEP07["Step 07 · UFW perimeter + per-node firewall<br/>09_setup_ufw.sh"]
-        STEP08["Step 08 · Internal CA (step-ca) + TLS certs<br/>10_setup_internal_ca.sh"]
+        STEP07["Step 07 · UFW perimeter + per-node firewall<br/>cms-ha phase setup-ufw"]
+        STEP08["Step 08 · Internal CA (step-ca) + TLS certs<br/>cms-ha phase setup-ca"]
     end
 
-    TRAFFIC["Step 09 · Traffic mix + load testing<br/>11_traffic_mix.sh"]
+    TRAFFIC["Step 09 · Traffic mix + load testing<br/>cms-ha traffic"]
     END(["✅ Deployment Complete"])
 
     START --> STEP00A
@@ -272,7 +273,8 @@ graph TD
     WAIT_NODES --> STEP018
     STEP018 --> STEP02
     STEP02 --> STEP03
-    STEP03 --> STEP04
+    STEP03 --> STEP035
+    STEP035 --> STEP04
     STEP04 --> STEP05
     STEP05 --> STEP06
     STEP06 --> STEP07
@@ -283,7 +285,8 @@ graph TD
 
 ### Deployment Sequence Notes
 
+- `cms-ha deploy` runs this whole sequence in one shot; the individual `cms-ha phase …` commands shown above are the equivalent for re-running a single phase.
 - The initial deployment requires launching the **Jumpstart node (Phase 00a)** first, as it serves as the provisioning server for all other clients.
-- **Phase 00b** is performed **sequentially in batches** (`install_by_batches.sh`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
-- The `deploy_all.sh --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
+- **Phase 00b** is performed **sequentially in batches** (`cms-ha vm install-batches`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
+- The `cms-ha deploy --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
 - Configuration phases (Puppet, DRBD, K3s, Nginx, UFW, Monitoring, and Internal CA) are **strictly sequential** due to mutual service dependencies.

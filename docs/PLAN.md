@@ -32,7 +32,7 @@ This project covers the **fully automated design, implementation, and provisioni
 
 The network is segmented into two subnets (`internal` and `main`) connected by a UFW router/firewall. The Jumpstart node (Cobbler + Puppet Server) has dual-homed presence in both networks to provision all nodes.
 
-The entire deployment is executed from a **single entry point**: `./cms-ha deploy` (or `deploy_all.sh` in the legacy v1 scripts).
+The entire deployment is executed from a **single entry point**: `./cms-ha deploy` (the legacy `deploy_all.sh` shell suite is deprecated and kept for reference only — see [`scripts/README.md`](../scripts/README.md)).
 
 ---
 
@@ -106,7 +106,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 ## Project Phases & Deployment Mapping
 
-The project structure is split between the **Project Milestones** (which correspond to the design phases documented in `docs/phases/PHASE-XX-descriptive-name.md`) and the **Technical Execution Sequence** implemented across both orchestrator engines (`cms-ha deploy` and `deploy_all.sh`).
+The project structure is split between the **Project Milestones** (which correspond to the design phases documented in `docs/phases/PHASE-XX-descriptive-name.md`) and the **Technical Execution Sequence** implemented by the Go orchestrator (`cms-ha deploy`).
 
 ### 1. Project Milestones (Design Phases)
 
@@ -127,7 +127,7 @@ The project structure is split between the **Project Milestones** (which corresp
 
 ### 2. Dual Technical Execution Sequence
 
-The deployment can be executed end-to-end via either engine, preserving identical dependency ordering:
+The deployment is executed end-to-end by the Go CLI (`cms-ha deploy`); the **Bash Script (v1)** column is the deprecated equivalent, kept for reference only (see [`scripts/README.md`](../scripts/README.md)). The dependency ordering is identical:
 
 | Phase | Go CLI (v2) | Bash Script (v1) | Description | Milestone Mapping |
 |:---:|:---|:---|:---|:---:|
