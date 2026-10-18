@@ -107,7 +107,9 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	}
 
 	// Verify HTTP / HTTPS reachability (via the keepalived VIP)
-	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool { return checkLBReachability(ctx, f.cfg.LBVIP()) }) {
+	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on Load Balancer VIP (HTTP 200/301/302)")
 	}
@@ -144,7 +146,9 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 		return
 	}
 	// Verify HTTP / HTTPS reachability (routes to cms2, via the VIP)
-	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool { return checkLBReachability(ctx, f.cfg.LBVIP()) }) {
+	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	}) {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200/301/302 after cms1 shutdown")
 	}
@@ -269,10 +273,10 @@ var lbHTTPClient = &http.Client{
 	},
 }
 
-func checkLBReachability(ctx context.Context, lbIP string) bool {
+func checkLBReachability(ctx context.Context, lbIP, vhost string) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s", lbIP), nil)
 	if err == nil {
-		req.Host = "cms.fake-enterprise.com"
+		req.Host = vhost
 		resp, err := lbHTTPClient.Do(req)
 		if err == nil {
 			defer resp.Body.Close()
@@ -281,7 +285,7 @@ func checkLBReachability(ctx context.Context, lbIP string) bool {
 	}
 	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s", lbIP), nil)
 	if err == nil {
-		reqHTTP.Host = "cms.fake-enterprise.com"
+		reqHTTP.Host = vhost
 		resp, err := lbHTTPClient.Do(reqHTTP)
 		if err == nil {
 			defer resp.Body.Close()
