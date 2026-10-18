@@ -92,18 +92,25 @@ func (v *Verifier) phase08(ctx context.Context) CheckResult {
 func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 	o := e2eOutcome{label: "CMS"}
 	base := "https://" + vip + "/"
+	// The vhost is keyed on its server name, exactly as the load profile does
+	// it: without the Host header WordPress answers with a canonical redirect.
+	vhost := v.cfg.TrafficVHost()
+	hostNote := ""
+	if vhost != "" && vhost != vip {
+		hostNote = fmt.Sprintf(" (Host: %s)", vhost)
+	}
 
-	status, body, err := httpGet(ctx, base, e2eTimeout, true)
+	status, body, err := httpGet(ctx, base, vhost, e2eTimeout, true)
 	if err != nil {
-		o.detail = fmt.Sprintf("GET %s failed: %v", base, err)
+		o.detail = fmt.Sprintf("GET %s%s failed: %v", base, hostNote, err)
 		return o
 	}
 	if status != http.StatusOK {
-		o.detail = fmt.Sprintf("GET %s returned HTTP %d", base, status)
+		o.detail = fmt.Sprintf("GET %s%s returned HTTP %d", base, hostNote, status)
 		return o
 	}
 	if !strings.Contains(strings.ToLower(body), "wp-") {
-		o.detail = fmt.Sprintf("GET %s returned HTTP 200 but no WordPress markup (first bytes: %.60q)", base, body)
+		o.detail = fmt.Sprintf("GET %s%s returned HTTP 200 but no WordPress markup (first bytes: %.60q)", base, hostNote, body)
 		return o
 	}
 
@@ -112,7 +119,7 @@ func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 	success := 0
 	lastErr := ""
 	for i := 0; i < cmsBurstRequests; i++ {
-		st, _, err := httpGet(ctx, base, e2eTimeout, true)
+		st, _, err := httpGet(ctx, base, vhost, e2eTimeout, true)
 		if err == nil && st == http.StatusOK {
 			success++
 			continue
@@ -139,13 +146,13 @@ func (v *Verifier) checkPrometheus(ctx context.Context, monitorIP string) e2eOut
 	o := e2eOutcome{label: "Prometheus"}
 	base := "http://" + monitorIP + ":9090"
 
-	if status, _, err := httpGet(ctx, base+"/-/healthy", e2eTimeout, false); err != nil || status != http.StatusOK {
+	if status, _, err := httpGet(ctx, base+"/-/healthy", "", e2eTimeout, false); err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("GET %s/-/healthy failed (HTTP %d): %v", base, status, err)
 		return o
 	}
 
 	query := url.Values{"query": {"count(up == 1)"}}
-	status, body, err := httpGet(ctx, base+"/api/v1/query?"+query.Encode(), e2eTimeout, false)
+	status, body, err := httpGet(ctx, base+"/api/v1/query?"+query.Encode(), "", e2eTimeout, false)
 	if err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("query failed (HTTP %d): %v", status, err)
 		return o
@@ -177,7 +184,7 @@ func (v *Verifier) checkGrafana(ctx context.Context, monitorIP string) e2eOutcom
 	o := e2eOutcome{label: "Grafana"}
 	endpoint := "http://" + monitorIP + ":3000/api/health"
 
-	status, body, err := httpGet(ctx, endpoint, e2eTimeout, false)
+	status, body, err := httpGet(ctx, endpoint, "", e2eTimeout, false)
 	if err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("GET %s failed (HTTP %d): %v", endpoint, status, err)
 		return o
@@ -202,13 +209,16 @@ func (v *Verifier) checkGrafana(ctx context.Context, monitorIP string) e2eOutcom
 // httpGet is a one-shot GET with a per-request timeout. insecure skips TLS
 // verification, which the CMS endpoint requires: its certificate is issued by
 // the project's own internal CA, not by a public one.
-func httpGet(ctx context.Context, rawURL string, timeout time.Duration, insecure bool) (int, string, error) {
+func httpGet(ctx context.Context, rawURL, hostHeader string, timeout time.Duration, insecure bool) (int, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, "", err
+	}
+	if hostHeader != "" {
+		req.Host = hostHeader
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
