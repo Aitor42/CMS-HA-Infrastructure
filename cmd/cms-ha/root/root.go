@@ -73,6 +73,19 @@ func init() {
 // of the repo. A user-provided path that does not exist is an error: silently
 // deploying against a different configuration is not acceptable.
 func loadConfig() (*config.Config, error) {
+	return loadConfigWith(func(cfg *config.Config) error { return cfg.Validate() })
+}
+
+// loadConfigTeardown is loadConfig without the full deployment validation, for
+// cleanup/destroy: tearing the cluster down must work even when the topology in
+// config.yaml is incomplete or temporarily broken (for example a node was
+// removed). Only the fields that steer file deletion and libvirt lookups are
+// still checked, so whatever is actually present can be removed.
+func loadConfigTeardown() (*config.Config, error) {
+	return loadConfigWith(func(cfg *config.Config) error { return cfg.ValidateTeardown() })
+}
+
+func loadConfigWith(validate func(*config.Config) error) (*config.Config, error) {
 	expanded := config.ExpandPath(configPath)
 	if _, err := os.Stat(expanded); err == nil {
 		configPath = expanded
@@ -95,7 +108,7 @@ func loadConfig() (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("invalid configuration %s: %w", configPath, err)
 	}
 	return cfg, nil

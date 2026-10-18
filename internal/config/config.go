@@ -674,6 +674,25 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ValidateTeardown performs the subset of checks that still matters when the
+// cluster is being destroyed. cleanup/destroy must be able to remove whatever
+// VMs, disks and networks are currently present even when the configuration is
+// partial or temporarily broken (for example a node was dropped, or its IP is
+// half-edited), so unlike Validate it does not require a complete deployment
+// topology. Only the values that steer file deletion and libvirt lookups are
+// still checked, because a malformed one there could remove the wrong files.
+func (c *Config) ValidateTeardown() error {
+	if c.VM.StorageDir == "" {
+		return fmt.Errorf("vm.storage_dir is required to locate disk images")
+	}
+	for _, n := range c.AllNodes() {
+		if n.Name != "" && !nodeNamePattern.MatchString(n.Name) {
+			return fmt.Errorf("node has an invalid name (letters, digits, dots, underscores, hyphens only): %q", n.Name)
+		}
+	}
+	return nil
+}
+
 var fqdnPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)

@@ -417,6 +417,38 @@ func TestConfig_Validate(t *testing.T) {
 	})
 }
 
+// TestConfig_ValidateTeardown guards the relaxed validation used by
+// cleanup/destroy: teardown must accept an incomplete topology so the operator
+// can still remove whatever VMs, disks and networks are present after the
+// config was broken.
+func TestConfig_ValidateTeardown(t *testing.T) {
+	t.Run("partial topology is accepted", func(t *testing.T) {
+		// No router, masters, LBs or VIP: none of it is needed to tear down.
+		cfg := &config.Config{
+			VM: config.VMConfig{StorageDir: "/var/lib/libvirt/images"},
+		}
+		if err := cfg.ValidateTeardown(); err != nil {
+			t.Fatalf("expected a partial config to be accepted for teardown, got: %v", err)
+		}
+	})
+
+	t.Run("storage_dir is still required", func(t *testing.T) {
+		if err := (&config.Config{}).ValidateTeardown(); err == nil {
+			t.Fatal("expected an error when vm.storage_dir is empty")
+		}
+	})
+
+	t.Run("unsafe node name is still rejected", func(t *testing.T) {
+		cfg := &config.Config{
+			VM:    config.VMConfig{StorageDir: "/var/lib/libvirt/images"},
+			Nodes: config.NodesConfig{Router: config.NodeDetail{Name: "router; rm -rf /"}},
+		}
+		if err := cfg.ValidateTeardown(); err == nil {
+			t.Fatal("expected teardown validation to reject an unsafe node name")
+		}
+	})
+}
+
 func TestConfig_HypervisorIPAndFenceCommands(t *testing.T) {
 	cfg := &config.Config{
 		Network: config.NetworkConfig{
