@@ -277,6 +277,9 @@ func FixBootOrder(ctx context.Context, l *libvirt.Client, vmNames []string) erro
 		mu.Unlock()
 	}
 	for _, vm := range vmNames {
+		if vm == "" {
+			continue
+		}
 		vmName := vm
 		wg.Add(1)
 		go func() {

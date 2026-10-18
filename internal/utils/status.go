@@ -18,7 +18,14 @@ func CheckSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, l *libvirt.C
 	timer := logging.PhaseStart("Check SSH Status")
 	defer timer.End()
 
-	nodes := cfg.AllNodes()
+	// A partial config can leave placeholder nodes with no name; there is
+	// nothing to inspect for them, so skip instead of printing blank rows.
+	var nodes []config.NodeSpec
+	for _, n := range cfg.AllNodes() {
+		if n.Name != "" {
+			nodes = append(nodes, n)
+		}
+	}
 
 	fmt.Printf("%-20s %-15s %-10s %-10s\n", "VM NAME", "IP", "STATE", "SSH")
 	fmt.Println(strings.Repeat("-", 60))
