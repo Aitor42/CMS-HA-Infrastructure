@@ -5,7 +5,7 @@ name: Probe hosted runner (throwaway)
 # runner can actually do for the KVM lab:
 #   - is /dev/kvm present and usable (functional test with qemu -accel kvm)?
 #   - how much RAM and free disk does the runner really have?
-#   - can libvirt be installed and a domain be created there?
+#   - which virt-install 4.1 arguments actually create a PXE client domain?
 # Delete this file and the branch once the output has been read; it is not part
 # of the project's CI.
 
@@ -84,10 +84,10 @@ jobs:
             echo "KVM TEST: FAILED (see qemu error above)"
           fi
 
-      - name: virt-install 4.1 argument matrix and the default network
+      - name: Reproduce the real PXE client command on virt-install 4.1
         continue-on-error: true
         run: |
-          set -x
+          set -u
           sudo apt-get install -y -qq virtinst libvirt-daemon-system libvirt-clients >/dev/null
           for u in virtproxyd.socket virtqemud.socket virtnetworkd.socket \
                    virtstoraged.socket virtnodedevd.socket virtlogd.socket; do
@@ -96,48 +96,55 @@ jobs:
           sleep 3
           sudo chmod 0777 /var/run/libvirt/libvirt-sock 2>/dev/null || true
 
-          echo "==== defining the NAT 'default' network (missing on this image) ===="
-          cat > /tmp/default.xml <<'XML'
-          <network>
-            <name>default</name>
-            <forward mode='nat'/>
-            <bridge name='virbr0' stp='on' delay='0'/>
-            <ip address='192.168.122.1' netmask='255.255.255.0'>
-              <dhcp>
-                <range start='192.168.122.2' end='192.168.122.254'/>
-              </dhcp>
-            </ip>
-          </network>
-          XML
-          sudo virsh net-define /tmp/default.xml || true
-          sudo virsh net-start default || true
-          sudo virsh net-autostart default || true
-          virsh net-list --all
-          ip -brief addr show virbr0 || true
+          # Everything below prints single-line RESULT| records so that the
+          # parallel job output cannot interleave them.
+          printf 'RESULT|virt_install_version|%s\n' "$(virt-install --version)"
+          printf 'RESULT|default_net_initial|%s\n' \
+            "$(virsh -c qemu:///system net-list --all 2>&1 | tr '\n' ' ')"
 
-          echo "==== virt-install version ===="
-          virt-install --version
+          mknet() {
+            local name="$1" net="$2"
+            printf '<network><name>%s</name><forward mode="nat"/><bridge name="virbr-%s" stp="on" delay="0"/><ip address="%s.1" netmask="255.255.255.0"><dhcp><range start="%s.2" end="%s.254"/></dhcp></ip></network>' \
+              "$name" "$name" "$net" "$net" "$net" > "/tmp/net-$name.xml"
+            sudo virsh net-define "/tmp/net-$name.xml" >/dev/null 2>&1 || true
+            sudo virsh net-start "$name" >/dev/null 2>&1 || true
+          }
+          # Same two lab networks the orchestrator creates before the router.
+          mknet internal 192.168.10
+          mknet main 192.168.20
 
-          i=0
-          for spec in "--boot hd,network" "--pxe" "--pxe --boot hd,network" "--boot network,hd"; do
-            i=$((i + 1))
-            echo "===== args: $spec ====="
-            # --print-xml emits two documents: the install-time domain and the
-            # post-install one. Only the second one's boot order matters.
-            # shellcheck disable=SC2086
-            out="$(virt-install --connect qemu:///system --name probe-$i --memory 512 \
-              --vcpus 1 --os-variant ubuntu24.04 \
-              --disk path=/tmp/probe-$i.qcow2,size=1,format=qcow2,bus=virtio \
-              --network network=default,model=virtio \
-              $spec --wait 0 --noautoconsole --print-xml 2>&1)"
+          run_case() {
+            local label="$1"; shift
+            local name="probe-$label" out rc boots state
+            out="$(virt-install --connect qemu:///system --name "$name" \
+              --memory 3072 --vcpus 1 --os-variant ubuntu24.04 \
+              --disk "path=/tmp/$name.qcow2,size=5,format=qcow2,bus=virtio" \
+              --network network=internal,model=virtio,mac=52:54:00:11:22:01 \
+              --network network=main,model=virtio,mac=52:54:00:11:22:02 \
+              --network network=default,model=virtio,mac=52:54:00:11:22:03 \
+              "$@" --wait 0 --noautoconsole 2>&1)"
             rc=$?
-            echo "exit=$rc"
-            echo "$out" | grep -E "ERROR|install method" || echo "(no error)"
-            echo "documents: $(echo "$out" | grep -c '<os>')"
-            echo "boot devices in order:"
-            echo "$out" | grep "<boot dev=" | cat -n
-          done
-          rm -f /tmp/probe-*.qcow2
+            printf 'RESULT|case=%s|rc=%s|out=%s\n' "$label" "$rc" \
+              "$(printf '%s' "$out" | tr '\n' ' ' | tr -s ' ' | cut -c1-220)"
+            boots="$(virsh -c qemu:///system dumpxml "$name" 2>/dev/null \
+              | grep -o '<boot dev="[a-z]*"' | tr '\n' ' ')"
+            state="$(virsh -c qemu:///system domstate "$name" 2>/dev/null || echo none)"
+            printf 'RESULT|case=%s|boot_order=%s|state=%s\n' "$label" "${boots:-none}" "$state"
+            sudo virsh -c qemu:///system destroy "$name" >/dev/null 2>&1 || true
+            sudo virsh -c qemu:///system undefine "$name" >/dev/null 2>&1 || true
+            sudo rm -f "/tmp/$name.qcow2"
+          }
+
+          # Exactly what the orchestrator builds today for ufw-router:
+          # PXE=true plus BootOrder ["hd","network"] => only --boot is passed.
+          run_case current --boot hd,network
+
+          # The candidate fix: give virt-install an explicit install method
+          # while keeping the post-install boot order.
+          run_case pxe_fix --pxe --boot hd,network
+
+          # Fallback if the boot order is not preserved: PXE first, disk next.
+          run_case pxe_only --pxe
 
       - name: Can libvirt work here?
         continue-on-error: true
