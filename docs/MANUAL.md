@@ -130,7 +130,8 @@ Run the command that automates the creation and installation of client nodes in 
     ```bash
     ./cms-ha vm fix-boot-order
     ```
-*   **Batch SSH Budget:** `deploy.node_install_timeout` (default `15m`) bounds how long a whole batch may take to install and answer SSH. The nodes of a batch install in parallel and share the host's vCPUs, so hosts with few cores need a larger budget — the hosted CI lab, which has 4 vCPU for the entire topology, uses `30m`.
+*   **Batch SSH Budget:** `deploy.node_install_timeout` (default `15m`) bounds how long a whole batch may take to install and answer SSH. The nodes of a batch install in parallel and share the host's vCPUs, so hosts with few cores need a larger budget — the hosted CI lab, which has 4 vCPU for the entire topology, uses `20m`.
+*   **Watching for the installed system, not the installer:** During a batch the live installer answers on port 22 too, but it refuses the deployment key by design; only the installed system accepts it. If a node goes silent right after its installer was answering, its shutdown wedged (the live media is an NFS mount whose squashfs stays loop-mounted, so `/cdrom` cannot be unmounted and the guest never reboots). The batch restarts such a node from the host, and since the boot order is already disk-first it comes straight back into the installed system. A healthy node reboots well inside that window and is never restarted.
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
 
