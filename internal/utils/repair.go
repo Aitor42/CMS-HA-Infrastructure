@@ -27,12 +27,19 @@ func SyncClocks(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 	}
 
 	results := s.RunParallel(ctx, validIPs, cmd)
+	failed := 0
 	for _, res := range results {
 		if res.Err != nil {
 			logging.Warn("Failed to sync clock on %s: %v", res.Host, res.Err)
+			failed++
 		} else {
 			logging.Info("Synced clock on %s", res.Host)
 		}
+	}
+	// Report a total failure instead of silently succeeding: a repair command
+	// that touched nothing must not look like it worked.
+	if len(validIPs) > 0 && failed == len(validIPs) {
+		return fmt.Errorf("failed to sync the clock on all %d host(s)", failed)
 	}
 
 	return nil
