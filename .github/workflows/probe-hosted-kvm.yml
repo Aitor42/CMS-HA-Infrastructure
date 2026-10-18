@@ -84,6 +84,61 @@ jobs:
             echo "KVM TEST: FAILED (see qemu error above)"
           fi
 
+      - name: virt-install 4.1 argument matrix and the default network
+        continue-on-error: true
+        run: |
+          set -x
+          sudo apt-get install -y -qq virtinst libvirt-daemon-system libvirt-clients >/dev/null
+          for u in virtproxyd.socket virtqemud.socket virtnetworkd.socket \
+                   virtstoraged.socket virtnodedevd.socket virtlogd.socket; do
+            sudo systemctl start "$u" 2>/dev/null || true
+          done
+          sleep 3
+          sudo chmod 0777 /var/run/libvirt/libvirt-sock 2>/dev/null || true
+
+          echo "==== defining the NAT 'default' network (missing on this image) ===="
+          cat > /tmp/default.xml <<'XML'
+          <network>
+            <name>default</name>
+            <forward mode='nat'/>
+            <bridge name='virbr0' stp='on' delay='0'/>
+            <ip address='192.168.122.1' netmask='255.255.255.0'>
+              <dhcp>
+                <range start='192.168.122.2' end='192.168.122.254'/>
+              </dhcp>
+            </ip>
+          </network>
+          XML
+          sudo virsh net-define /tmp/default.xml || true
+          sudo virsh net-start default || true
+          sudo virsh net-autostart default || true
+          virsh net-list --all
+          ip -brief addr show virbr0 || true
+
+          echo "==== virt-install version ===="
+          virt-install --version
+
+          i=0
+          for spec in "--boot hd,network" "--pxe" "--pxe --boot hd,network" "--boot network,hd"; do
+            i=$((i + 1))
+            echo "===== args: $spec ====="
+            # --print-xml emits two documents: the install-time domain and the
+            # post-install one. Only the second one's boot order matters.
+            # shellcheck disable=SC2086
+            out="$(virt-install --connect qemu:///system --name probe-$i --memory 512 \
+              --vcpus 1 --os-variant ubuntu24.04 \
+              --disk path=/tmp/probe-$i.qcow2,size=1,format=qcow2,bus=virtio \
+              --network network=default,model=virtio \
+              $spec --wait 0 --noautoconsole --print-xml 2>&1)"
+            rc=$?
+            echo "exit=$rc"
+            echo "$out" | grep -E "ERROR|install method" || echo "(no error)"
+            echo "documents: $(echo "$out" | grep -c '<os>')"
+            echo "boot devices in order:"
+            echo "$out" | grep "<boot dev=" | cat -n
+          done
+          rm -f /tmp/probe-*.qcow2
+
       - name: Can libvirt work here?
         continue-on-error: true
         run: |
