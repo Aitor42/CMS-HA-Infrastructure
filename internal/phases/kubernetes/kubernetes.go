@@ -131,7 +131,9 @@ func (p *Phase) Run(ctx context.Context) error {
 	agentJoinCmd := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443 INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\"; curl -sfL https://get.k3s.io | sh -", joinTokenPath, master1.IP)
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
-		workerIPs = append(workerIPs, w.IP)
+		if w.IP != "" {
+			workerIPs = append(workerIPs, w.IP)
+		}
 	}
 
 	for _, r := range p.pool.RunParallel(ctx, workerIPs, agentJoinCmd) {
