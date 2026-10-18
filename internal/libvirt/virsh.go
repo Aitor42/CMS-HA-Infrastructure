@@ -128,7 +128,13 @@ func (c *Client) DomainExistsChecked(ctx context.Context, name string) (bool, er
 		return false, err
 	}
 	for _, domain := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(domain) == name {
+		domain = strings.TrimSpace(domain)
+		// Empty output lines (notably the trailing newline) must not match an
+		// empty or placeholder node name and report a domain that isn't there.
+		if domain == "" {
+			continue
+		}
+		if domain == name {
 			return true, nil
 		}
 	}
