@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -228,27 +229,38 @@ func ShrinkVMRAM(ctx context.Context, cfg *config.Config, l *libvirt.Client) err
 		return fmt.Errorf("list domains: %w", err)
 	}
 
-	for vm, mem := range vms {
-		if vm == "" {
+	// Sort the target names so the operation is deterministic, and refuse to
+	// start if any VM is running: checking every VM first avoids shrinking only
+	// some of them before aborting (map iteration order made that random).
+	names := make([]string, 0, len(vms))
+	for name := range vms {
+		if name == "" {
 			continue
 		}
-		state, exists := states[vm]
-		if !exists {
+		if state, ok := states[name]; ok && state == "running" {
+			return fmt.Errorf("VM %s is running; shut it down before shrinking RAM", name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var errs []error
+	for _, vm := range names {
+		if _, ok := states[vm]; !ok {
 			continue
 		}
-		if state == "running" {
-			return fmt.Errorf("VM %s is running; shut it down before shrinking RAM", vm)
-		}
-		kib := int64(mem * 1024)
+		kib := int64(vms[vm] * 1024)
 		if err := l.SetMaxMemory(ctx, vm, kib); err != nil {
-			return fmt.Errorf("set maximum memory for %s: %w", vm, err)
+			errs = append(errs, fmt.Errorf("set maximum memory for %s: %w", vm, err))
+			continue
 		}
 		if err := l.SetMemory(ctx, vm, kib); err != nil {
-			return fmt.Errorf("set memory for %s: %w", vm, err)
+			errs = append(errs, fmt.Errorf("set memory for %s: %w", vm, err))
+			continue
 		}
-		logging.Success("Shrank RAM for %s to %d MB", vm, mem)
+		logging.Success("Shrank RAM for %s to %d MB", vm, vms[vm])
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // FixBootOrder modifies VM XML in parallel to ensure hd boots before network.
