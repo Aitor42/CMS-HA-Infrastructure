@@ -230,7 +230,12 @@ jobs:
 
       - name: gosec — Go SAST (fails on HIGH)
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          # Pin to the commit that bumps golang.org/x/tools: the v2.29.0
+          # release cannot load the export data of the current Go stable
+          # toolchain and reports spurious "type errors" for every package
+          # (exit 1 with no findings). Revert to @latest once a tagged
+          # release includes the fix.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261015133444-707f2271f665
           gosec -severity high -confidence medium -exclude-dir=tests -fmt sarif -out gosec.sarif ./...
           echo "✔ gosec: no HIGH findings"
 
