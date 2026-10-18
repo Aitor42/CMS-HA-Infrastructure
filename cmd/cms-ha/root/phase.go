@@ -25,9 +25,21 @@ func init() {
 	rootCmd.AddCommand(phaseCmd)
 
 	initVMsCmd := &cobra.Command{
-		Use: "init-vms",
+		Use:   "init-vms",
+		Short: "Initialize libvirt networks and VMs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			jumpstartOnly, _ := cmd.Flags().GetBool("jumpstart-only")
+			nodesOnly, _ := cmd.Flags().GetBool("nodes-only")
+			cleanup, _ := cmd.Flags().GetBool("cleanup")
+			recreate, _ := cmd.Flags().GetBool("recreate")
+
+			// --cleanup only removes what is present, so it must tolerate an
+			// incomplete config exactly like `cms-ha cleanup`/`destroy`.
+			load := loadConfig
+			if cleanup {
+				load = loadConfigPartial
+			}
+			cfg, err := load()
 			if err != nil {
 				return err
 			}
@@ -37,11 +49,6 @@ func init() {
 			}
 			defer pool.Close()
 			lv := newLibvirtClient(cfg)
-
-			jumpstartOnly, _ := cmd.Flags().GetBool("jumpstart-only")
-			nodesOnly, _ := cmd.Flags().GetBool("nodes-only")
-			cleanup, _ := cmd.Flags().GetBool("cleanup")
-			recreate, _ := cmd.Flags().GetBool("recreate")
 
 			opts := initvms.Options{
 				JumpstartOnly: jumpstartOnly,

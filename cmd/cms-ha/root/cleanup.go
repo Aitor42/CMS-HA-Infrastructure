@@ -32,7 +32,7 @@ var cleanupCmd = &cobra.Command{
 
 		// Teardown uses the relaxed loader: it must be able to remove whatever
 		// exists even if config.yaml no longer describes a complete cluster.
-		cfg, err := loadConfigTeardown()
+		cfg, err := loadConfigPartial()
 		if err != nil {
 			return err
 		}

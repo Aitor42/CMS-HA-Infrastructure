@@ -674,14 +674,17 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ValidateTeardown performs the subset of checks that still matters when the
-// cluster is being destroyed. cleanup/destroy must be able to remove whatever
-// VMs, disks and networks are currently present even when the configuration is
-// partial or temporarily broken (for example a node was dropped, or its IP is
-// half-edited), so unlike Validate it does not require a complete deployment
-// topology. Only the values that steer file deletion and libvirt lookups are
-// still checked, because a malformed one there could remove the wrong files.
-func (c *Config) ValidateTeardown() error {
+// ValidatePartial performs the subset of checks that still matters for
+// commands acting on whatever resources are currently present, rather than on
+// a complete deployment: teardown (cleanup/destroy), VM lifecycle (vm
+// start/stop/shrink/recreate/fix-boot-order), status and repair. Those must
+// work even when the topology in config.yaml is partial or temporarily broken
+// (for example a node was dropped, or its IP is half-edited), so unlike
+// Validate it does not require a complete deployment topology. Only the values
+// that steer file deletion, libvirt lookups and node identification are still
+// checked, because a malformed one there could remove or touch the wrong
+// resources.
+func (c *Config) ValidatePartial() error {
 	if c.VM.StorageDir == "" {
 		return fmt.Errorf("vm.storage_dir is required to locate disk images")
 	}

@@ -14,9 +14,10 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 
 	sshCmd := &cobra.Command{
-		Use: "ssh",
+		Use:   "ssh",
+		Short: "Check SSH connectivity to all configured nodes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}

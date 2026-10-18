@@ -67,8 +67,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 
-	if err := p.preflightChecks(ctx); err != nil {
-		return fmt.Errorf("preflight checks failed: %w", err)
+	// Cleanup only talks to libvirt, so it must not require the VM-creation
+	// tooling (virt-install, xorrisofs, qemu-img) nor a valid hotdesk count:
+	// tearing down has to work even on a host that can no longer deploy.
+	if !p.opts.Cleanup {
+		if err := p.preflightChecks(ctx); err != nil {
+			return fmt.Errorf("preflight checks failed: %w", err)
+		}
 	}
 
 	if p.opts.Cleanup {
@@ -648,6 +653,9 @@ func (p *Phase) cleanupWithOptions(ctx context.Context, opts CleanupOptions) err
 			errs = append(errs, fmt.Errorf("list domains: %w", err))
 		} else {
 			for _, node := range allNodes {
+				if node.Name == "" {
+					continue
+				}
 				state, exists := states[node.Name]
 				if err := p.destroyVM(ctx, node.Name, state, exists); err != nil {
 					errs = append(errs, fmt.Errorf("remove VM %s: %w", node.Name, err))

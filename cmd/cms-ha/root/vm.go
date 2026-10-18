@@ -18,8 +18,9 @@ func init() {
 	startCmd := &cobra.Command{
 		Use:     "start",
 		Aliases: []string{"start-all"},
+		Short:   "Start all VMs in dependency order",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}
@@ -34,7 +35,7 @@ func init() {
 		Aliases: []string{"stop-all"},
 		Short:   "Stop all VMs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}
@@ -55,8 +56,9 @@ func init() {
 	shrinkCmd := &cobra.Command{
 		Use:     "shrink",
 		Aliases: []string{"shrink-ram"},
+		Short:   "Shrink VM RAM to the production sizing",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}
@@ -69,8 +71,9 @@ func init() {
 	fixBootCmd := &cobra.Command{
 		Use:     "fix-boot-order",
 		Aliases: []string{"fix-boot"},
+		Short:   "Ensure disks boot before the network interface",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}
@@ -87,7 +90,8 @@ func init() {
 	vmCmd.AddCommand(fixBootCmd)
 
 	installBatchesCmd := &cobra.Command{
-		Use: "install-batches",
+		Use:   "install-batches",
+		Short: "Install client nodes in batches via PXE",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
@@ -108,8 +112,9 @@ func init() {
 	recreateCmd := &cobra.Command{
 		Use:     "recreate",
 		Aliases: []string{"recreate-failed"},
+		Short:   "Recreate VMs that failed verification",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}

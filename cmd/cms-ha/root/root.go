@@ -76,13 +76,15 @@ func loadConfig() (*config.Config, error) {
 	return loadConfigWith(func(cfg *config.Config) error { return cfg.Validate() })
 }
 
-// loadConfigTeardown is loadConfig without the full deployment validation, for
-// cleanup/destroy: tearing the cluster down must work even when the topology in
+// loadConfigPartial is loadConfig without the full deployment validation, for
+// commands that operate on whatever resources are present (cleanup/destroy,
+// VM lifecycle, status and repair). Those must work even when the topology in
 // config.yaml is incomplete or temporarily broken (for example a node was
-// removed). Only the fields that steer file deletion and libvirt lookups are
-// still checked, so whatever is actually present can be removed.
-func loadConfigTeardown() (*config.Config, error) {
-	return loadConfigWith(func(cfg *config.Config) error { return cfg.ValidateTeardown() })
+// removed). Only the fields that steer file deletion, libvirt lookups and node
+// identification are still checked, so whatever is actually present can be
+// managed or removed.
+func loadConfigPartial() (*config.Config, error) {
+	return loadConfigWith(func(cfg *config.Config) error { return cfg.ValidatePartial() })
 }
 
 func loadConfigWith(validate func(*config.Config) error) (*config.Config, error) {

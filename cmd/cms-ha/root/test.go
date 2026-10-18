@@ -14,9 +14,10 @@ func init() {
 	rootCmd.AddCommand(testCmd)
 
 	failoverCmd := &cobra.Command{
-		Use: "failover",
+		Use:   "failover",
+		Short: "Run the HA failover test (DRBD, CMS frontend, K3s worker)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}

@@ -14,9 +14,10 @@ func init() {
 	rootCmd.AddCommand(repairCmd)
 
 	k8sCmd := &cobra.Command{
-		Use: "k8s",
+		Use:   "k8s",
+		Short: "Repair the Kubernetes cluster (k3s quorum and node state)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}
@@ -31,9 +32,10 @@ func init() {
 	repairCmd.AddCommand(k8sCmd)
 
 	clocksCmd := &cobra.Command{
-		Use: "clocks",
+		Use:   "clocks",
+		Short: "Sync the clock on all configured nodes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadConfigPartial()
 			if err != nil {
 				return err
 			}
