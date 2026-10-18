@@ -503,7 +503,8 @@ Automated failover tests validate the HA design under real failure conditions:
 `tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
 a real KVM host: **build → `deploy` → `verify` → `test failover`**. It is the job
 that `.github/workflows/integration.yml` runs on a **self-hosted runner labelled
-`kvm`** (nightly and on demand), because it needs libvirt and `/dev/kvm`.
+`kvm`**, triggered by hand (`workflow_dispatch`), because it needs libvirt and
+`/dev/kvm`.
 
 ```bash
 make integration           # full deploy + verify + failover
@@ -541,7 +542,7 @@ The GitHub Actions CI validates every push and pull request:
 | Puppet Lint | puppet-lint | All `.pp` manifests |
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
 | Security Scan | gosec + govulncheck + Trivy | Go SAST, dependency CVEs, secrets/misconfig |
-| Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + DRBD failover (nightly / on demand) |
+| Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + DRBD failover (manual dispatch) |
 
 ---
 

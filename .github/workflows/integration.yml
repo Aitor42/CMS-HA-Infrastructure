@@ -26,9 +26,11 @@ on:
         description: "Destroy the lab (VMs, disks, networks) after the run"
         type: boolean
         default: false
-  schedule:
-    # Nightly, so that drift in the hardware lab is caught without a human.
-    - cron: "0 3 * * *"
+
+# Manual trigger only. The `kvm` runner is not provisioned automatically, so a
+# scheduled trigger would just queue runs that never start (see docs/MANUAL.md
+# for the runner prerequisites). Re-add a `schedule` block once a runner is
+# registered and the nightly drift check is wanted again.
 
 # A single physical hypervisor cannot run two labs at once: serialise the runs.
 concurrency:

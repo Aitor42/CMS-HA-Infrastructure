@@ -363,8 +363,10 @@ Disk State: UpToDate/UpToDate
 
 `tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
 a real KVM host — **build → `deploy` → `verify` → `test failover`** — and is the
-entry point of the `Integration (KVM lab)` workflow, which runs on a self-hosted
-runner labelled `kvm` (nightly and on demand):
+entry point of the `Integration (KVM lab)` workflow. That workflow targets a
+self-hosted runner labelled `kvm` and is **manual only** (`workflow_dispatch`):
+the runner is not provisioned automatically, so it is started by hand when the
+lab host is free.
 
 ```bash
 make integration                 # full deploy + verify + DRBD failover
