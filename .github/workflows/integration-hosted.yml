@@ -1,0 +1,252 @@
+name: Integration (KVM lab, hosted)
+
+# Free, GitHub-hosted counterpart of the self-hosted `Integration (KVM lab)`
+# gate: it runs the same deploy -> verify -> DRBD failover pipeline, but on a
+# standard `ubuntu-latest` runner instead of a dedicated lab host.
+#
+# Why it can work at all (measured on 2026-10-18, see the probe in git history):
+#   * hosted Linux runners do expose /dev/kvm — nested virtualisation was
+#     enabled for the Android emulator — and it is functional: `kvm-ok` passes
+#     and `qemu-system-x86_64 -accel kvm` starts a guest;
+#   * the "14 GB SSD" in GitHub's docs is stale: the runner reports 145 GB on
+#     /, 86 GB free (113 GB after deleting the preinstalled SDKs);
+#   * the real limits are 4 vCPU and 15 GiB of RAM + 3 GiB swap.
+#
+# That is why it deploys `config.ci.yaml` (identical to config.yaml except the
+# three client hotdesks are dropped: 13 VMs instead of 16, ~12.7 GB of guest
+# RAM) and why it is manual only: a full run takes tens of minutes and holds a
+# whole runner for the duration. The full 16-VM topology is still covered by
+# `integration.yml` on a self-hosted `kvm` runner.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "provision = stop after the PXE phases; full = deploy + verify + failover"
+        type: choice
+        options: ["full", "provision"]
+        default: "full"
+      skip_chaos:
+        description: "Skip the DRBD failover chaos exercise"
+        type: boolean
+        default: false
+      teardown:
+        description: "Run `cleanup` at the end (the runner is thrown away anyway; proves the teardown path)"
+        type: boolean
+        default: false
+  # Temporary: lets the branch be iterated on without dispatching by hand.
+  push:
+    branches: ["ci/hosted-runner-lab"]
+
+concurrency:
+  group: integration-hosted-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BASE_CONFIG: config.ci.yaml
+  # The workflow renders BASE_CONFIG into this throwaway copy, with freshly
+  # generated credentials, so no secret is ever committed.
+  CONFIG: config.ci.local.yaml
+  STATE_FILE: deploy.state
+  ARTIFACTS_DIR: integration-artifacts
+
+jobs:
+  integration:
+    name: Deploy + verify + failover (hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # The lab needs tens of GB of qcow2 images; the runner image carries
+          # ~27 GB of Android/.NET/Haskell/Node SDKs we will never touch.
+          sudo rm -rf /usr/local/lib/android \
+                      /usr/share/dotnet \
+                      /opt/hostedtoolcache \
+                      /usr/local/.ghcup \
+                      /usr/local/share/boost \
+                      /usr/share/swift
+          df -h /
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+          cache: true
+
+      - name: Install the hypervisor stack
+        run: |
+          set -x
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virtinst \
+            xorriso dnsmasq-base bridge-utils openssh-server python3-yaml >/dev/null
+
+          # /dev/kvm is present but owned root:kvm with mode 0660.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm
+
+          # libvirt must be able to traverse the home directory to reach
+          # ${HOME}/vm_storage, where the lab keeps its disk images.
+          chmod o+x "$HOME"
+
+          # Ubuntu ships AppArmor enabled; its libvirt profile is the classic
+          # source of "qemu: could not open disk image" for disks outside
+          # /var/lib/libvirt. This is a disposable CI sandbox, so drop it.
+          sudo systemctl stop apparmor 2>/dev/null || true
+
+          # Start libvirt and make its socket reachable by the runner user,
+          # who is not in the `libvirt` group for the current session.
+          for u in virtproxyd.socket virtqemud.socket virtnetworkd.socket \
+                   virtstoraged.socket virtnodedevd.socket virtinterfaced.socket \
+                   virtsecretd.socket virtlogd.socket; do
+            sudo systemctl start "$u" 2>/dev/null || true
+          done
+          sudo systemctl start libvirtd 2>/dev/null || true
+          for _ in $(seq 30); do
+            [ -S /var/run/libvirt/libvirt-sock ] && break
+            sleep 1
+          done
+          sudo chmod 0777 /var/run/libvirt/libvirt-sock \
+                            /var/run/libvirt/libvirt-sock-ro 2>/dev/null || true
+
+          # The router uses libvirt's NAT network as its WAN uplink; the lab's
+          # own virbr-int / virbr-main networks are created by `phase init-vms`.
+          sudo virsh net-start default 2>/dev/null || true
+          sudo virsh net-autostart default 2>/dev/null || true
+
+          # sshd must listen on the future bridge address (.254) because the
+          # DRBD fence command powers off the failed peer over SSH+virsh.
+          sudo systemctl start ssh 2>/dev/null || sudo systemctl start sshd 2>/dev/null || true
+
+          echo "==== libvirt ==="
+          virsh version
+          virsh net-list --all
+          echo "==== kvm ===="
+          sudo apt-get install -y -qq cpu-checker >/dev/null
+          sudo kvm-ok
+          echo "==== listeners ===="
+          ss -ltn | grep -E ':(22|16509)\b' || true
+
+      - name: Prepare SSH keys
+        run: |
+          ssh-keygen -t ed25519 -N "" -C "cms-ha CI key" \
+            -f "$HOME/.ssh/id_ed25519_gar"
+          chmod 600 "$HOME/.ssh/id_ed25519_gar"
+
+      - name: Download the Ubuntu 24.04 server ISO
+        run: |
+          mkdir -p "$HOME/vm_storage"
+          BASE="https://releases.ubuntu.com/24.04"
+          # Do not hardcode a point release: the name changes with every LTS
+          # update and old ones eventually disappear from the mirror.
+          ISO_NAME="$(curl -fsSL "$BASE/" \
+            | grep -oE 'ubuntu-24\.04(\.[0-9]+)?-live-server-amd64\.iso' \
+            | sort -u | sort -V | tail -n 1)"
+          test -n "$ISO_NAME"
+          echo "Downloading $ISO_NAME"
+          curl -fL --retry 3 --retry-delay 5 -o "$HOME/vm_storage/$ISO_NAME" \
+            "$BASE/$ISO_NAME"
+          ls -lh "$HOME/vm_storage/"
+          # A truncated download would fail much later, inside Cobbler.
+          SIZE=$(stat -c %s "$HOME/vm_storage/$ISO_NAME")
+          test "$SIZE" -gt 1000000000
+
+      - name: Render the CI configuration with fresh credentials
+        run: |
+          umask 077
+          python3 - <<'PY'
+          import pathlib, secrets, yaml
+
+          def pw():
+              return secrets.token_urlsafe(24)
+
+          cfg = yaml.safe_load(pathlib.Path("config.ci.yaml").read_text())
+          cfg["database"].update(
+              password=pw(), root_password=pw(), exporter_password=pw()
+          )
+          cfg["wordpress"]["admin_password"] = pw()
+          cfg["backup"]["secret_key"] = pw()
+          cfg["pki"]["provisioner_password"] = pw()
+
+          out = pathlib.Path("config.ci.local.yaml")
+          out.write_text(yaml.safe_dump(cfg, sort_keys=False))
+          print(f"{out} written with generated secrets")
+          PY
+          # Fail early if the topology is not what this workflow expects.
+          python3 - <<'PY'
+          import yaml
+          cfg = yaml.safe_load(open("config.ci.local.yaml"))
+          assert cfg["nodes"]["hotdesks"]["count"] == 0, "hotdesks must be 0 for the hosted lab"
+          print("hotdesks:", cfg["nodes"]["hotdesks"]["count"],
+                "| VMs:", 1 + 1 + len(cfg["nodes"]["masters"]) + len(cfg["nodes"]["workers"])
+                + 1 + 1 + len(cfg["nodes"]["lbs"]) + len(cfg["nodes"]["cms_frontends"]))
+          PY
+
+      - name: Provision the lab (PXE phases only)
+        if: ${{ inputs.stage == 'provision' }}
+        env:
+          STAGE: ${{ inputs.stage }}
+        run: |
+          set -o pipefail
+          mkdir -p "$ARTIFACTS_DIR"
+          make build
+          ./cms-ha -c "$CONFIG" phase init-vms       | tee "$ARTIFACTS_DIR/00-init-vms.log"
+          ./cms-ha -c "$CONFIG" phase setup-cobbler  | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
+          ./cms-ha -c "$CONFIG" phase register-nodes | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+          ./cms-ha -c "$CONFIG" status ssh
+
+      - name: Run the integration test (deploy + verify + failover)
+        if: ${{ inputs.stage == 'full' || inputs.stage == '' }}
+        env:
+          SKIP_CHAOS: ${{ inputs.skip_chaos }}
+        run: |
+          set -o pipefail
+          ARGS=()
+          if [ "$SKIP_CHAOS" = "true" ]; then
+            ARGS+=(--skip-chaos)
+          fi
+          CONFIG="$CONFIG" STATE_FILE="$STATE_FILE" ARTIFACTS_DIR="$ARTIFACTS_DIR" \
+            tests/integration/run.sh "${ARGS[@]}"
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p "$ARTIFACTS_DIR"
+          {
+            echo "==== date ===="; date -u
+            echo "==== domains ===="; virsh -c qemu:///system list --all || true
+            echo "==== networks ===="; virsh -c qemu:///system net-list --all || true
+            echo "==== memory ===="; free -h
+            echo "==== disk ===="; df -h / "$HOME/vm_storage"
+            echo "==== vm storage ===="; du -sh "$HOME"/vm_storage/* 2>/dev/null || true
+            echo "==== deploy.state ===="; cat "$STATE_FILE" 2>/dev/null || true
+            echo "==== apparmor ===="; sudo aa-status 2>&1 | head -20 || true
+            echo "==== libvirt journal ===="
+            sudo journalctl -u virtqemud -u virtnetworkd -u libvirtd \
+              --no-pager -n 200 2>/dev/null || true
+            echo "==== qemu domain logs ===="
+            sudo tail -n 60 /var/log/libvirt/qemu/*.log 2>/dev/null || true
+            echo "==== dmesg (kvm/oom) ===="
+            sudo dmesg 2>/dev/null | grep -iE "kvm|oom|killed process" | tail -n 40 || true
+          } > "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-hosted-artifacts
+          path: integration-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Tear the lab down
+        if: ${{ inputs.teardown && always() }}
+        run: ./cms-ha -c "$CONFIG" cleanup --yes || true

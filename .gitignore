@@ -5,6 +5,10 @@ token.txt
 .env.*
 *-secret.yaml
 
+# Hosted CI renders config.ci.yaml (no secrets) into this throwaway copy with
+# freshly generated credentials; it must never be committed.
+config.ci.local.yaml
+
 # Test files
 prueba
 
