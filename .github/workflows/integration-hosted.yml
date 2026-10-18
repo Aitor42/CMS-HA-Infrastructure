@@ -72,6 +72,20 @@ jobs:
                       /usr/share/swift
           df -h /
 
+      - name: Add swap space
+        run: |
+          # 15 GiB of RAM cannot hold the whole lab at once: the reduced
+          # topology still asks for 3-4 GB per node while the installer runs.
+          # The disk is plentiful, so back the overcommit with swap — the PXE
+          # installers are I/O bound and would much rather swap than be
+          # OOM-killed. Both are thrown away with the runner.
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=16384 status=none
+          sudo chmod 600 /swapfile
+          sudo mkswap -q /swapfile
+          sudo swapon /swapfile
+          swapon --show
+          free -h
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -190,15 +204,26 @@ jobs:
                 + 1 + 1 + len(cfg["nodes"]["lbs"]) + len(cfg["nodes"]["cms_frontends"]))
           PY
 
-      - name: Provision the lab (PXE phases only)
+      - name: Provision the lab (jumpstart, Cobbler and PXE clients)
         if: ${{ inputs.stage != 'full' }}
         run: |
           set -o pipefail
           mkdir -p "$ARTIFACTS_DIR"
           make build
-          ./cms-ha -c "$CONFIG" phase init-vms       | tee "$ARTIFACTS_DIR/00-init-vms.log"
-          ./cms-ha -c "$CONFIG" phase setup-cobbler  | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
-          ./cms-ha -c "$CONFIG" phase register-nodes | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+
+          # The documented order: jumpstart first, then Cobbler, then the node
+          # templates. `vm install-batches` then creates and installs the
+          # clients one batch at a time, so the 15 GiB runner never has to hold
+          # the whole topology at once — which is exactly why the manual
+          # prescribes the batched path for RAM-limited hosts.
+          ./cms-ha -c "$CONFIG" phase init-vms --jumpstart-only \
+            | tee "$ARTIFACTS_DIR/00-init-jumpstart.log"
+          ./cms-ha -c "$CONFIG" phase setup-cobbler \
+            | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
+          ./cms-ha -c "$CONFIG" phase register-nodes \
+            | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+          ./cms-ha -c "$CONFIG" vm install-batches \
+            | tee "$ARTIFACTS_DIR/03-install-batches.log"
           ./cms-ha -c "$CONFIG" status ssh
 
       - name: Run the integration test (deploy + verify + failover)
