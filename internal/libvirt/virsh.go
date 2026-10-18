@@ -377,7 +377,13 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--network", netArg)
 	}
 
-	if opts.PXE && len(opts.BootOrder) == 0 {
+	if opts.PXE {
+		// virt-install wants an explicit install method: --boot only describes
+		// a boot order, and virt-install 4.1 (the version shipped by Ubuntu
+		// 24.04) aborts with "An install method must be specified" when the
+		// guest has no other install source. --pxe and --boot coexist, but on
+		// 4.1 --pxe wins and leaves the guest booting from the network first;
+		// FixBootOrder restores the intended disk-first order afterwards.
 		args = append(args, "--pxe")
 	}
 
