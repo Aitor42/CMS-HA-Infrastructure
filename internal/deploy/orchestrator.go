@@ -182,21 +182,20 @@ func (o *Orchestrator) preflightChecks(ctx context.Context) error {
 	// Ensure the storage directory exists, then warn if it is nearly full.
 	storageDir := filepath.Clean(o.Cfg.VM.StorageDir)
 	if err := os.MkdirAll(storageDir, 0750); err != nil {
-		// If the images directory cannot be created, every VM creation will
-		// fail much later with a far less clear error.
-		logging.Warn("storage directory %s cannot be created/accessed: %v", storageDir, err)
+		// Fail now: if the images directory cannot be created, every VM
+		// creation would fail much later with a far less clear error.
+		return fmt.Errorf("storage directory %s cannot be created/accessed: %w", storageDir, err)
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(storageDir, &stat); err != nil {
+		logging.Warn("cannot query free space of %s: %v", storageDir, err)
+	} else if stat.Bsize <= 0 {
+		logging.Warn("cannot query free space of %s: invalid block size %d", storageDir, stat.Bsize)
 	} else {
-		var stat syscall.Statfs_t
-		if err := syscall.Statfs(storageDir, &stat); err != nil {
-			logging.Warn("cannot query free space of %s: %v", storageDir, err)
-		} else if stat.Bsize <= 0 {
-			logging.Warn("cannot query free space of %s: invalid block size %d", storageDir, stat.Bsize)
-		} else {
-			freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
-			logging.Info("Disk space: %d GB free in %s", freeGB, storageDir)
-			if freeGB < 30 {
-				logging.Warn("Low disk space: %d GB free (>= 30 GB recommended)", freeGB)
-			}
+		freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
+		logging.Info("Disk space: %d GB free in %s", freeGB, storageDir)
+		if freeGB < 30 {
+			logging.Warn("Low disk space: %d GB free (>= 30 GB recommended)", freeGB)
 		}
 	}
 
