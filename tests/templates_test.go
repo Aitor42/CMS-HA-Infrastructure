@@ -3,64 +3,12 @@ package tests
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"testing/fstest"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
-	"github.com/Aitor42/CMS-HA-Infrastructure/internal/templates"
 	"gopkg.in/yaml.v3"
 )
-
-func TestTemplates_Renderer(t *testing.T) {
-	mockFS := fstest.MapFS{
-		"templates/test.txt": &fstest.MapFile{
-			Data: []byte("Hello {{ .Name }}! Value: {{ default \"none\" .Value }}"),
-		},
-	}
-
-	r := templates.NewRenderer(mockFS)
-	data := map[string]string{
-		"Name": "CMS",
-	}
-
-	rendered, err := r.Render("templates/test.txt", data)
-	if err != nil {
-		t.Fatalf("render failed: %v", err)
-	}
-
-	expected := "Hello CMS! Value: none"
-	if string(rendered) != expected {
-		t.Errorf("expected %q, got %q", expected, string(rendered))
-	}
-}
-
-func TestTemplates_RenderToFile(t *testing.T) {
-	mockFS := fstest.MapFS{
-		"templates/out.conf": &fstest.MapFile{
-			Data: []byte("server_name {{ .Domain }};"),
-		},
-	}
-
-	r := templates.NewRenderer(mockFS)
-	tmpDir := t.TempDir()
-	nestedFile := filepath.Join(tmpDir, "nested", "subdir", "out.conf")
-
-	err := r.RenderToFile("templates/out.conf", map[string]string{"Domain": "example.com"}, nestedFile, 0640)
-	if err != nil {
-		t.Fatalf("RenderToFile failed: %v", err)
-	}
-
-	content, err := os.ReadFile(nestedFile)
-	if err != nil {
-		t.Fatalf("failed to read rendered file: %v", err)
-	}
-
-	if string(content) != "server_name example.com;" {
-		t.Errorf("unexpected content: %s", string(content))
-	}
-}
 
 func TestTemplates_EmbeddedNetworkXML(t *testing.T) {
 	nets := []struct {
@@ -119,7 +67,9 @@ func TestTemplates_EmbeddedCobblerAutoinstall(t *testing.T) {
 
 func TestTemplates_EmbeddedMonitoringConfigs(t *testing.T) {
 	t.Run("prometheus.yml", func(t *testing.T) {
-		data, err := cms.TemplatesFS.ReadFile("templates/monitoring/prometheus.yml")
+		// Puppet (role::monitor) is the single source of truth for the scrape
+		// configuration; the monitoring phase only deploys the alert rules.
+		data, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/prometheus/prometheus.yml"))
 		if err != nil {
 			t.Fatalf("failed to read prometheus.yml: %v", err)
 		}
@@ -129,6 +79,54 @@ func TestTemplates_EmbeddedMonitoringConfigs(t *testing.T) {
 		}
 		if _, ok := parsed["scrape_configs"]; !ok {
 			t.Error("prometheus.yml missing scrape_configs")
+		}
+		if _, ok := parsed["rule_files"]; !ok {
+			t.Error("prometheus.yml must load /etc/prometheus/alert-rules.yml via rule_files")
+		}
+		if !strings.Contains(string(data), "job_name: 'etcd'") {
+			t.Error("prometheus.yml missing the etcd job (required by the EtcdNoQuorum alert)")
+		}
+		if _, ok := parsed["alerting"]; !ok {
+			t.Error("prometheus.yml must configure alerting (Alertmanager)")
+		}
+		if !strings.Contains(string(data), "localhost:9093") {
+			t.Error("prometheus.yml must forward alerts to Alertmanager on localhost:9093")
+		}
+	})
+
+	t.Run("alertmanager.yml", func(t *testing.T) {
+		// Deployed by Puppet (role::monitor) to /etc/prometheus/alertmanager.yml.
+		data, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/prometheus/alertmanager.yml"))
+		if err != nil {
+			t.Fatalf("failed to read alertmanager.yml: %v", err)
+		}
+		var parsed map[string]interface{}
+		if err := yaml.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("alertmanager.yml is not valid YAML: %v", err)
+		}
+		if _, ok := parsed["route"]; !ok {
+			t.Error("alertmanager.yml missing a route")
+		}
+		receivers, ok := parsed["receivers"].([]interface{})
+		if !ok || len(receivers) == 0 {
+			t.Error("alertmanager.yml must define at least one receiver")
+		}
+	})
+
+	t.Run("monitor.pp deploys alertmanager", func(t *testing.T) {
+		data, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/monitor.pp"))
+		if err != nil {
+			t.Fatalf("failed to read monitor.pp: %v", err)
+		}
+		manifest := string(data)
+		for _, want := range []string{
+			"package { 'prometheus-alertmanager'",
+			"/etc/prometheus/alertmanager.yml",
+			"service { 'prometheus-alertmanager'",
+		} {
+			if !strings.Contains(manifest, want) {
+				t.Errorf("monitor.pp missing Alertmanager wiring: %q", want)
+			}
 		}
 	})
 
@@ -144,7 +142,30 @@ func TestTemplates_EmbeddedMonitoringConfigs(t *testing.T) {
 		if _, ok := parsed["groups"]; !ok {
 			t.Error("alert-rules.yml missing groups")
 		}
+		for _, alert := range []string{"EtcdNoQuorum", "DRBDPeerDown", "DRBDSplitBrain", "KeepalivedState", "ProbeLatencyHigh"} {
+			if !strings.Contains(string(data), "alert: "+alert) {
+				t.Errorf("alert-rules.yml missing the %s alert", alert)
+			}
+		}
 	})
+}
+
+func TestTemplates_NoDuplicatedMonitoringConfig(t *testing.T) {
+	// Monitoring configuration lives in exactly one place (the Puppet role
+	// files). templates/monitoring/ must only carry the alert rules the
+	// monitoring phase deploys; any other file would silently drift from the
+	// Puppet copy that actually lands on the node.
+	entries, err := os.ReadDir(repoFile(t, "templates/monitoring"))
+	if err != nil {
+		t.Fatalf("failed to read templates/monitoring: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != "alert-rules.yml" {
+		t.Fatalf("templates/monitoring must contain only alert-rules.yml, got %v", names)
+	}
 }
 
 func TestTemplates_EmbeddedNginxConfig(t *testing.T) {
@@ -163,5 +184,36 @@ func TestTemplates_EmbeddedNginxConfig(t *testing.T) {
 		if !strings.Contains(content, dir) {
 			t.Errorf("cms-lb.conf missing expected directive: %s", dir)
 		}
+	}
+}
+
+func TestTemplates_CasperHelperSingleSource(t *testing.T) {
+	// The helper that forces casper's NFS-over-TCP mount must exist as a single
+	// canonical copy (templates/cobbler/, embedded in the binary and uploaded by
+	// the Go phase). The legacy shell script has to consume that same file; a
+	// second copy under scripts/ had already drifted from it.
+	data, err := cms.TemplatesFS.ReadFile("templates/cobbler/casper_initrd_tcp.sh")
+	if err != nil {
+		t.Fatalf("failed to read embedded casper helper: %v", err)
+	}
+	if !strings.HasPrefix(string(data), "#!/usr/bin/env bash") {
+		t.Error("casper helper must be a bash script")
+	}
+	if !strings.Contains(string(data), "070701") {
+		t.Error("casper helper is missing its cpio parser")
+	}
+
+	legacy, err := os.ReadFile("../scripts/01_setup_cobbler.sh")
+	if err != nil {
+		t.Fatalf("failed to read legacy cobbler script: %v", err)
+	}
+	if !strings.Contains(string(legacy), "templates/cobbler/casper_initrd_tcp.sh") {
+		t.Error("legacy cobbler script must reference the canonical casper helper")
+	}
+	if strings.Contains(string(legacy), "utils/casper_initrd_tcp.sh") {
+		t.Error("legacy cobbler script must not reference a duplicated casper helper")
+	}
+	if _, err := os.Stat("../scripts/utils/casper_initrd_tcp.sh"); err == nil {
+		t.Error("scripts/utils/casper_initrd_tcp.sh must not exist: templates/cobbler/ is the single source")
 	}
 }

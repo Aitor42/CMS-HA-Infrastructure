@@ -2,11 +2,14 @@ package tests
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/lint"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/cobbler"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/drbd"
@@ -37,7 +40,10 @@ func TestPhases_MetadataAndInstantiation(t *testing.T) {
 			Router:  config.NodeDetail{Name: "ufw-router", IP: "192.168.10.1"},
 			Storage: config.NodeDetail{Name: "internal-storage", IP: "192.168.10.15"},
 			Monitor: config.NodeDetail{Name: "internal-monitor", IP: "192.168.10.20"},
-			LB:      config.NodeDetail{Name: "main-lb", IP: "192.168.20.100"},
+			LBs: []config.NodeDetail{
+				{Name: "main-lb1", IP: "192.168.20.103"},
+				{Name: "main-lb2", IP: "192.168.20.104"},
+			},
 			CMSFrontends: []config.NodeDetail{
 				{Name: "main-cms1", IP: "192.168.20.101"},
 			},
@@ -108,17 +114,36 @@ func TestPhases_TrafficGenerator(t *testing.T) {
 
 	tr := traffic.New(cfg, opts)
 	if tr == nil {
-		t.Fatal("expected non-nil traffic generator")
+		t.Fatal("expected non-nil traffic runner")
 	}
+
+	// The k6 profile is embedded in the binary and shipped to the container.
+	script, err := cms.TemplatesFS.ReadFile("templates/traffic/cms-smoke.js")
+	if err != nil {
+		t.Fatalf("embedded k6 script missing: %v", err)
+	}
+	for _, want := range []string{"export const options", "thresholds", "http_req_duration", "wp-login.php"} {
+		if !strings.Contains(string(script), want) {
+			t.Errorf("k6 script missing %q", want)
+		}
+	}
+}
+
+// repoFile resolves rel against the module root, independently of the test
+// working directory (go test always runs with the package dir as cwd, but
+// editors/tools running single tests may differ).
+func repoFile(t *testing.T, rel string) string {
+	t.Helper()
+	root, err := lint.FindModuleRoot()
+	if err != nil {
+		t.Fatalf("cannot locate module root: %v", err)
+	}
+	return filepath.Join(root, rel)
 }
 
 func TestPhases_NFSStorageManifests(t *testing.T) {
 	// Verify role::storage manifest exists and contains critical configurations
-	storageManifest, err := os.ReadFile("../puppet/modules/role/manifests/storage.pp")
-	if err != nil {
-		// Fallback for execution from repo root
-		storageManifest, err = os.ReadFile("puppet/modules/role/manifests/storage.pp")
-	}
+	storageManifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/storage.pp"))
 	if err != nil {
 		t.Fatalf("failed to read storage.pp: %v", err)
 	}
@@ -138,10 +163,7 @@ func TestPhases_NFSStorageManifests(t *testing.T) {
 	}
 
 	// Verify site.pp classifies internal-storage with role::storage
-	siteManifest, err := os.ReadFile("../puppet/manifests/site.pp")
-	if err != nil {
-		siteManifest, err = os.ReadFile("puppet/manifests/site.pp")
-	}
+	siteManifest, err := os.ReadFile(repoFile(t, "puppet/manifests/site.pp"))
 	if err != nil {
 		t.Fatalf("failed to read site.pp: %v", err)
 	}
@@ -151,10 +173,7 @@ func TestPhases_NFSStorageManifests(t *testing.T) {
 	}
 
 	// Verify cms_frontend.pp configures nfs-common and wp-content/uploads mount
-	cmsManifest, err := os.ReadFile("../puppet/modules/role/manifests/cms_frontend.pp")
-	if err != nil {
-		cmsManifest, err = os.ReadFile("puppet/modules/role/manifests/cms_frontend.pp")
-	}
+	cmsManifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/cms_frontend.pp"))
 	if err != nil {
 		t.Fatalf("failed to read cms_frontend.pp: %v", err)
 	}
@@ -173,4 +192,3 @@ func TestPhases_NFSStorageManifests(t *testing.T) {
 		}
 	}
 }
-
