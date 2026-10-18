@@ -11,6 +11,7 @@ func TestCLI_CommandRegistration(t *testing.T) {
 	rootCmd := root.GetRootCmd()
 	commands := []string{
 		"backup",
+		"cleanup",
 		"deploy",
 		"lint",
 		"phase",
@@ -28,6 +29,12 @@ func TestCLI_CommandRegistration(t *testing.T) {
 		if err != nil || cmd == nil || cmd.Name() != cmdName {
 			t.Errorf("expected command %q to be registered in rootCmd", cmdName)
 		}
+	}
+
+	// Test alias destroy -> cleanup
+	destroyCmd, _, err := rootCmd.Find([]string{"destroy"})
+	if err != nil || destroyCmd == nil || destroyCmd.Name() != "cleanup" {
+		t.Errorf("expected alias destroy to resolve to cleanup")
 	}
 }
 
@@ -65,6 +72,7 @@ func TestCLI_VMSubcommands(t *testing.T) {
 	rootCmd := root.GetRootCmd()
 	vmSubcommands := []string{
 		"start",
+		"stop",
 		"shrink",
 		"fix-boot-order",
 		"install-batches",
@@ -80,6 +88,7 @@ func TestCLI_VMSubcommands(t *testing.T) {
 
 	aliases := map[string]string{
 		"start-all":       "start",
+		"stop-all":        "stop",
 		"shrink-ram":      "shrink",
 		"fix-boot":        "fix-boot-order",
 		"recreate-failed": "recreate",

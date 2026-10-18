@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -20,15 +21,23 @@ func TestLogging_Formatting(t *testing.T) {
 }
 
 func TestLogging_VerbosityToggle(t *testing.T) {
+	// Assert on the actual effect instead of only calling it: SetVerbose must
+	// toggle the default slog handler's verbosity level.
+	logging.SetVerbose(false)
+	t.Cleanup(func() { logging.SetVerbose(false) })
+
+	if slog.Default().Enabled(t.Context(), slog.LevelDebug) {
+		t.Error("expected debug logs disabled in quiet mode")
+	}
+	logging.Info("Quiet info test")
+
 	logging.SetVerbose(true)
+	if !slog.Default().Enabled(t.Context(), slog.LevelDebug) {
+		t.Error("expected debug logs enabled in verbose mode")
+	}
 	logging.Info("Verbose info test: %s", "active")
 	logging.Success("Verbose success test: %s", "active")
 	logging.Warn("Verbose warn test: %s", "active")
-
-	logging.SetVerbose(false)
-	logging.Info("Standard info test")
-	logging.Success("Standard success test")
-	logging.Warn("Standard warn test")
 }
 
 func TestLogging_PhaseTimer(t *testing.T) {
