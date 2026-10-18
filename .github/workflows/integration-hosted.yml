@@ -214,8 +214,11 @@ jobs:
                 + 1 + 1 + len(cfg["nodes"]["lbs"]) + len(cfg["nodes"]["cms_frontends"]))
           PY
 
+      # Both stages need the lab installed; `full` then continues with the
+      # service phases, which find the client VMs already defined and skip
+      # their creation. On a branch push `inputs.stage` is empty, so only this
+      # cheaper step runs.
       - name: Provision the lab (jumpstart, Cobbler and PXE clients)
-        if: ${{ inputs.stage != 'full' }}
         run: |
           set -o pipefail
           mkdir -p "$ARTIFACTS_DIR"
