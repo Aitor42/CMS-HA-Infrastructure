@@ -191,9 +191,7 @@ jobs:
           PY
 
       - name: Provision the lab (PXE phases only)
-        if: ${{ inputs.stage == 'provision' }}
-        env:
-          STAGE: ${{ inputs.stage }}
+        if: ${{ inputs.stage != 'full' }}
         run: |
           set -o pipefail
           mkdir -p "$ARTIFACTS_DIR"
@@ -204,7 +202,7 @@ jobs:
           ./cms-ha -c "$CONFIG" status ssh
 
       - name: Run the integration test (deploy + verify + failover)
-        if: ${{ inputs.stage == 'full' || inputs.stage == '' }}
+        if: ${{ inputs.stage == 'full' }}
         env:
           SKIP_CHAOS: ${{ inputs.skip_chaos }}
         run: |
