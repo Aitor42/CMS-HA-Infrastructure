@@ -1,20 +1,38 @@
+# Netplan overlay for the perimeter router (ufw-router).
+#
+# Rendered by the Router Bootstrap phase and installed as
+# /etc/netplan/99-cms-router.yaml, so it is processed after the configuration
+# the installer wrote (00-installer-config.yaml / 50-cloud-init.yaml).
+#
+# Why the router needs its own overlay: the shared client autoinstall brings
+# every interface up with DHCP, which on the router means three DHCP leases and
+# three competing default routes — one of them pointing at the router itself.
+# The router is the gateway, so its addressing and its default route must be
+# deterministic:
+#   * internal and main carry the static gateway addresses of their networks
+#     (the client subnets point their `option routers` at exactly these);
+#   * the WAN uplink keeps DHCP but wins the default route by metric, so
+#     forwarding to the internet is unambiguous.
 network:
   version: 2
   ethernets:
-    ${INT_NAME}:
+    net0:
       match:
-        macaddress: "52:54:00:10:01:02"
-      set-name: ${INT_NAME}
+        macaddress: "${INT_MAC}"
+      dhcp4: false
       addresses:
-        - 192.168.10.1/24
-    ${MAIN_NAME}:
+        - ${INT_ADDR}
+    net1:
       match:
-        macaddress: "52:54:00:10:02:02"
-      set-name: ${MAIN_NAME}
+        macaddress: "${MAIN_MAC}"
+      dhcp4: false
       addresses:
-        - 192.168.20.1/24
-    ${WAN_NAME}:
+        - ${MAIN_ADDR}
+    net2:
       match:
-        macaddress: "52:54:00:10:00:02"
-      set-name: ${WAN_NAME}
+        macaddress: "${WAN_MAC}"
       dhcp4: true
+      dhcp4-overrides:
+        route-metric: 50
+        use-dns: true
+      optional: true

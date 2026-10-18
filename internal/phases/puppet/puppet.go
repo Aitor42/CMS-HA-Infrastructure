@@ -315,9 +315,13 @@ EOF_PUPPET
 				systemctl enable puppet
 			`, ssh.AptLockWaitSnippet, jumpstartIP, nodeSpec.FQDN)
 
-			_, _, code, err := pool.RunCommand(ctx, nodeSpec.IP, cmd)
+			_, stderr, code, err := pool.RunCommand(ctx, nodeSpec.IP, cmd)
 			if err != nil || code != 0 {
-				return fmt.Errorf("exit code %d: %w", code, err)
+				msg := strings.TrimSpace(stderr)
+				if msg == "" {
+					msg = "(no stderr)"
+				}
+				return fmt.Errorf("exit code %d: %s: %w", code, msg, err)
 			}
 			return nil
 		}

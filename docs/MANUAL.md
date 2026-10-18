@@ -166,7 +166,8 @@ unknown value is rejected with the list of valid phases.
 3. **Synchronous DRBD Block Replication:** DRBD Protocol C volume is initialized, primary status promoted, formatted with ext4, and mounted at `/mnt/data/mariadb` on `internal-master1`.
 4. **K3s HA Cluster & Pod Affinity:** Control plane nodes form an embedded etcd quorum; `internal-master1` is labeled with `drbd-status=primary` using dual FQDN/short hostname resolution, allowing `mariadb-0` to mount storage safely.
 5. **Sequential CMS Convergence:** Web frontends (`main-cms1`, `main-cms2`) are converged sequentially to prevent concurrency deadlocks in MariaDB while creating WordPress tables.
-6. **Perimeter Firewall & Routing:** Router detects dynamic WAN interface by MAC (`enp3s0`), clears stale tables, and injects clean `*nat` forwarding rules before `*filter` in `/etc/ufw/before.rules`.
+6. **Router Gateway Bring-Up (Phase 01.9):** Before Puppet installs its agent on the clients, `bootstrap-router` gives `ufw-router` deterministic addressing (static gateway addresses on both lab networks, WAN uplink owning the default route), enables `net.ipv4.ip_forward`, and installs the MASQUERADE policy both in `/etc/ufw/before.rules` (so the later `ufw enable` cannot drop it) and in the live `nat` table. Without it, the first phase that downloads a package on a client — Puppet — fails with a `wget` network error. The phase proves the whole path by downloading the actual Puppet release package from the router *and* from one internal client, reporting router diagnostics when either fails.
+7. **Perimeter Firewall & Routing:** Router detects dynamic WAN interface by MAC (`enp3s0`), clears stale tables, and injects clean `*nat` forwarding rules before `*filter` in `/etc/ufw/before.rules`.
 7. **Cluster Observability & PKI:** Exporters, Prometheus, Grafana, and Smallstep CA certificates converge in parallel across all cluster nodes.
 
 **Strict failure semantics (v2.1):** Every phase verifies the exit code of each remote command (previously several steps tolerated `|| true`). A real provisioning failure — e.g. `apt-get install drbd-utils` failing, DRBD metadata creation or Primary promotion failing, a replica that is not `Connected/UpToDate`, or the MariaDB initialization Job not completing — **aborts the deployment** with the failing step and diagnostics on stderr. This can make previously "successful" runs fail when the underlying DRBD/Kubernetes state was actually broken; the phases remain idempotent, so a healthy environment still passes cleanly (steps like `drbdadm create-md --force` accept "already present" output).
@@ -195,7 +196,7 @@ curl -sk https://192.168.20.100/ | grep -i "wordpress"
 
 ### 3.4 Full Infrastructure Health Check
 
-The health check validates all infrastructure phases. The Go CLI executes these checks concurrently using the SSH connection pool in ~1.5 seconds:
+The health check validates all infrastructure phases. The Go CLI executes these checks concurrently using the SSH connection pool, and finishes in a few seconds (the end-to-end HTTP check dominates: it loads the CMS through the load-balancer VIP a hundred times to prove the request path, not just that its units started):
 
 ```bash
 # Go CLI (parallel execution across all phases):
@@ -216,7 +217,8 @@ The health check validates all infrastructure phases. The Go CLI executes these 
 ✓ Phase 05 - Prometheus & Grafana: [PASS]
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
-✓ Completed phase: Infrastructure Verification in 1.52s
+✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v11.0.0))
+✓ Completed phase: Infrastructure Verification in 21.37s
 ```
 
 ### 3.5 Real-Time SSH Connectivity Matrix

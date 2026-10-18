@@ -46,6 +46,7 @@ func (v *Verifier) VerifyAll(ctx context.Context) error {
 		v.phase05,
 		v.phase06,
 		v.phase07,
+		v.phase08,
 	}
 
 	results := make([]CheckResult, len(checks))

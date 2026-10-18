@@ -34,9 +34,6 @@ on:
         description: "Run `cleanup` at the end (the runner is thrown away anyway; proves the teardown path)"
         type: boolean
         default: false
-  # Temporary: lets the branch be iterated on without dispatching by hand.
-  push:
-    branches: ["ci/hosted-runner-lab"]
 
 concurrency:
   group: integration-hosted-${{ github.ref }}
@@ -284,6 +281,10 @@ jobs:
         if: ${{ inputs.stage == 'full' }}
         env:
           SKIP_CHAOS: ${{ inputs.skip_chaos }}
+          # `Provision the lab` above already ran Step 1/2 of the manual, so the
+          # deploy takes the documented Step 3 path instead of revalidating the
+          # VM/networks phases.
+          SKIP_VM_CREATE: "1"
         run: |
           set -o pipefail
           ARGS=()

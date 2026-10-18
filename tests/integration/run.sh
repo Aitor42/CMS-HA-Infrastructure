@@ -12,9 +12,12 @@
 #   tests/integration/run.sh [--resume] [--skip-deploy] [--skip-chaos] [--dry-run]
 #
 # Environment:
-#   CONFIG         configuration file              (default: config.yaml)
-#   STATE_FILE     deployment checkpoint           (default: deploy.state)
-#   ARTIFACTS_DIR  where logs/state are collected  (default: integration-artifacts)
+#   CONFIG           configuration file             (default: config.yaml)
+#   STATE_FILE       deployment checkpoint          (default: deploy.state)
+#   ARTIFACTS_DIR    where logs/state are collected (default: integration-artifacts)
+#   SKIP_VM_CREATE   1 = the lab's networks and VMs are already provisioned, so
+#                     deploy runs with --skip-vm-create (Step 3 of the manual).
+#                     Set by workflows that provision (Step 1/2) beforehand.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -24,6 +27,7 @@ cd "$ROOT_DIR"
 CONFIG="${CONFIG:-config.yaml}"
 STATE_FILE="${STATE_FILE:-deploy.state}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-integration-artifacts}"
+SKIP_VM_CREATE="${SKIP_VM_CREATE:-0}"
 
 RESUME=0
 SKIP_DEPLOY=0
@@ -89,6 +93,12 @@ if [ "$SKIP_DEPLOY" -eq 0 ]; then
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     DEPLOY_ARGS+=(--dry-run)
+  fi
+  if [ "$SKIP_VM_CREATE" = "1" ]; then
+    # The VM/networks phases were already run by the provisioning step, so take
+    # the manual's Step 3 path instead of revalidating them.
+    log "Deploying into an already provisioned lab (--skip-vm-create)"
+    DEPLOY_ARGS+=(--skip-vm-create)
   fi
 
   if ./cms-ha -c "$CONFIG" deploy --state-file "$STATE_FILE" "${DEPLOY_ARGS[@]}"; then

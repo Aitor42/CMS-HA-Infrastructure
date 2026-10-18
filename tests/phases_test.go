@@ -21,6 +21,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/puppet"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/registernodes"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/repairssh"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/routerbootstrap"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/traffic"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/ufw"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
@@ -60,6 +61,7 @@ func TestPhases_MetadataAndInstantiation(t *testing.T) {
 		{"01-setup-cobbler", cobbler.NewPhase(cfg, pool)},
 		{"02-register-nodes", registernodes.NewPhase(cfg, pool)},
 		{"03-repair-ssh", repairssh.NewPhase(cfg, pool)},
+		{"Router Bootstrap", routerbootstrap.NewPhase(cfg, pool)},
 		{"04-setup-puppet", puppet.NewPhase(cfg, pool)},
 		{"DRBD Setup", drbd.NewPhase(cfg, pool)},
 		{"Kubernetes Setup", kubernetes.NewPhase(cfg, pool)},

@@ -25,6 +25,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/puppet"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/registernodes"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/repairssh"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/routerbootstrap"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/ufw"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -162,6 +163,10 @@ func (o *Orchestrator) BuildPhaseList(opts DeployOpts) []phases.Phase {
 	}
 	list = append(list,
 		repairssh.NewPhase(o.Cfg, o.SSH),
+		// The router has to be routing and NATing before the Puppet phase
+		// downloads anything on the client nodes; see the phase's package
+		// documentation.
+		routerbootstrap.NewPhase(o.Cfg, o.SSH),
 		puppet.NewPhase(o.Cfg, o.SSH),
 		drbd.NewPhase(o.Cfg, o.SSH),
 		backup.NewPhase(o.Cfg),

@@ -12,6 +12,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/puppet"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/registernodes"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/repairssh"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/routerbootstrap"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/ufw"
 	"github.com/spf13/cobra"
 )
@@ -121,6 +122,20 @@ func init() {
 		p := repairssh.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
 	}, "ssh")
+
+	addPhaseCmd("bootstrap-router", "Give the router its gateway role (addresses, forwarding, NAT)", func(cmd *cobra.Command) error {
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		pool, err := newSSHPool(cfg)
+		if err != nil {
+			return err
+		}
+		defer pool.Close()
+		p := routerbootstrap.NewPhase(cfg, pool)
+		return p.Run(cmd.Context())
+	}, "router-bootstrap")
 
 	addPhaseCmd("setup-puppet", "Install and configure the Puppet server", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()

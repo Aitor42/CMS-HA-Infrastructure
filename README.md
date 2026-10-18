@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)]()
 
 **Production-grade, zero-touch infrastructure for a high-availability Content Management System.**  
-*14+ VMs · 2 segmented networks · 11 deployment phases · single Go binary · fully idempotent*
+*14+ VMs · 2 segmented networks · 13 deployment phases · single Go binary · fully idempotent*
 
 </div>
 
@@ -20,7 +20,7 @@
 
 This project implements the **complete design, provisioning, and automation** of an enterprise-grade high-availability IT infrastructure running a WordPress CMS — from bare-metal OS installation to full-stack observability.
 
-The entire environment is deployed with a **single command** (`cms-ha deploy`), requiring zero manual intervention across 16 virtual machines, 2 isolated network segments, and 11 orchestrated deployment phases.
+The entire environment is deployed with a **single command** (`cms-ha deploy`), requiring zero manual intervention across 16 virtual machines, 2 isolated network segments, and 13 orchestrated deployment phases.
 
 ### Orchestration Engine
 
@@ -165,7 +165,7 @@ CMS-HA-Infrastructure/
 │   ├── main.go                      # Binary entry point
 │   └── root/                        # Command definitions
 │       ├── root.go                  # Root command + global flags (--config, --verbose, --dry-run)
-│       ├── phase.go                 # cms-ha phase <name>  (all 11 phases)
+│       ├── phase.go                 # cms-ha phase <name>  (all 13 phase subcommands)
 │       ├── deploy.go                # cms-ha deploy        (full orchestration)
 │       ├── vm.go                    # cms-ha vm <action>   (start, stop, shrink, fix-boot-order, ...)
 │       ├── cleanup.go               # cms-ha cleanup       (destroy all VMs, disks, and networks)
@@ -263,7 +263,7 @@ vim config.yaml
 
 The legacy Bash deployment does not use the Go CLI's automatic encryption. Before using it, provide `DB_PASS`, `DB_ROOT_PASS`, `DB_EXPORTER_PASS`, and `WP_ADMIN_PASS` through the environment; avoid storing those values in shell scripts or committed files.
 
-The orchestrator executes all phases sequentially: VM Init (jumpstart) → Cobbler → Register Nodes → VM Init (clients) → Repair SSH → Puppet → DRBD → K3s → Nginx & WordPress → Monitoring → UFW → Internal CA (12 pipeline steps, from 11 distinct phases; `--skip-vm-create` drops the two VM Init steps for a 10-step run).
+The orchestrator executes all phases sequentially: VM Init (jumpstart) → Cobbler → Register Nodes → VM Init (clients) → Repair SSH → Router Gateway (addresses, forwarding, NAT) → Puppet → DRBD → Garage Backups → K3s → Nginx & WordPress → Monitoring → UFW → Internal CA (14 pipeline steps, from 13 distinct phases; `--skip-vm-create` drops the two VM Init steps for a 12-step run).
 
 ### Provisioning with Ansible (Infrastructure as Code)
 
@@ -294,7 +294,7 @@ the Go CLI — see [`ansible/README.md`](ansible/README.md) for the boundary.
 
 ## Deployment Phases
 
-Each phase is invoked through the unified Go CLI (`cms-ha`). The third column lists the **deprecated** v1 shell script the phase replaced; it is kept only as a reference (see [`scripts/README.md`](scripts/README.md)) and must not be used for new work. The `Phase` numbers below are the **Technical Execution Sequence** (the `cms-ha phase` subcommands); they are intentionally distinct from the **Project Milestones** (`docs/phases/PHASE-00..11`, e.g. PHASE-03 = *HA Cluster and Database*) and from the **verification check numbers** (00-07). See `docs/PLAN.md` → *Project Phases & Deployment Mapping* for the full cross-reference.
+Each phase is invoked through the unified Go CLI (`cms-ha`). The third column lists the **deprecated** v1 shell script the phase replaced; it is kept only as a reference (see [`scripts/README.md`](scripts/README.md)) and must not be used for new work. The `Phase` numbers below are the **Technical Execution Sequence** (the `cms-ha phase` subcommands); they are intentionally distinct from the **Project Milestones** (`docs/phases/PHASE-00..11`, e.g. PHASE-03 = *HA Cluster and Database*) and from the **verification check numbers** (00-08). See `docs/PLAN.md` → *Project Phases & Deployment Mapping* for the full cross-reference.
 
 | Phase | Go CLI Command (v2) | Deprecated v1 script | Target Nodes | Description |
 |:-----:|:--------------------|:-----------------|:-------------|:------------|
@@ -302,6 +302,7 @@ Each phase is invoked through the unified Go CLI (`cms-ha`). The third column li
 | **01** | `cms-ha phase setup-cobbler` | `scripts/01_setup_cobbler.sh` | `jumpstart` | Cobbler PXE server, DHCP, TFTP, DNS (BIND9) & NFS |
 | **02** | `cms-ha phase register-nodes` | `scripts/02_register_cobbler_nodes.sh` | `jumpstart` | Host profile definitions, static IPs and MAC bindings |
 | **03** | `cms-ha phase repair-ssh` | `scripts/03_repair_ssh_puppet.sh` | All client nodes | Post-install SSH key synchronization & Puppet CA reset |
+| **03.5** | `cms-ha phase bootstrap-router` | *(inline in `deploy_all.sh`)* | `ufw-router` | Router gateway bring-up: static gateway addresses, IP forwarding and NAT (checked with a real download before Puppet needs one) |
 | **04** | `cms-ha phase setup-puppet` | `scripts/04_setup_puppet.sh` | `jumpstart` + 13 clients | Bounded parallel Puppet catalog execution with SSL healing |
 | **05** | `cms-ha phase setup-drbd` | `scripts/05_setup_drbd.sh` | `internal-master1/2` | DRBD 9 synchronous block replication (Protocol C) |
 | **06** | `cms-ha phase setup-kubernetes` | `scripts/06_setup_kubernetes.sh` | Masters + Workers | K3s HA cluster, DRBD node affinity labeling & MariaDB |
@@ -346,7 +347,8 @@ The Go orchestrator (`cmd/cms-ha` and `internal/`) was engineered to replace ser
 Run the comprehensive, parallel health verifier:
 
 ```bash
-# Supported: runs 8 checks in parallel in ~1.5s
+# Supported: runs 9 checks in parallel; the end-to-end HTTP check adds a short
+# request burst through the load-balancer VIP, so the run takes seconds
 ./cms-ha verify
 
 # Deprecated v1 equivalent (reference only, see scripts/README.md)
@@ -365,7 +367,8 @@ Example output from a fully converged environment:
 ✓ Phase 05 - Prometheus & Grafana: [PASS]
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
-✓ Completed phase: Infrastructure Verification in 1.52s
+✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v11.0.0))
+✓ Completed phase: Infrastructure Verification in 21.37s
 ```
 
 ### SSH Connectivity Matrix

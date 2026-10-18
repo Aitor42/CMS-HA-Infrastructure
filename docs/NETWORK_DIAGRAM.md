@@ -167,6 +167,7 @@ graph TD
         STEP00B["Step 00b · Batch PXE install all client VMs<br/>cms-ha vm install-batches"]
         WAIT_NODES["⏳ Wait for all VMs SSH"]
         STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>cms-ha phase repair-ssh"]
+        STEP018B["Step 01.9 · Router gateway (addresses, forwarding, NAT)<br/>cms-ha phase bootstrap-router"]
     end
 
     subgraph CONFIG_MGMT["⚙ Configuration Management"]
@@ -199,7 +200,8 @@ graph TD
     STEP015 --> STEP00B
     STEP00B --> WAIT_NODES
     WAIT_NODES --> STEP018
-    STEP018 --> STEP02
+    STEP018 --> STEP018B
+    STEP018B --> STEP02
     STEP02 --> STEP03
     STEP03 --> STEP035
     STEP035 --> STEP04
@@ -217,4 +219,5 @@ graph TD
 - The initial deployment requires launching the **Jumpstart node (Phase 00a)** first, as it serves as the provisioning server for all other clients.
 - **Phase 00b** is performed **sequentially in batches** (`cms-ha vm install-batches`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
 - The `cms-ha deploy --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
+- **Phase 01.9** comes before Puppet on purpose: every later phase installs packages from the internet, and the nodes only get there once the router owns its gateway addresses, has `net.ipv4.ip_forward=1` and MASQUERADEs both lab networks out of the WAN uplink.
 - Configuration phases (Puppet, DRBD, K3s, Nginx, UFW, Monitoring, and Internal CA) are **strictly sequential** due to mutual service dependencies.

@@ -3,10 +3,7 @@ package ufw
 import (
 	"context"
 	"fmt"
-	"strings"
-	"time"
 
-	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
@@ -47,63 +44,16 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Discovering WAN interface by MAC on Router...")
-	wanMAC := p.cfg.Nodes.Router.MACWAN
-	if wanMAC == "" {
-		wanMAC = "52:54:00:10:00:02"
-	}
-	wanCmd := fmt.Sprintf("ip -o link | awk '/%s/ {print $2}' | sed 's/://'", wanMAC)
-	wanIface, _, _, err := p.pool.RunCommand(ctx, routerIP, wanCmd)
-	wanIface = strings.TrimSpace(wanIface)
-	if err != nil || wanIface == "" {
-		// Fallback: detect interface carrying default gateway
-		defIface, _, _, _ := p.pool.RunCommand(ctx, routerIP, "ip route show default | awk '{print $5}' | head -n1")
-		wanIface = strings.TrimSpace(defIface)
-		if wanIface == "" {
-			wanIface = "enp3s0"
-		}
-	}
+	wanIface := WANIface(ctx, p.pool, routerIP, p.cfg.Nodes.Router.MACWAN)
+	logging.Info("WAN interface on router: %s", wanIface)
 
+	// The Router Bootstrap phase already injected these rules early (and
+	// loaded them into the live nat table) so the nodes could reach the
+	// internet while they were being configured; re-injecting here is
+	// idempotent and keeps the phase correct when it is run on its own.
 	logging.Info("Uploading and injecting NAT rules...")
-	tmplContent, err := cms.TemplatesFS.ReadFile("templates/ufw/nat-rules")
-	if err != nil {
-		return fmt.Errorf("failed to read NAT rules template: %w", err)
-	}
-
-	natRules := strings.NewReplacer(
-		"${WAN_IF}", wanIface,
-		"${WAN_IFACE}", wanIface,
-	).Replace(string(tmplContent))
-
-	if err := p.pool.CopyContent(ctx, routerIP, []byte(natRules), "/tmp/nat.rules", 0600); err != nil {
-		return fmt.Errorf("failed to upload NAT rules: %w", err)
-	}
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		p.pool.RunCommand(cleanupCtx, routerIP, "rm -f /tmp/nat.rules /tmp/before.rules.bak")
-	}()
-
-	// Take a backup first so any corrupt intermediate result (e.g. duplicated
-	// nat tables) is rolled back instead of leaving an unusable ufw config on
-	// the router. `set -e` plus the ERR trap restore the backup on every
-	// failure of the chain, not only on the final sanity check.
-	injectCmd := `set -e
-cp /etc/ufw/before.rules /tmp/before.rules.bak
-restore() { cp /tmp/before.rules.bak /etc/ufw/before.rules; }
-trap restore ERR
-sed -i '/^# NAT Rules/,/^COMMIT/{/^COMMIT/d; d}' /etc/ufw/before.rules
-sed -i '/^\*nat/,/^COMMIT/{/^COMMIT/d; d}' /etc/ufw/before.rules
-awk '/^\*filter/{while((getline line < "/tmp/nat.rules") > 0) print line} {print}' /etc/ufw/before.rules > /tmp/before.rules.new
-mv /tmp/before.rules.new /etc/ufw/before.rules
-if [ "$(grep -c '^\*nat' /etc/ufw/before.rules)" != "1" ] || [ "$(grep -c '^\*filter' /etc/ufw/before.rules)" != "1" ]; then
-    echo "unexpected nat/filter table layout after injection" >&2
-    restore
-    exit 1
-fi
-trap - ERR
-rm -f /tmp/before.rules.bak`
-	if _, _, code, err := p.pool.RunCommand(ctx, routerIP, injectCmd); err != nil || code != 0 {
-		return fmt.Errorf("failed to inject NAT rules (exit %d): %v; router before.rules was restored from backup", code, err)
+	if _, err := ConfigureNAT(ctx, p.pool, routerIP, wanIface, false); err != nil {
+		return err
 	}
 
 	logging.Info("Reloading UFW on Router...")

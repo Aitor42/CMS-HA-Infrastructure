@@ -45,6 +45,7 @@ func TestCLI_PhaseSubcommands(t *testing.T) {
 		"setup-cobbler",
 		"register-nodes",
 		"repair-ssh",
+		"bootstrap-router",
 		"setup-puppet",
 		"setup-drbd",
 		"setup-kubernetes",

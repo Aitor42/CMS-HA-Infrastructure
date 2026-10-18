@@ -136,6 +136,7 @@ The deployment is executed end-to-end by the Go CLI (`cms-ha deploy`); the **Bas
 | **01.5**| `cms-ha phase register-nodes` | `02_register_cobbler_nodes.sh` | Registration of all target nodes and MAC bindings in Cobbler | Phase 01 |
 | **00b** | `cms-ha vm install-batches` | `00_init_vms.sh --nodes-only` | Unattended PXE installation of all client nodes | Phase 00 |
 | **01.8**| `cms-ha phase repair-ssh` | `03_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
+| **01.9**| `cms-ha phase bootstrap-router` | *(inline `bootstrap_router` in `deploy_all.sh`)* | Router gateway bring-up: static addresses, IP forwarding and NAT so every node can reach the internet | Phase 04, Phase 06 |
 | **02** | `cms-ha phase setup-puppet` | `04_setup_puppet.sh` | Parallel Puppet catalog execution (worker pool) | Phase 01, Phase 09 |
 | **03** | `cms-ha phase setup-drbd` | `05_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
 | **03.5** | `cms-ha phase setup-backup` | *(new, no legacy script)* | Off-DRBD Garage S3 backup store on the hypervisor (container) | Phase 03 |
