@@ -40,6 +40,11 @@ jobs:
           ./cms-ha --help
           echo "✔ Binary built and verified"
 
+      - name: Install libvirt clients (virsh for the test driver)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-clients
+
       - name: Run unit tests with race detection
         run: make test
 
