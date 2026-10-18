@@ -78,11 +78,21 @@ jobs:
           # topology still asks for 3-4 GB per node while the installer runs.
           # The disk is plentiful, so back the overcommit with swap — the PXE
           # installers are I/O bound and would much rather swap than be
-          # OOM-killed. Both are thrown away with the runner.
-          sudo dd if=/dev/zero of=/swapfile bs=1M count=16384 status=none
-          sudo chmod 600 /swapfile
-          sudo mkswap -q /swapfile
-          sudo swapon /swapfile
+          # OOM-killed.
+          #
+          # The image already runs 3 GB of swap from /swapfile, so this one
+          # needs its own name, and it is best-effort: the batch installer
+          # only needs it as a safety margin. Both live on the runner's
+          # disposable disk.
+          SWAP="$HOME/swapfile-lab"
+          if [ ! -f "$SWAP" ]; then
+            sudo fallocate -l 16G "$SWAP" 2>/dev/null \
+              || sudo dd if=/dev/zero of="$SWAP" bs=1M count=16384 status=none \
+              || echo "::warning::could not reserve swap space; carrying on without it"
+          fi
+          sudo chmod 600 "$SWAP" 2>/dev/null || true
+          sudo mkswap -q "$SWAP" 2>/dev/null || true
+          sudo swapon "$SWAP" 2>/dev/null || true
           swapon --show
           free -h
 
