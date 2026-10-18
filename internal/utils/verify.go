@@ -140,6 +140,13 @@ func serviceStatesActive(out string) bool {
 	return true
 }
 
+// allNodesReady reports whether `kubectl get nodes` output describes a healthy
+// cluster: at least one node Ready and none NotReady. "NotReady" contains the
+// substring "Ready", so both checks are required.
+func allNodesReady(nodesOut string) bool {
+	return strings.Contains(nodesOut, "Ready") && !strings.Contains(nodesOut, "NotReady")
+}
+
 func (v *Verifier) phase02(ctx context.Context) CheckResult {
 	// Puppet server + signed certs in single SSH session
 	cmd := `systemctl is-active puppetserver; echo "---CMS_DELIM---"; puppetserver ca list --all 2>/dev/null | grep -E 'Signed|\(SHA256\)' | wc -l`
@@ -235,7 +242,10 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		if len(parts) >= 3 {
 			etcdOut = strings.TrimSpace(parts[2])
 		}
-		pass := err == nil && strings.Contains(nodesOut, "Ready") && strings.Contains(podOut, "Running")
+		// "NotReady" contains the substring "Ready", so both must be checked:
+		// the cluster is only healthy when at least one node is Ready and none
+		// reports NotReady.
+		pass := err == nil && allNodesReady(nodesOut) && strings.Contains(podOut, "Running")
 		// etcd must report one member per configured master, otherwise the
 		// cluster has no real quorum even though the nodes look Ready.
 		if want := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters)); etcdOut != want {
