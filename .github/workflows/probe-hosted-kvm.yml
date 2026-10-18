@@ -1,0 +1,99 @@
+name: Probe hosted runner (throwaway)
+
+# Throwaway diagnostic workflow, only reachable from the branch
+# `chore/probe-hosted-kvm`. It answers what a standard GitHub-hosted Linux
+# runner can actually do for the KVM lab:
+#   - is /dev/kvm present and usable (functional test with qemu -accel kvm)?
+#   - how much RAM and free disk does the runner really have?
+#   - can libvirt be installed and a domain be created there?
+# Delete this file and the branch once the output has been read; it is not part
+# of the project's CI.
+
+on:
+  push:
+    branches: ["chore/probe-hosted-kvm"]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: Probe runner capabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Hardware, RAM and disk
+        run: |
+          echo "==== CPU ===="
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+          echo "vmx/svm lines in /proc/cpuinfo: $(grep -cE 'vmx|svm' /proc/cpuinfo)"
+          echo
+          echo "==== RAM ===="
+          free -h
+          echo
+          echo "==== DISK ===="
+          df -h / /tmp 2>/dev/null || df -h
+          echo
+          echo "==== KVM device ===="
+          ls -l /dev/kvm 2>&1 || echo "NO /dev/kvm"
+          lsmod | grep -i '^kvm' || echo "(no kvm modules loaded)"
+          echo
+          echo "==== identity and init ===="
+          id
+          echo "pid1: $(cat /proc/1/comm)"
+          echo
+          echo "==== virtualization tooling present? ===="
+          for c in virsh qemu-system-x86_64 virt-install docker podman dnsmasq iptables; do
+            if command -v "$c" >/dev/null 2>&1; then echo "found:    $c"; else echo "missing:  $c"; fi
+          done
+          echo
+          echo "==== reclaimable disk (preinstalled toolchains) ===="
+          sudo du -sh /usr/local/lib/android /usr/share/dotnet /opt/hostedtoolcache \
+                      /usr/local/.ghcup /usr/local/share/boost 2>/dev/null || true
+
+      - name: Functional KVM test (qemu -accel kvm)
+        run: |
+          set -x
+          # Standard unlock used by the Android emulator action on hosted runners.
+          sudo usermod -aG kvm "$USER" || true
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules || true
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm 2>/dev/null || true
+          ls -l /dev/kvm || true
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cpu-checker qemu-system-x86 >/dev/null
+
+          echo "==== kvm-ok ===="
+          sudo kvm-ok || true
+
+          echo "==== real launch: a KVM domain must start and stay alive ===="
+          # -S pauses the guest, so a successful KVM init keeps qemu running and
+          # the timeout kills it (exit 124). Any other exit is a KVM failure.
+          set +e
+          timeout 10 qemu-system-x86_64 -accel kvm -cpu host -m 512 \
+            -nographic -nodefaults -S
+          code=$?
+          set -e
+          echo "qemu exit code: $code"
+          if [ "$code" = "124" ]; then
+            echo "KVM TEST: OK (guest booted with hardware acceleration)"
+          else
+            echo "KVM TEST: FAILED (see qemu error above)"
+          fi
+
+      - name: Can libvirt work here?
+        continue-on-error: true
+        run: |
+          set -x
+          sudo apt-get install -y -qq \
+            libvirt-daemon-system libvirt-clients qemu-kvm dnsmasq-base >/dev/null
+          sudo systemctl start virtqemud.socket 2>/dev/null || true
+          sudo systemctl start libvirtd 2>/dev/null || true
+          sudo systemctl start virtqemud 2>/dev/null || true
+          virsh -c qemu:///system version || true
+          virsh -c qemu:///system net-list --all || true
+          echo "---- default network ----"
+          virsh -c qemu:///system net-info default 2>&1 || true
