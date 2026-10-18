@@ -68,9 +68,10 @@ func init() {
 	phaseCmd.AddCommand(initVMsCmd)
 
 	// Helper for phases without libvirt
-	addPhaseCmd := func(use string, phaseFactory func(cmd *cobra.Command) error, aliases ...string) {
+	addPhaseCmd := func(use, short string, phaseFactory func(cmd *cobra.Command) error, aliases ...string) {
 		cmd := &cobra.Command{
 			Use:     use,
+			Short:   short,
 			Aliases: aliases,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				return phaseFactory(cmd)
@@ -79,7 +80,7 @@ func init() {
 		phaseCmd.AddCommand(cmd)
 	}
 
-	addPhaseCmd("setup-cobbler", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-cobbler", "Install and configure the Cobbler provisioning server", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -93,7 +94,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "cobbler")
 
-	addPhaseCmd("register-nodes", func(cmd *cobra.Command) error {
+	addPhaseCmd("register-nodes", "Register client nodes with Cobbler", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -107,7 +108,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "register")
 
-	addPhaseCmd("repair-ssh", func(cmd *cobra.Command) error {
+	addPhaseCmd("repair-ssh", "Repair SSH host keys across all nodes", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -121,7 +122,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "ssh")
 
-	addPhaseCmd("setup-puppet", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-puppet", "Install and configure the Puppet server", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -135,7 +136,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "puppet")
 
-	addPhaseCmd("setup-drbd", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-drbd", "Configure DRBD replication on the master nodes", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -149,7 +150,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "drbd")
 
-	addPhaseCmd("setup-backup", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-backup", "Configure the S3 (Garage) backup stack", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -158,7 +159,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "backup")
 
-	addPhaseCmd("setup-kubernetes", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-kubernetes", "Install and configure the K3s cluster", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -172,7 +173,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "kubernetes", "k8s")
 
-	addPhaseCmd("setup-nginx-wordpress", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-nginx-wordpress", "Configure Nginx, WordPress and the CMS frontends", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -186,7 +187,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "setup-nginx", "nginx", "wordpress")
 
-	addPhaseCmd("setup-monitoring", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-monitoring", "Install and configure Prometheus and Grafana", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -200,7 +201,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "monitoring")
 
-	addPhaseCmd("setup-ufw", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-ufw", "Configure UFW firewall rules", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -214,7 +215,7 @@ func init() {
 		return p.Run(cmd.Context())
 	}, "ufw")
 
-	addPhaseCmd("setup-ca", func(cmd *cobra.Command) error {
+	addPhaseCmd("setup-ca", "Set up the internal certificate authority (PKI)", func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err

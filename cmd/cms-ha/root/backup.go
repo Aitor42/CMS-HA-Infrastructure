@@ -21,7 +21,8 @@ func init() {
 	rootCmd.AddCommand(backupCmd)
 
 	dbCmd := &cobra.Command{
-		Use: "db",
+		Use:   "db",
+		Short: "Back up the MariaDB/WordPress database",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
