@@ -221,6 +221,10 @@ pki:
 deploy:
   ssh_timeout: 600s
   stagger_delay: 5s
+  # A hosted runner has 4 vCPU for the whole lab, so a batch of three to five
+  # installers takes far longer than on the reference host. Give the batch
+  # installer room for it instead of letting it give up at the 15m default.
+  node_install_timeout: 30m
 
 drbd:
   # STONITH fencing (split-brain prevention). Before a node promotes itself it

@@ -235,6 +235,11 @@ func (c *Config) LBTLSCertLifetimeHours() int {
 type DeployConfig struct {
 	SSHTimeout   time.Duration `yaml:"ssh_timeout"`
 	StaggerDelay time.Duration `yaml:"stagger_delay"`
+	// NodeInstallTimeout bounds how long one batch of client nodes may take to
+	// finish installing and answer SSH. The nodes of a batch install at the
+	// same time and share the host's vCPUs, so a host with fewer cores than
+	// the reference lab needs a larger budget than the 15m default.
+	NodeInstallTimeout time.Duration `yaml:"node_install_timeout"`
 }
 
 // DRBDConfig controls the DRBD cms_data resource, in particular STONITH

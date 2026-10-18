@@ -472,8 +472,9 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 	logging.Info("Deploying client nodes...")
 
 	// The jumpstart is installed from its ISO rather than over PXE, so it is
-	// the one entry of the topology this phase must leave alone.
-	var clientNames []string
+	// the one entry of the topology this phase must leave alone. CreateClientVM
+	// also settles each new guest's boot order, which is not something this
+	// phase can do afterwards: a running guest keeps the order it booted with.
 	for _, node := range p.cfg.AllNodes() {
 		if node.Name == "" || node.Name == p.cfg.Nodes.Jumpstart.Name {
 			continue
@@ -481,16 +482,6 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 		if err := utils.CreateClientVM(ctx, p.cfg, p.lv, node.Name); err != nil {
 			return fmt.Errorf("failed to create VM %s: %w", node.Name, err)
 		}
-		clientNames = append(clientNames, node.Name)
-	}
-
-	// virt-install 4.1 boots a freshly created guest from the network first,
-	// even when --boot asks for the disk, so the post-install reboot would
-	// re-enter PXE and reinstall the node. Normalise the order once every
-	// client domain is defined; the change applies on their next boot, which
-	// is the reboot the installer performs minutes later.
-	if err := utils.FixBootOrder(ctx, p.lv, clientNames); err != nil {
-		return fmt.Errorf("fix client node boot order: %w", err)
 	}
 
 	logging.Success("All client nodes deployed")

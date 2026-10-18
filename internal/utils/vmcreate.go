@@ -83,6 +83,41 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 	for _, disk := range extraDisks {
 		_ = os.Chmod(disk.Path, 0666)
 	}
+
+	return applyBootOrder(ctx, lv, node.Name)
+}
+
+// applyBootOrder makes sure the guest that was just created boots its disk
+// before its NIC, restarting it when the definition had to change.
+//
+// virt-install 4.1 ignores the requested boot order whenever --pxe is used and
+// defines the guest booting from the network first. A booting guest keeps the
+// order it started with across reboots, and the autoinstall ends with one, so
+// without this the node would re-enter PXE and reinstall itself forever
+// instead of booting the system it just installed. The disk is still empty at
+// this point and only a couple of seconds have passed, so the restart is free.
+func applyBootOrder(ctx context.Context, lv *libvirt.Client, name string) error {
+	changed, err := normalizeBootOrder(ctx, lv, name)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+
+	states, err := lv.DomainStates(ctx)
+	if err != nil {
+		return fmt.Errorf("list domains before restarting %s: %w", name, err)
+	}
+	if states[name] == "running" {
+		if err := lv.Destroy(ctx, name); err != nil {
+			return fmt.Errorf("stop %s to apply its boot order: %w", name, err)
+		}
+	}
+	if err := lv.Start(ctx, name); err != nil {
+		return fmt.Errorf("start %s with the corrected boot order: %w", name, err)
+	}
+	logging.Success("Fixed boot order for %s (hd before network)", name)
 	return nil
 }
 

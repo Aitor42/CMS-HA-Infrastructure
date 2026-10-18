@@ -203,6 +203,11 @@ pki:
 deploy:
   ssh_timeout: 600s
   stagger_delay: 5s
+  # How long one batch of client nodes may take to install and answer SSH.
+  # The nodes of a batch install in parallel and share the host's vCPUs, so a
+  # host with fewer cores than the reference lab needs a larger budget
+  # (unset means the 15m default).
+  node_install_timeout: 15m
 
 drbd:
   # STONITH fencing (split-brain prevention). Before a node promotes itself it

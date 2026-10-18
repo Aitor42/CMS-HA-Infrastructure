@@ -293,39 +293,13 @@ func FixBootOrder(ctx context.Context, l *libvirt.Client, vmNames []string) erro
 				return
 			}
 
-			xml, err := l.DumpXML(ctx, vmName)
+			changed, err := normalizeBootOrder(ctx, l, vmName)
 			if err != nil {
-				recordError(fmt.Errorf("dump XML for %s: %w", vmName, err))
+				recordError(err)
 				return
 			}
-
-			if strings.Contains(xml, "<boot dev='network'/>") && strings.Contains(xml, "<boot dev='hd'/>") {
-				xml = strings.Replace(xml, "<boot dev='network'/>", "", 1)
-				xml = strings.Replace(xml, "<boot dev='hd'/>", "<boot dev='hd'/>\n    <boot dev='network'/>", 1)
-
-				tmpFile, err := os.CreateTemp("", fmt.Sprintf("%s-boot-*.xml", vmName))
-				if err != nil {
-					recordError(fmt.Errorf("create temporary XML for %s: %w", vmName, err))
-					return
-				}
-				tmpPath := tmpFile.Name()
-				defer os.Remove(tmpPath)
-
-				if _, err := tmpFile.Write([]byte(xml)); err != nil {
-					_ = tmpFile.Close()
-					recordError(fmt.Errorf("write updated XML for %s: %w", vmName, err))
-					return
-				}
-				if err := tmpFile.Close(); err != nil {
-					recordError(fmt.Errorf("close updated XML for %s: %w", vmName, err))
-					return
-				}
-
-				if err := l.Define(ctx, tmpPath); err != nil {
-					recordError(fmt.Errorf("define updated XML for %s: %w", vmName, err))
-				} else {
-					logging.Success("Fixed boot order for %s (hd before network)", vmName)
-				}
+			if changed {
+				logging.Success("Fixed boot order for %s (hd before network)", vmName)
 			}
 		}()
 	}
@@ -333,10 +307,75 @@ func FixBootOrder(ctx context.Context, l *libvirt.Client, vmNames []string) erro
 	return errors.Join(errs...)
 }
 
+// normalizeBootOrder rewrites a domain definition so its disk is tried before
+// its NIC and reports whether it had to change anything. It only touches the
+// persistent definition: a guest that is already running keeps the order it
+// started with, which is why newly created guests are restarted right away
+// (see CreateClientVM).
+func normalizeBootOrder(ctx context.Context, l *libvirt.Client, vmName string) (bool, error) {
+	xml, err := l.DumpXML(ctx, vmName)
+	if err != nil {
+		return false, fmt.Errorf("dump XML for %s: %w", vmName, err)
+	}
+
+	updated, changed := reorderBootElements(xml)
+	if !changed {
+		return false, nil
+	}
+
+	tmpFile, err := os.CreateTemp("", fmt.Sprintf("%s-boot-*.xml", vmName))
+	if err != nil {
+		return false, fmt.Errorf("create temporary XML for %s: %w", vmName, err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmpFile.Write([]byte(updated)); err != nil {
+		_ = tmpFile.Close()
+		return false, fmt.Errorf("write updated XML for %s: %w", vmName, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return false, fmt.Errorf("close updated XML for %s: %w", vmName, err)
+	}
+
+	if err := l.Define(ctx, tmpPath); err != nil {
+		return false, fmt.Errorf("define updated XML for %s: %w", vmName, err)
+	}
+	return true, nil
+}
+
+// reorderBootElements moves the network boot entry after the disk one and
+// reports whether the order had to change. virt-install 4.1 emits the network
+// first whenever --pxe is used, and a guest keeps the order it booted with
+// across reboots, so such a guest would reinstall itself instead of booting
+// the system the installer left on the disk.
+func reorderBootElements(xml string) (string, bool) {
+	const networkBoot = "<boot dev='network'/>"
+	const diskBoot = "<boot dev='hd'/>"
+
+	networkAt := strings.Index(xml, networkBoot)
+	diskAt := strings.Index(xml, diskBoot)
+	if networkAt < 0 || diskAt < 0 || diskAt < networkAt {
+		return xml, false
+	}
+
+	// Drop the network entry and put it back right after the disk one.
+	withoutNetwork := strings.Replace(xml, networkBoot, "", 1)
+	return strings.Replace(withoutNetwork, diskBoot, diskBoot+"\n    "+networkBoot, 1), true
+}
+
 // InstallByBatches provisions VMs in batches using PXE.
 func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s *ssh.Pool) error {
 	timer := logging.PhaseStart("Install By Batches")
 	defer timer.End()
+
+	// Every node in a batch installs at the same time and they all share the
+	// host's vCPUs, so the budget for a batch to finish and answer SSH grows
+	// with slower hosts; 15 minutes is what the reference lab needs.
+	sshBudget := cfg.Deploy.NodeInstallTimeout
+	if sshBudget <= 0 {
+		sshBudget = 15 * time.Minute
+	}
 
 	type nodeInfo struct {
 		name         string
@@ -417,8 +456,8 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 		}
 
 		// 2. Wait for SSH across the batch
-		logging.Info("Waiting for SSH on all VMs in Batch %d...", i+1)
-		if err := s.WaitForAllSSH(ctx, ips, 15*time.Minute); err != nil {
+		logging.Info("Waiting for SSH on all VMs in Batch %d (budget %s)...", i+1, sshBudget)
+		if err := s.WaitForAllSSH(ctx, ips, sshBudget); err != nil {
 			return fmt.Errorf("wait for SSH in batch %d: %w", i+1, err)
 		}
 

@@ -130,6 +130,7 @@ Run the command that automates the creation and installation of client nodes in 
     ```bash
     ./cms-ha vm fix-boot-order
     ```
+*   **Batch SSH Budget:** `deploy.node_install_timeout` (default `15m`) bounds how long a whole batch may take to install and answer SSH. The nodes of a batch install in parallel and share the host's vCPUs, so hosts with few cores need a larger budget — the hosted CI lab, which has 4 vCPU for the entire topology, uses `30m`.
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
 
