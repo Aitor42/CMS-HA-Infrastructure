@@ -235,6 +235,32 @@ jobs:
             | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
           ./cms-ha -c "$CONFIG" phase register-nodes \
             | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+
+          # Probes, not part of the deployment: the client installers resolve
+          # through the jumpstart's named and fetch their authorised keys from
+          # its Apache, so both are checked here, with the lab up and before the
+          # clients put load on it. Every probe is best-effort.
+          echo "==== resolver probe (as the client nodes use it) ===="
+          sudo apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
+          for q in archive.ubuntu.com security.ubuntu.com; do
+            for srv in "@192.168.10.10" ""; do
+              label=$([ -n "$srv" ] && echo jumpstart || echo runner)
+              printf -- "-- %s via %s: " "$q" "$label"
+              timeout 30 dig +time=3 +tries=1 +noall +answer +comments \
+                ${srv:+"$srv"} "$q" A 2>&1 \
+                | grep -E "Query time|status:" | tr '\n' ' ' || true
+              echo
+            done
+          done
+          echo "==== cobbler HTTP endpoints, from the runner ===="
+          timeout 10 curl -sS -o /dev/null \
+            -w 'authorized_keys -> HTTP %{http_code} in %{time_total}s\n' \
+            http://192.168.10.10/cblr/pub/authorized_keys || true
+          timeout 10 curl -sS http://192.168.10.10/cblr/pub/authorized_keys 2>&1 | head -3 || true
+          timeout 10 curl -sS -o /dev/null \
+            -w 'autoinstall   -> HTTP %{http_code} in %{time_total}s\n' \
+            http://192.168.10.10/cblr/svc/op/autoinstall/system/ufw-router/ || true
+
           ./cms-ha -c "$CONFIG" vm install-batches \
             | tee "$ARTIFACTS_DIR/03-install-batches.log"
           ./cms-ha -c "$CONFIG" status ssh
@@ -272,7 +298,64 @@ jobs:
             sudo tail -n 60 /var/log/libvirt/qemu/*.log 2>/dev/null || true
             echo "==== dmesg (kvm/oom) ===="
             sudo dmesg 2>/dev/null | grep -iE "kvm|oom|killed process" | tail -n 40 || true
+            echo "==== nodes: SSH authentication probe ===="
+            for ip in 192.168.10.1 192.168.10.15 192.168.10.20; do
+              echo "-- ubuntu@$ip"
+              timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=6 \
+                -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" 'echo NODE_OK' 2>&1 \
+                | grep -vE "^debug1: (Reading|Offering|Trying|Authentications)" \
+                | tail -14 || true
+            done
+            echo "==== nodes: CPU time (busy = installing, idle = done or stuck) ===="
+            for d in ufw-router internal-monitor internal-storage; do
+              printf -- "-- %s: " "$d"
+              virsh -c qemu:///system domstats "$d" --cpu-total 2>&1 \
+                | grep -E "cpu.time|state" | tr '\n' ' ' || true
+              echo
+            done
+            echo "==== neighbours on virbr-int ===="
+            ip neigh show dev virbr-int 2>/dev/null || true
+            echo "==== jumpstart: netboot flags, services and logs ===="
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.10 '
+                echo "-- netboot flags --"
+                for n in ufw-router internal-monitor internal-storage; do
+                  printf "%s: " "$n"
+                  sudo cobbler system report --name "$n" 2>/dev/null \
+                    | grep -i "netboot" || echo "(no netboot line)"
+                done
+                echo "-- services --"
+                systemctl is-active named isc-dhcp-server apache2 cobblerd \
+                  tftpd-hpa nfs-kernel-server 2>&1 | tr "\n" " "; echo
+                echo "-- apache access log (tail 40) --"
+                sudo tail -40 /var/log/apache2/access.log 2>/dev/null || true
+                echo "-- named journal (tail 30) --"
+                sudo journalctl -u named --no-pager -n 30 2>/dev/null || true
+                echo "-- dhcp journal (tail 80) --"
+                sudo journalctl -u isc-dhcp-server --no-pager -n 80 2>/dev/null || true
+              ' 2>&1 || true
           } > "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
+
+          # Serial console and screen of the stalled installers. They are
+          # headless for `virsh console` but the clients also carry a SPICE
+          # display, so a screenshot shows whatever the installer last drew.
+          command -v convert >/dev/null 2>&1 \
+            || sudo apt-get install -y -qq imagemagick >/dev/null 2>&1 || true
+          {
+            echo "==== guest consoles ===="
+            for d in ufw-router internal-monitor internal-storage; do
+              virsh -c qemu:///system screenshot "$d" "$ARTIFACTS_DIR/console-$d.ppm" \
+                2>&1 | sed "s/^/screenshot $d: /" || true
+              convert "$ARTIFACTS_DIR/console-$d.ppm" "$ARTIFACTS_DIR/console-$d.png" \
+                2>/dev/null || true
+              (sleep 2; printf "\n"; sleep 5) \
+                | timeout 15 virsh -c qemu:///system console "$d" --force \
+                  > "$ARTIFACTS_DIR/console-$d.txt" 2>&1 || true
+              echo "-- $d serial console (tail) --"
+              tr -d "\000" < "$ARTIFACTS_DIR/console-$d.txt" | tail -40 || true
+            done
+          } >> "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
 
       - name: Upload artifacts
         if: always()
