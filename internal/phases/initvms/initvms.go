@@ -21,6 +21,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
 )
 
 // Options holds flags for the init-vms phase.
@@ -408,7 +409,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 
 	// Create main disk
 	diskPath := filepath.Join(p.cfg.VM.StorageDir, "jumpstart.qcow2")
-	if err := ensureDiskPathAvailable(diskPath); err != nil {
+	if err := utils.EnsureDiskPathAvailable(diskPath); err != nil {
 		return err
 	}
 	if err := libvirt.CreateDisk(ctx, diskPath, p.cfg.Nodes.Jumpstart.DiskGB, "qcow2"); err != nil {
@@ -469,160 +470,30 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 // deployClientNodes provisions all client nodes via PXE boot.
 func (p *Phase) deployClientNodes(ctx context.Context) error {
 	logging.Info("Deploying client nodes...")
-	dir := p.cfg.VM.StorageDir
 
-	// One `virsh list --all` snapshot for the whole deployment instead of one
-	// `virsh domstate` per node.
-	existing, err := p.lv.DomainStates(ctx)
-	if err != nil {
-		return fmt.Errorf("list existing domains: %w", err)
-	}
-	exists := func(name string) bool {
-		_, ok := existing[name]
-		return ok
-	}
-
-	// Router (3 NICs: internal, main, WAN)
-	router := p.cfg.Nodes.Router
-	routerNets := []libvirt.NetworkOpt{
-		{Network: "internal", Mac: router.MACInternal},
-		{Network: "main", Mac: router.MACMain},
-	}
-	wanNet := "default"
-	if !p.lv.NetExists(ctx, "default") {
-		wanNet = "main"
-		logging.Warn("'default' network not available, using 'main' as WAN for router")
-	}
-	routerNets = append(routerNets, libvirt.NetworkOpt{Network: wanNet, Mac: router.MACWAN})
-
-	if err := p.createClientVM(ctx, router, dir, routerNets, nil, exists(router.Name)); err != nil {
-		return fmt.Errorf("failed to create router VM: %w", err)
-	}
-
-	// Internal network nodes
-	internalNodes := []config.NodeDetail{
-		p.cfg.Nodes.Monitor,
-		p.cfg.Nodes.Storage,
-	}
-	for _, node := range internalNodes {
-		nets := []libvirt.NetworkOpt{{Network: "internal", Mac: node.MAC}}
-		if err := p.createClientVM(ctx, node, dir, nets, nil, exists(node.Name)); err != nil {
+	// The jumpstart is installed from its ISO rather than over PXE, so it is
+	// the one entry of the topology this phase must leave alone.
+	var clientNames []string
+	for _, node := range p.cfg.AllNodes() {
+		if node.Name == "" || node.Name == p.cfg.Nodes.Jumpstart.Name {
+			continue
+		}
+		if err := utils.CreateClientVM(ctx, p.cfg, p.lv, node.Name); err != nil {
 			return fmt.Errorf("failed to create VM %s: %w", node.Name, err)
 		}
+		clientNames = append(clientNames, node.Name)
 	}
 
-	// Masters with drbd_disk_gb > 0 get the extra replicated disk; the shipped
-	// topology sets it only on master1/master2, so DRBD stays a bounded 2-node
-	// setup.
-	for _, master := range p.cfg.Nodes.Masters {
-		nets := []libvirt.NetworkOpt{{Network: "internal", Mac: master.MAC}}
-		var extraDisks []libvirt.DiskOpt
-		if master.DRBDDiskGB > 0 {
-			extraDisks = append(extraDisks, libvirt.DiskOpt{
-				Path:   filepath.Join(dir, master.Name+"-drbd.qcow2"),
-				SizeGB: master.DRBDDiskGB,
-			})
-		}
-		if err := p.createClientVM(ctx, master, dir, nets, extraDisks, exists(master.Name)); err != nil {
-			return fmt.Errorf("failed to create master VM %s: %w", master.Name, err)
-		}
-	}
-
-	// Workers
-	for _, worker := range p.cfg.Nodes.Workers {
-		nets := []libvirt.NetworkOpt{{Network: "internal", Mac: worker.MAC}}
-		if err := p.createClientVM(ctx, worker, dir, nets, nil, exists(worker.Name)); err != nil {
-			return fmt.Errorf("failed to create worker VM %s: %w", worker.Name, err)
-		}
-	}
-
-	// Main network nodes
-	for _, lb := range p.cfg.Nodes.LBs {
-		lbNets := []libvirt.NetworkOpt{{Network: "main", Mac: lb.MAC}}
-		if err := p.createClientVM(ctx, lb, dir, lbNets, nil, exists(lb.Name)); err != nil {
-			return fmt.Errorf("failed to create LB VM %s: %w", lb.Name, err)
-		}
-	}
-
-	for _, cms := range p.cfg.Nodes.CMSFrontends {
-		nets := []libvirt.NetworkOpt{{Network: "main", Mac: cms.MAC}}
-		if err := p.createClientVM(ctx, cms, dir, nets, nil, exists(cms.Name)); err != nil {
-			return fmt.Errorf("failed to create CMS VM %s: %w", cms.Name, err)
-		}
-	}
-
-	// Hotdesks (dynamically generated)
-	for _, hd := range p.cfg.HotdeskSpecs() {
-		nets := []libvirt.NetworkOpt{{Network: "main", Mac: hd.MAC}}
-		n := config.NodeDetail{
-			Name:         hd.Name,
-			IP:           hd.IP,
-			FQDN:         hd.FQDN,
-			MAC:          hd.MAC,
-			RAMInstallMB: hd.RAMInstallMB,
-			RAMFinalMB:   hd.RAMFinalMB,
-			VCPUs:        hd.VCPUs,
-			DiskGB:       hd.DiskGB,
-		}
-		if err := p.createClientVM(ctx, n, dir, nets, nil, exists(hd.Name)); err != nil {
-			return fmt.Errorf("failed to create hotdesk VM %s: %w", hd.Name, err)
-		}
+	// virt-install 4.1 boots a freshly created guest from the network first,
+	// even when --boot asks for the disk, so the post-install reboot would
+	// re-enter PXE and reinstall the node. Normalise the order once every
+	// client domain is defined; the change applies on their next boot, which
+	// is the reboot the installer performs minutes later.
+	if err := utils.FixBootOrder(ctx, p.lv, clientNames); err != nil {
+		return fmt.Errorf("fix client node boot order: %w", err)
 	}
 
 	logging.Success("All client nodes deployed")
-	return nil
-}
-
-// createClientVM creates a single client VM with PXE boot. exists reports
-// whether the domain is already defined (resolved once by the caller).
-func (p *Phase) createClientVM(ctx context.Context, node config.NodeDetail, vmDir string, nets []libvirt.NetworkOpt, extraDisks []libvirt.DiskOpt, exists bool) error {
-	if exists {
-		logging.Info("VM %s already exists; leaving it intact (use --recreate to replace it)", node.Name)
-		return nil
-	}
-	logging.Info("Creating VM: %s (RAM: %d MB, vCPUs: %d, Disk: %d GB)",
-		node.Name, node.RAMInstallMB, node.VCPUs, node.DiskGB)
-
-	diskPath := filepath.Join(vmDir, node.Name+".qcow2")
-	if err := ensureDiskPathAvailable(diskPath); err != nil {
-		return err
-	}
-	disks := []libvirt.DiskOpt{{Path: diskPath, SizeGB: node.DiskGB}}
-	disks = append(disks, extraDisks...)
-	for _, disk := range extraDisks {
-		if err := ensureDiskPathAvailable(disk.Path); err != nil {
-			return err
-		}
-	}
-
-	err := p.lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
-		Name:          node.Name,
-		RAM:           node.RAMInstallMB,
-		VCPUs:         node.VCPUs,
-		Disks:         disks,
-		Networks:      nets,
-		PXE:           true,
-		BootOrder:     []string{"hd", "network"},
-		OSVariant:     "ubuntu24.04",
-		NoAutoConsole: true,
-		Wait:          0,
-	})
-	if err != nil {
-		return err
-	}
-	_ = os.Chmod(diskPath, 0666)
-	for _, ed := range extraDisks {
-		_ = os.Chmod(ed.Path, 0666)
-	}
-	return nil
-}
-
-func ensureDiskPathAvailable(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("disk %s exists without a registered VM; refusing to overwrite it (use init-vms --recreate after confirming the data can be discarded)", path)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("check disk path %s: %w", path, err)
-	}
 	return nil
 }
 

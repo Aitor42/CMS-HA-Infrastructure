@@ -379,8 +379,13 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 	for i, batch := range batches {
 		logging.Info("Starting Batch %s...", batchNames[i])
 
-		// 1. Boot all VMs in this batch
+		// 1. Define (when missing) and boot every VM in this batch. Creating
+		// the batch here, instead of relying on `init-vms` to have defined the
+		// whole topology in one go, is what makes the batching worth anything
+		// on a RAM-limited host: each batch is shrunk and idle by the time the
+		// next one starts its installer.
 		var ips []string
+		var batchNamesList []string
 		states, err := l.DomainStates(ctx)
 		if err != nil {
 			return fmt.Errorf("list domains for batch %d: %w", i+1, err)
@@ -389,16 +394,26 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			if node.name == "" || node.ip == "" {
 				return fmt.Errorf("batch %d has a VM with an empty name or IP", i+1)
 			}
-			state, exists := states[node.name]
-			if !exists {
-				return fmt.Errorf("VM %s is not defined; run init-vms before installing batches", node.name)
-			}
-			if state != "running" {
+			batchNamesList = append(batchNamesList, node.name)
+			state, defined := states[node.name]
+			if !defined {
+				if err := CreateClientVM(ctx, cfg, l, node.name); err != nil {
+					return fmt.Errorf("create VM %s: %w", node.name, err)
+				}
+			} else if state != "running" {
 				if err := l.Start(ctx, node.name); err != nil {
 					return fmt.Errorf("start VM %s: %w", node.name, err)
 				}
 			}
 			ips = append(ips, node.ip)
+		}
+
+		// Pin disk-first booting now, minutes before the installers finish:
+		// virt-install 4.1 leaves a freshly created PXE guest booting from the
+		// network first, and the reboot at the end of the autoinstall would
+		// re-enter PXE and reinstall the node if this waited for SSH.
+		if err := FixBootOrder(ctx, l, batchNamesList); err != nil {
+			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
 		}
 
 		// 2. Wait for SSH across the batch
@@ -407,11 +422,8 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			return fmt.Errorf("wait for SSH in batch %d: %w", i+1, err)
 		}
 
-		// 3. Fix boot order in parallel and signal shutdown
-		var batchNamesList []string
-		for _, node := range batch {
-			batchNamesList = append(batchNamesList, node.name)
-		}
+		// 3. Re-assert the boot order (idempotent) and signal shutdown, so the
+		// batch releases its RAM before the next one starts its installer.
 		if err := FixBootOrder(ctx, l, batchNamesList); err != nil {
 			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
 		}
