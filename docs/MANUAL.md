@@ -378,6 +378,14 @@ It requires `/dev/kvm`, a working libvirt connection, and a container runtime
 (docker/podman) for the pinned tooling images. The checkpoint and the
 `verify`/`failover` logs are uploaded as CI artifacts.
 
+The same driver also runs on a free GitHub-hosted runner through
+`.github/workflows/integration-hosted.yml`, which is manual as well. Hosted
+Linux runners do expose nested KVM, so the lab is real, but it is small: 4
+vCPU and 15 GiB of RAM. The workflow therefore deploys `config.ci.yaml` (the
+shipped topology without the three hotdesks) and provisions the clients with
+`vm install-batches`, the batched procedure of section 2, instead of booting
+every guest at once.
+
 ---
 
 ## 4. Monitoring and Metrics

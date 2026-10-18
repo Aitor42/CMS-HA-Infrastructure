@@ -208,7 +208,8 @@ CMS-HA-Infrastructure/
 ├── tests/integration/run.sh         # End-to-end integration driver (deploy + verify + failover)
 ├── docs/SECURITY.md                 # Non-root access, host-key TOFU, CI scanning model
 ├── .github/workflows/ci.yml         # CI: build/tests + lint + kustomize/kubeconform + ansible-lint + security scan
-└── .github/workflows/integration.yml # CI: end-to-end lab run on a self-hosted KVM runner
+├── .github/workflows/integration.yml # CI: end-to-end lab run on a self-hosted KVM runner
+└── .github/workflows/integration-hosted.yml # CI: the same lab on a GitHub-hosted runner
 ```
 
 ---
@@ -515,6 +516,13 @@ tests/integration/run.sh --skip-deploy --skip-chaos   # verify only
 The deployment checkpoint (`deploy.state`) is collected as a CI artifact so a
 failed run can be resumed with `./cms-ha deploy --resume`.
 
+The same driver also runs on a standard `ubuntu-latest` runner through
+`.github/workflows/integration-hosted.yml` (manual as well). Hosted runners do
+expose nested KVM, so the lab is genuinely virtualised, but it is small — 4
+vCPU and 15 GiB of RAM — which is why that workflow deploys `config.ci.yaml`
+(the shipped topology without the hotdesks) and provisions the clients in
+batches instead of booting every guest at once.
+
 ---
 
 ## Documentation
@@ -543,6 +551,7 @@ The GitHub Actions CI validates every push and pull request:
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
 | Security Scan | gosec + govulncheck + Trivy | Go SAST, dependency CVEs, secrets/misconfig |
 | Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + DRBD failover (manual dispatch) |
+| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: same pipeline on the reduced topology (manual dispatch) |
 
 ---
 
