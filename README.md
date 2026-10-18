@@ -62,55 +62,65 @@ The environment is driven by three cooperating layers:
 
 The network is segmented into **two isolated subnets** connected by a UFW router/firewall:
 
-| Network | CIDR | Purpose |
-|:--------|:-----|:--------|
-| **internal** | `192.168.10.0/24` | K3s cluster, MariaDB, DRBD replication, monitoring, provisioning |
-| **main** | `192.168.20.0/24` | Load balancer, CMS frontends (WordPress), hot-desk workstations |
+| Network | CIDR | Bridge | Purpose |
+|:--------|:-----|:-------|:--------|
+| **internal** | `192.168.10.0/24` | `virbr-int` | K3s cluster, MariaDB, DRBD replication, monitoring, provisioning |
+| **main** | `192.168.20.0/24` | `virbr-main` | Load balancer, CMS frontends (WordPress), hot-desk workstations |
+
+`jumpstart` belongs to **`internal`** (`192.168.10.10` — it is the PXE/DHCP/DNS/Puppet/CA server for that subnet) and is dual-homed with a second interface on **`main`** (`192.168.20.10`). The diagram below shows the topology; the service flows between nodes are in [`docs/NETWORK_DIAGRAM.md`](docs/NETWORK_DIAGRAM.md).
 
 ```mermaid
 graph TB
-    subgraph WAN["☁ Internet / WAN"]
-        INET["External Clients"]
+    WAN["☁ WAN — external clients"]
+
+    subgraph ROUTER["🔒 ufw-router — Router / Firewall"]
+        direction TB
+        R_WAN["eth0 · DHCP (WAN)"]
+        R_FW["UFW · NAT<br/>DNAT :80/:443 → VIP"]
+        R_INT["eth1 · 192.168.10.1"]
+        R_MAIN["eth2 · 192.168.20.1"]
+        R_WAN --- R_FW --- R_INT
+        R_FW --- R_MAIN
     end
 
-    subgraph ROUTER["Router / Firewall — ufw-router"]
-        R_ETH0["eth0 — DHCP (WAN)"]
-        R_ETH1["eth1 — 192.168.10.1"]
-        R_ETH2["eth2 — 192.168.20.1"]
+    subgraph INTERNAL["🟩 internal · 192.168.10.0/24 · virbr-int"]
+        direction TB
+        JS["🖥 jumpstart · .10<br/>Cobbler PXE · Puppet · step-ca"]
+
+        subgraph K3S["K3s HA cluster"]
+            M1["🟢 master1 · .11<br/>DRBD primary"]
+            M2["🟢 master2 · .12<br/>DRBD secondary"]
+            M3["🟢 master3 · .16<br/>etcd quorum"]
+            W1["🔵 worker1 · .13"]
+            W2["🔵 worker2 · .14"]
+            M1 ~~~ M2 ~~~ M3
+            W1 ~~~ W2
+        end
+
+        ST["💾 storage · .15<br/>NFS uploads"]
+        MON["📊 monitor · .20<br/>Prometheus · Grafana · Alertmanager"]
     end
 
-    subgraph INTERNAL["Internal Network — 192.168.10.0/24"]
-        JS["jumpstart<br/>192.168.10.10<br/>Cobbler + Puppet"]
-        M1["internal-master1<br/>192.168.10.11<br/>K3s Server + DRBD Primary"]
-        M2["internal-master2<br/>192.168.10.12<br/>K3s Server + DRBD Secondary"]
-        M3["internal-master3<br/>192.168.10.16<br/>K3s Server (etcd quorum)"]
-        W1["internal-worker1<br/>192.168.10.13<br/>K3s Agent"]
-        W2["internal-worker2<br/>192.168.10.14<br/>K3s Agent"]
-        ST["internal-storage<br/>192.168.10.15"]
-        MON["internal-monitor<br/>192.168.10.20<br/>Prometheus + Grafana"]
+    subgraph MAIN["🟦 main · 192.168.20.0/24 · virbr-main"]
+        direction TB
+        VIP(("★ VIP · 192.168.20.100<br/>keepalived"))
+        subgraph LBS["⚖ Load balancers"]
+            LB1["main-lb1 · .103<br/>Nginx"]
+            LB2["main-lb2 · .104<br/>Nginx"]
+            LB1 ~~~ LB2
+        end
+        subgraph FES["🌐 CMS frontends"]
+            CMS1["main-cms1 · .101<br/>WordPress + Apache"]
+            CMS2["main-cms2 · .102<br/>WordPress + Apache"]
+            CMS1 ~~~ CMS2
+        end
+        HD["💻 main-hotdesk1..3 · .201-.203<br/>(up to 8)"]
     end
 
-    subgraph MAIN["Client Network — 192.168.20.0/24"]
-        VIP(("VIP 192.168.20.100<br/>keepalived"))
-        LB1["main-lb1<br/>192.168.20.103<br/>Nginx LB"]
-        LB2["main-lb2<br/>192.168.20.104<br/>Nginx LB"]
-        CMS1["main-cms1<br/>192.168.20.101<br/>WordPress + Apache"]
-        CMS2["main-cms2<br/>192.168.20.102<br/>WordPress + Apache"]
-        HD["main-hotdesk1..3 (up to 8)<br/>192.168.20.201-203"]
-    end
-
-    INET --- R_ETH0
-    R_ETH1 --- INTERNAL
-    R_ETH2 --- MAIN
-    JS -.- |"192.168.20.10"| MAIN
-
-    M1 <--> |"DRBD sync<br/>port 7788"| M2
-    VIP --- LB1
-    VIP --- LB2
-    LB1 --> CMS1
-    LB1 --> CMS2
-    LB2 --> CMS1
-    LB2 --> CMS2
+    WAN -->|"HTTP/S"| R_WAN
+    R_INT --- INTERNAL
+    R_MAIN --- MAIN
+    JS -.->|"2nd NIC · .20.10"| MAIN
 ```
 
 > For detailed topology, service, and deployment sequence diagrams see [`docs/NETWORK_DIAGRAM.md`](docs/NETWORK_DIAGRAM.md).

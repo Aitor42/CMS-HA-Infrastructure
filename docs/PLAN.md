@@ -44,7 +44,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 |:---------|:---|:--------|:-----|:----|:-----|:----|
 | ufw-router | eth0: DHCP (WAN) | WAN | Perimeter router / firewall | 768 MB | 5 GB | (auto) |
 | | eth1: 192.168.10.1 | internal | Internal network gateway | | | (auto) |
-| | eth2: 192.168.20.1 | main | Client network gateway | | | (auto) |
+| | eth2: 192.168.20.1 | main | `main` network gateway | | | (auto) |
 
 ### Jumpstart Node (dual/triple-homed)
 
@@ -54,7 +54,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 | | 192.168.20.10 | main | (secondary interface) | | | 52:54:00:10:02:0a |
 | | DHCP (WAN) | WAN | (optional interface for package downloads) | | | 52:54:00:10:00:09 |
 
-### Internal Network (192.168.10.0/24)
+### Internal Network — `internal` (192.168.10.0/24)
 
 | Hostname | IP | Network | Role | RAM | Disk | MAC |
 |:---------|:---|:--------|:-----|:----|:-----|:----|
@@ -66,7 +66,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 | internal-storage | 192.168.10.15 | internal | Centralised NFS storage server (WordPress uploads) | 1024 MB | 8 GB | 52:54:00:10:01:15 |
 | internal-monitor | 192.168.10.20 | internal | Prometheus + Grafana | 1024 MB | 10 GB | 52:54:00:10:01:10 |
 
-### Client Network (192.168.20.0/24)
+### Main Network — `main` (192.168.20.0/24)
 
 | Hostname | IP | Network | Role | RAM | Disk | MAC |
 |:---------|:---|:--------|:-----|:----|:-----|:----|
@@ -152,65 +152,61 @@ The deployment is executed end-to-end by the Go CLI (`cms-ha deploy`); the **Bas
 
 ```mermaid
 graph TB
-    subgraph WAN["☁ Internet / WAN"]
-        INET["External Clients"]
+    WAN["☁ WAN — external clients"]
+
+    subgraph ROUTER["🔒 ufw-router — Router / Firewall"]
+        direction TB
+        R_WAN["eth0 · DHCP (WAN)"]
+        R_FW["UFW · NAT<br/>DNAT :80/:443 → VIP"]
+        R_INT["eth1 · 192.168.10.1"]
+        R_MAIN["eth2 · 192.168.20.1"]
+        R_WAN --- R_FW --- R_INT
+        R_FW --- R_MAIN
     end
 
-    subgraph ROUTER["🔒 Router / Firewall — ufw-router"]
-        R_ETH0["eth0 — DHCP (WAN)"]
-        R_FW["UFW + NAT<br/>DNAT :80/:443"]
-        R_ETH1["eth1 — 192.168.10.1"]
-        R_ETH2["eth2 — 192.168.20.1"]
-        R_ETH0 --- R_FW
-        R_FW --- R_ETH1
-        R_FW --- R_ETH2
-    end
+    subgraph INTERNAL["🟩 internal · 192.168.10.0/24 · virbr-int"]
+        direction TB
+        JS["🖥 jumpstart · .10<br/>Cobbler PXE · Puppet · step-ca"]
 
-    subgraph INTERNAL["🟩 Internal Network — 192.168.10.0/24"]
-        JS["🖥 jumpstart<br/>192.168.10.10<br/>Cobbler · Puppet · step-ca"]
-
-        subgraph K3S["K3s HA Cluster"]
-            M1["🟢 master1<br/>.11 · DRBD Primary"]
-            M2["🟢 master2<br/>.12 · DRBD Secondary"]
-            M3["🟢 master3<br/>.16 · etcd quorum"]
+        subgraph K3S["K3s HA cluster"]
+            M1["🟢 master1 · .11<br/>DRBD primary"]
+            M2["🟢 master2 · .12<br/>DRBD secondary"]
+            M3["🟢 master3 · .16<br/>etcd quorum"]
             W1["🔵 worker1 · .13"]
             W2["🔵 worker2 · .14"]
+            M1 ~~~ M2 ~~~ M3
+            W1 ~~~ W2
         end
 
-        ST["💾 storage · .15"]
-        MON["📊 monitor · .20<br/>Prometheus · Grafana"]
+        ST["💾 storage · .15<br/>NFS uploads"]
+        MON["📊 monitor · .20<br/>Prometheus · Grafana · Alertmanager"]
     end
 
-    subgraph MAIN["🟦 Client Network — 192.168.20.0/24"]
-        VIP(("★ VIP · .100<br/>keepalived"))
-        LB1["⚖ main-lb1 · .103<br/>Nginx LB"]
-        LB2["⚖ main-lb2 · .104<br/>Nginx LB"]
-        CMS1["🌐 cms1 · .101<br/>WordPress"]
-        CMS2["🌐 cms2 · .102<br/>WordPress"]
-        HD["💻 hotdesk1..3 (up to 8)<br/>.201-.203"]
+    subgraph MAIN["🟦 main · 192.168.20.0/24 · virbr-main"]
+        direction TB
+        VIP(("★ VIP · 192.168.20.100<br/>keepalived"))
+        subgraph LBS["⚖ Load balancers"]
+            LB1["main-lb1 · .103<br/>Nginx"]
+            LB2["main-lb2 · .104<br/>Nginx"]
+            LB1 ~~~ LB2
+        end
+        subgraph FES["🌐 CMS frontends"]
+            CMS1["main-cms1 · .101<br/>WordPress + Apache"]
+            CMS2["main-cms2 · .102<br/>WordPress + Apache"]
+            CMS1 ~~~ CMS2
+        end
+        HD["💻 main-hotdesk1..3 · .201-.203<br/>(up to 8)"]
     end
 
-    INET -->|"HTTP/S"| R_ETH0
-    R_ETH1 --> INTERNAL
-    R_ETH2 -->|"DNAT → .100"| MAIN
-    JS -.->|".20.10"| MAIN
-
-    M1 <-->|"DRBD sync<br/>tcp/7788"| M2
-    ST ---|"shared data"| M1
-    VIP --> LB1
-    VIP --> LB2
-    LB1 --> CMS1
-    LB1 --> CMS2
-    LB2 --> CMS1
-    LB2 --> CMS2
-    CMS1 -->|"tcp/3306"| M1
-    CMS2 -->|"tcp/3306"| M1
-    MON -.->|"scrape :9100"| M1
-    MON -.->|"scrape :9100"| LB1
-    MON -.->|"scrape :9100"| LB2
+    WAN -->|"HTTP/S"| R_WAN
+    R_INT --- INTERNAL
+    R_MAIN --- MAIN
+    JS -.->|"2nd NIC · .20.10"| MAIN
 ```
 
-> For detailed topology, service architecture, and deployment sequence diagrams see [`NETWORK_DIAGRAM.md`](NETWORK_DIAGRAM.md).
+> The two subnet names are **`internal`** (`virbr-int`) and **`main`** (`virbr-main`). `jumpstart` lives on `internal` and is dual-homed on `main` (`192.168.20.10`).
+>
+> For the detailed topology, service architecture, and deployment sequence diagrams see [`NETWORK_DIAGRAM.md`](NETWORK_DIAGRAM.md).
 
 ---
 
@@ -222,11 +218,14 @@ Configurable parameters used throughout the deployment scripts:
 
 | Variable | Value | Description |
 |:---------|:------|:------------|
-| `INTERNAL_NET` | `192.168.10.0/24` | Internal network CIDR |
-| `MAIN_NET` | `192.168.20.0/24` | Client network CIDR |
-| `GW_INTERNAL` | `192.168.10.1` | Internal network gateway (router eth1) |
-| `GW_MAIN` | `192.168.20.1` | Client network gateway (router eth2) |
-| `DNS_SERVER` | `192.168.10.10` | DNS server (BIND9 on jumpstart) |
+| `INTERNAL_NET` | `192.168.10.0/24` | `internal` network CIDR (bridge `virbr-int`) |
+| `MAIN_NET` | `192.168.20.0/24` | `main` network CIDR (bridge `virbr-main`) |
+| `GW_INTERNAL` | `192.168.10.1` | `internal` gateway (router eth1) |
+| `GW_MAIN` | `192.168.20.1` | `main` gateway (router eth2) |
+| `DNS_SERVER` | `192.168.10.10` | DNS server (BIND9/Cobbler on jumpstart, `internal`) |
+| `JUMPSTART_IP_MAIN` | `192.168.20.10` | Jumpstart's second interface on `main` |
+
+In the v2 Go CLI these values come from `config.yaml` (`network.internal` / `network.main`); the variable names above are those used by the deprecated Bash scripts.
 
 ### Core Nodes
 

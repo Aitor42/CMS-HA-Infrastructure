@@ -930,7 +930,7 @@ kubectl label node internal-master1 drbd-status=primary --overwrite
 #### Router NAT Rules Inactive or Stale
 
 Symptom:
-Client network nodes cannot access the internet (HTTP/HTTPS downloads fail), or external traffic on port 80/443 fails to reach the load balancer (`192.168.20.100`).
+Nodes on the `main` network cannot access the internet (HTTP/HTTPS downloads fail), or external traffic on port 80/443 fails to reach the load balancer (`192.168.20.100`).
 
 Cause:
 The `*nat` block in `/etc/ufw/before.rules` must appear *before* the `*filter` section and reference the correct dynamic WAN interface.

@@ -20,7 +20,7 @@
 
 ### IP Address Inventory
 
-**Internal Network (6 nodes):**
+**Internal Network — `internal` (6 nodes):**
 
 | Hostname | IP | MAC | Role | RAM |
 |:---------|:---|:---|:-----|:----|
@@ -32,7 +32,7 @@
 | internal-worker2 | 192.168.10.14 | 52:54:00:10:01:14 | K3s worker | 768 MB |
 | internal-storage | 192.168.10.15 | 52:54:00:10:01:15 | Centralized storage | 1024 MB |
 
-**Client Network / Main (4 nodes + 3 hot-desks):**
+**Main Network — `main` (4 nodes + 3 hot-desks):**
 
 | Hostname | IP | MAC | Role | RAM |
 |:---------|:---|:---|:-----|:----|

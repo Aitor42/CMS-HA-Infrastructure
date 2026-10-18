@@ -6,205 +6,132 @@ This document contains the technical architecture diagrams for the CMS high-avai
 
 ## 1. Complete Network Topology
 
-Diagram showing the physical and logical network segmentation, including all nodes, their IP addresses, and inter-network connections.
+Physical and logical network segmentation: the two subnets, the router between them, every node with its address, and the jumpstart's second interface. The service flows between nodes are kept out of this diagram (they crossed each other) and are shown separately in [section 2](#2-service-architecture).
 
 ```mermaid
 graph TB
-    subgraph INTERNET["☁ Internet / WAN"]
-        CLOUD["External Clients"]
-    end
+    WAN["☁ WAN — external clients"]
 
-    subgraph FW["🔒 Router / Firewall — ufw-router"]
-        ETH0["eth0<br/>DHCP (WAN)"]
-        UFW_CORE["UFW + NAT + IP Forwarding<br/>DNAT :80/:443 → 192.168.20.100"]
-        ETH1["eth1<br/>192.168.10.1"]
-        ETH2["eth2<br/>192.168.20.1"]
-        ETH0 --- UFW_CORE
-        UFW_CORE --- ETH1
-        UFW_CORE --- ETH2
-    end
-
-    subgraph INTERNAL["🟩 Internal Network — 192.168.10.0/24"]
+    subgraph ROUTER["🔒 ufw-router — Router / Firewall"]
         direction TB
-        JS["🖥 jumpstart<br/>192.168.10.10<br/>Cobbler · Puppet Server · step-ca"]
+        R_WAN["eth0 · DHCP (WAN)"]
+        R_FW["UFW · NAT + IP forwarding<br/>DNAT :80/:443 → VIP 192.168.20.100"]
+        R_INT["eth1 · 192.168.10.1"]
+        R_MAIN["eth2 · 192.168.20.1"]
+        R_WAN --- R_FW --- R_INT
+        R_FW --- R_MAIN
+    end
 
-        subgraph K3S_CLUSTER["K3s HA Cluster"]
-            direction LR
-            M1["🟢 internal-master1<br/>192.168.10.11<br/>K3s Server · DRBD Primary"]
-            M2["🟢 internal-master2<br/>192.168.10.12<br/>K3s Server · DRBD Secondary"]
-            M3["🟢 internal-master3<br/>192.168.10.16<br/>K3s Server · etcd quorum"]
-            W1["🔵 internal-worker1<br/>192.168.10.13<br/>K3s Agent"]
-            W2["🔵 internal-worker2<br/>192.168.10.14<br/>K3s Agent"]
+    subgraph INTERNAL["🟩 internal · 192.168.10.0/24 · virbr-int"]
+        direction TB
+        JS["🖥 jumpstart · .10<br/>Cobbler PXE/DHCP/DNS · Puppet · step-ca"]
+
+        subgraph K3S["K3s HA cluster (embedded etcd)"]
+            M1["🟢 internal-master1 · .11<br/>K3s server · DRBD primary"]
+            M2["🟢 internal-master2 · .12<br/>K3s server · DRBD secondary"]
+            M3["🟢 internal-master3 · .16<br/>K3s server · etcd quorum"]
+            W1["🔵 internal-worker1 · .13"]
+            W2["🔵 internal-worker2 · .14"]
+            M1 ~~~ M2 ~~~ M3
+            W1 ~~~ W2
         end
 
-        ST["💾 internal-storage<br/>192.168.10.15<br/>Centralised Storage"]
-        MON["📊 internal-monitor<br/>192.168.10.20<br/>Prometheus · Grafana · alert rules"]
+        ST["💾 internal-storage · .15<br/>NFS shared uploads"]
+        MON["📊 internal-monitor · .20<br/>Prometheus · Grafana · Alertmanager"]
     end
 
-    subgraph MAIN["🟦 Client Network — 192.168.20.0/24"]
+    subgraph MAIN["🟦 main · 192.168.20.0/24 · virbr-main"]
         direction TB
         VIP(("★ VIP · 192.168.20.100<br/>keepalived"))
-
-        subgraph LB_POOL["Load Balancers (VRRP)"]
-            LB1["⚖ main-lb1<br/>192.168.20.103<br/>Nginx Reverse Proxy"]
-            LB2["⚖ main-lb2<br/>192.168.20.104<br/>Nginx Reverse Proxy"]
+        subgraph LBS["⚖ Load balancers"]
+            LB1["main-lb1 · .103<br/>Nginx"]
+            LB2["main-lb2 · .104<br/>Nginx"]
+            LB1 ~~~ LB2
         end
-
-        subgraph CMS_POOL["CMS Frontends"]
-            CMS1["🌐 main-cms1<br/>192.168.20.101<br/>WordPress + Apache"]
-            CMS2["🌐 main-cms2<br/>192.168.20.102<br/>WordPress + Apache"]
+        subgraph FES["🌐 CMS frontends"]
+            CMS1["main-cms1 · .101<br/>WordPress + Apache"]
+            CMS2["main-cms2 · .102<br/>WordPress + Apache"]
+            CMS1 ~~~ CMS2
         end
-
-        subgraph HOTDESKS["Hot-desk Workstations"]
-            HD1["💻 main-hotdesk1<br/>192.168.20.201"]
-            HD2["💻 main-hotdesk2<br/>192.168.20.202"]
-            HD38["💻 main-hotdesk3 (up to 8)<br/>192.168.20.203"]
-        end
+        HD["💻 main-hotdesk1..3 · .201-.203<br/>(up to 8)"]
     end
 
-    %% --- WAN traffic ---
-    CLOUD -->|"HTTP/S :80/:443"| ETH0
-    ETH1 --> INTERNAL
-    ETH2 --> MAIN
-
-    %% --- Dual-homed jumpstart ---
-    JS -.->|"192.168.20.10<br/>secondary interface"| MAIN
-
-    %% --- K3s cluster mesh ---
-    M1 <-->|"DRBD sync<br/>tcp/7788"| M2
-    M1 ---|"K3s API :6443"| W1
-    M1 ---|"K3s API :6443"| W2
-    M2 ---|"K3s API :6443"| W1
-    M2 ---|"K3s API :6443"| W2
-
-    %% --- Storage ---
-    ST ---|"shared data"| M1
-    ST ---|"shared data"| M2
-
-    %% --- Load balancing ---
-    VIP ---|"VRRP"| LB1
-    VIP ---|"VRRP"| LB2
-    LB1 -->|"proxy_pass :80"| CMS1
-    LB1 -->|"proxy_pass :80"| CMS2
-    LB2 -->|"proxy_pass :80"| CMS1
-    LB2 -->|"proxy_pass :80"| CMS2
-
-    %% --- CMS to DB ---
-    CMS1 -->|"tcp/3306"| M1
-    CMS2 -->|"tcp/3306"| M1
-
-    %% --- Monitoring scrape targets (all nodes) ---
-    MON -.->|"scrape :9100"| JS
-    MON -.->|"scrape :9100"| M1
-    MON -.->|"scrape :9100"| M2
-    MON -.->|"scrape :9100"| W1
-    MON -.->|"scrape :9100"| W2
-    MON -.->|"scrape :9100"| ST
-    MON -.->|"scrape :9100/:9113/:9117"| LB1
-    MON -.->|"scrape :9100/:9113/:9117"| LB2
-    MON -.->|"scrape :9100/:9117"| CMS1
-    MON -.->|"scrape :9100/:9117"| CMS2
-    MON -.->|"scrape :9100"| ETH1
+    WAN -->|"HTTP/S :80/:443"| R_WAN
+    R_INT -->|"gateway"| INTERNAL
+    R_MAIN -->|"gateway"| MAIN
+    JS -.->|"2nd NIC · 192.168.20.10"| MAIN
 ```
 
 ### Legend
 
 | Symbol | Meaning |
 |:-------|:--------|
-| Solid line (`→`) | Data traffic / active connection |
-| Dashed line (`-..->`) | Management / monitoring traffic |
+| Solid line (`→` / `—`) | Subnet attachment / physical link |
+| Dotted line (`-.->`) | Secondary (dual-homed) interface |
+| Subnet label | `internal` / `main` — the network names used by `config.yaml` (`virbr-int` / `virbr-main`) |
 | `🔒` | Router / firewall |
 | `🖥` | Provisioning server (Cobbler · Puppet · step-ca) |
 | `⚖` | Load balancer |
 | `🟢` | K3s master node (DRBD) |
 | `🔵` | K3s worker node |
-| `💾` | Storage node |
+| `💾` | Storage node (NFS server) |
 | `📊` | Monitoring node (Prometheus · Grafana · alert rules) |
 | `🌐` | CMS frontend (WordPress + Apache) |
 | `💻` | Hot-desk workstation |
-| `:9100` | node_exporter |
-| `:9113` | nginx_exporter |
-| `:9117` | apache_exporter |
+
+The `~~~` (invisible) links inside the cluster, load-balancer and frontend groups only keep each group laid out on one row; they carry no meaning.
 
 ---
 
 ## 2. Service Architecture
 
-Diagram showing the traffic flow from external client to database, including the monitoring and provisioning layers.
+End-to-end traffic flow, from the external client to the database, plus the storage, observability and provisioning planes. Each balancer/frontend pair is collapsed into a single box (the individual nodes and addresses are in section 1).
 
 ```mermaid
 graph LR
-    subgraph CLIENT["👤 Client"]
-        USER["Web Browser"]
+    subgraph ACCESS["👤 Client"]
+        USER["Web browser"]
     end
 
-    subgraph PERIMETER["🔒 Perimeter"]
-        ROUTER["ufw-router<br/>DNAT :80/:443 → LB<br/>NAT masquerade outbound"]
+    subgraph PERIMETER["🔒 Perimeter — ufw-router"]
+        ROUTER["DNAT :80/:443 → VIP 192.168.20.100<br/>NAT masquerade outbound"]
     end
 
-    subgraph LB_LAYER["⚖ Load Balancing"]
-        VIP2(("★ VIP<br/>192.168.20.100<br/>keepalived"))
-        NGINX1["Nginx<br/>192.168.20.103<br/>main-lb1"]
-        NGINX2["Nginx<br/>192.168.20.104<br/>main-lb2"]
+    subgraph LB_LAYER["⚖ Load balancing — main"]
+        VIP(("★ VIP · 192.168.20.100<br/>keepalived · VRRP"))
+        NGINX["Nginx reverse proxy<br/>main-lb1 · main-lb2"]
     end
 
-    subgraph WEB_LAYER["🌐 Web Layer"]
-        APACHE1["Apache + WordPress<br/>192.168.20.101"]
-        APACHE2["Apache + WordPress<br/>192.168.20.102"]
+    subgraph WEB_LAYER["🌐 Web layer — main"]
+        APACHE["Apache + WordPress<br/>main-cms1 · main-cms2"]
     end
 
-    subgraph DB_LAYER["🗄 Data Layer — K3s Cluster"]
-        MARIA["MariaDB 10.11<br/>K3s StatefulSet<br/>PV: /mnt/data/mariadb"]
-        DRBD["DRBD 9<br/>Protocol C — Synchronous<br/>tcp/7788"]
+    subgraph DATA_LAYER["🗄 Data layer — internal"]
+        MARIA["MariaDB 10.11 · K3s StatefulSet<br/>NodePort 30306 → .11 / .12"]
+        DRBD["DRBD 9 · Protocol C<br/>tcp/7788 · master1 ⇄ master2"]
     end
 
-    subgraph STORAGE_LAYER["💾 Storage"]
-        STORE["internal-storage<br/>192.168.10.15<br/>Centralised file storage"]
+    subgraph STORAGE_LAYER["💾 NFS uploads — internal"]
+        STORE["internal-storage · .15<br/>/srv/nfs/wp-uploads"]
     end
 
-    subgraph MONITOR["📊 Observability"]
-        PROM["Prometheus<br/>192.168.10.20:9090"]
-        ALERT["Alertmanager<br/>192.168.10.20:9093"]
-        GRAF["Grafana<br/>192.168.10.20:3000"]
+    subgraph OBSERVE["📊 Observability — internal"]
+        PROM["Prometheus · Grafana · Alertmanager<br/>internal-monitor · .20"]
     end
 
-    subgraph PROVISION["🖥 Provisioning & PKI"]
-        COBBLER["Cobbler + Puppet<br/>192.168.10.10"]
-        STEPCA["step-ca<br/>Internal PKI<br/>:8443"]
+    subgraph PROVISION["🖥 Provisioning & PKI — internal"]
+        JS["jumpstart · .10<br/>Cobbler PXE · Puppet · step-ca"]
     end
 
-    %% --- Request path ---
     USER -->|"HTTP/S"| ROUTER
-    ROUTER -->|"DNAT"| VIP2
-    VIP2 --> NGINX1
-    VIP2 --> NGINX2
-    NGINX1 -->|"upstream :80"| APACHE1
-    NGINX1 -->|"upstream :80"| APACHE2
-    NGINX2 -->|"upstream :80"| APACHE1
-    NGINX2 -->|"upstream :80"| APACHE2
-    APACHE1 -->|"tcp/3306"| MARIA
-    APACHE2 -->|"tcp/3306"| MARIA
+    ROUTER -->|"DNAT"| VIP
+    VIP -->|"VRRP"| NGINX
+    NGINX -->|"upstream :80"| APACHE
+    APACHE -->|"tcp/3306"| MARIA
     MARIA ---|"block device"| DRBD
-
-    %% --- Storage ---
-    STORE ---|"shared data"| MARIA
-
-    %% --- Monitoring ---
-    PROM -.->|"scrape :9113"| NGINX1
-    PROM -.->|"scrape :9113"| NGINX2
-    PROM -.->|"scrape :9117"| APACHE1
-    PROM -.->|"scrape :9117"| APACHE2
-    PROM -.->|"scrape :9104"| MARIA
-    PROM -->|"fires alerts"| ALERT
-    GRAF -.->|"datasource"| PROM
-
-    %% --- Provisioning ---
-    COBBLER -.->|"PXE + Puppet"| NGINX1
-    COBBLER -.->|"PXE + Puppet"| NGINX2
-    COBBLER -.->|"PXE + Puppet"| APACHE1
-    COBBLER -.->|"PXE + Puppet"| APACHE2
-    STEPCA -.->|"issues/renews TLS cert"| NGINX1
-    STEPCA -.->|"issues/renews TLS cert"| NGINX2
+    APACHE -.->|"mount"| STORE
+    PROM -.->|"scrape"| APACHE
+    JS -.->|"PXE + Puppet"| APACHE
 ```
 
 ### HTTP Traffic Flow
@@ -212,12 +139,13 @@ graph LR
 1. The **client** sends an HTTP/S request to the router's public IP.
 2. The **router (UFW)** applies DNAT to redirect traffic on ports 80/443 to the keepalived **VIP** `192.168.20.100`, which is held by one of the two Nginx balancers (`main-lb1`/`main-lb2`).
 3. **Nginx** distributes the request between `main-cms1` and `main-cms2` using round-robin.
-4. The **Apache + WordPress** frontend processes the PHP request and queries **MariaDB** in the K3s cluster.
+4. The **Apache + WordPress** frontend processes the PHP request and queries **MariaDB** through the K3s **NodePort `30306`** on `internal-master1`/`internal-master2` (the frontend tries `.11` first and falls back to `.12`).
 5. **DRBD** maintains synchronous replication of MariaDB data between `internal-master1` and `internal-master2`.
+6. WordPress uploads live on the shared **NFS export** `internal-storage:/srv/nfs/wp-uploads`, mounted by both frontends, so either one can serve any request.
 
 ### Monitoring Flow
 
-- **Prometheus** (192.168.10.20:9090) performs periodic scraping (every 15s) of all exporters and evaluates 19 alert rules (availability, service, backup/restore and HA — DRBD, etcd quorum, keepalived VIP).
+- **Prometheus** (192.168.10.20:9090) performs periodic scraping (every 15s) of all exporters and evaluates 19 alert rules (availability, service, backup/restore and HA — DRBD, etcd quorum, keepalived VIP). It scrapes `:9100` (node_exporter) on every node, `:9113` (nginx) on the balancers, `:9117` (Apache) on the frontends and `:9104` (mysqld) on the database.
 - **Grafana** (192.168.10.20:3000) consumes Prometheus as a datasource and renders operational dashboards (node overview and HA overview).
 - **Alertmanager** (192.168.10.20:9093) receives firing alerts from Prometheus and groups/deduplicates them for its UI and `amtool`; it ships with a no-op receiver, so add a webhook/email/Slack receiver to enable delivery.
 
