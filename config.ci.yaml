@@ -2,13 +2,22 @@
 #
 # This is the topology the `Integration (KVM lab, hosted)` workflow deploys on a
 # standard GitHub-hosted runner (4 vCPU / 15 GiB RAM / ~86 GB disk with nested
-# KVM). It is byte-for-byte `config.yaml` except for two things:
+# KVM). It is byte-for-byte `config.yaml` except for three things:
 #
 #   * `nodes.hotdesks.count` is 0 instead of 3. The three client workstations
 #     cost ~2.3 GB of RAM and 30 GB of disk, and the runner has to share its
 #     15 GiB with 13 VMs (16 without this change). Nothing in `verify` or in
 #     the DRBD failover exercise touches the hotdesks, so the HA pipeline under
 #     test is unchanged.
+#   * `ram_install_mb` is 3072 instead of 4096 on the masters and the workers.
+#     That is only the transient RAM Subiquity needs while it installs: the
+#     heaviest batch (3 masters + 2 workers) installs in parallel and would ask
+#     for 20 GiB on a 15 GiB host, pushing ~11 GiB into swap and slowing the
+#     whole batch down. 3072 MB is the low end of the 3-4 GB the manual calls
+#     safe, and installing three nodes with it already works on this runner.
+#     `ram_final_mb` — what each node actually runs on, k3s included — is the
+#     same as in `config.yaml` and is never touched.
+
 #   * the secret fields are left empty on purpose. The workflow fills them with
 #     freshly generated values into a throwaway `config.ci.local.yaml` (which is
 #     gitignored) instead of committing credentials to a public repository.
@@ -71,12 +80,15 @@ nodes:
     ram_final_mb: 2048
     vcpus: 2
     disk_gb: 30
+  # Install-time RAM of the masters and the workers is trimmed for this
+  # runner; see the note at the top of the file. It only affects the installer,
+  # not the RAM the cluster runs on (`ram_final_mb`, below, is unchanged).
   masters:
     - name: "internal-master1"
       ip: "192.168.10.11"
       fqdn: "internal-master1.internal.local"
       mac: "52:54:00:10:01:11"
-      ram_install_mb: 4096
+      ram_install_mb: 3072
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -85,7 +97,7 @@ nodes:
       ip: "192.168.10.12"
       fqdn: "internal-master2.internal.local"
       mac: "52:54:00:10:01:12"
-      ram_install_mb: 4096
+      ram_install_mb: 3072
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -98,7 +110,7 @@ nodes:
       ip: "192.168.10.16"
       fqdn: "internal-master3.internal.local"
       mac: "52:54:00:10:01:16"
-      ram_install_mb: 4096
+      ram_install_mb: 3072
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -107,7 +119,7 @@ nodes:
       ip: "192.168.10.13"
       fqdn: "internal-worker1.internal.local"
       mac: "52:54:00:10:01:13"
-      ram_install_mb: 4096
+      ram_install_mb: 3072
       ram_final_mb: 768
       vcpus: 1
       disk_gb: 8
@@ -115,7 +127,7 @@ nodes:
       ip: "192.168.10.14"
       fqdn: "internal-worker2.internal.local"
       mac: "52:54:00:10:01:14"
-      ram_install_mb: 4096
+      ram_install_mb: 3072
       ram_final_mb: 768
       vcpus: 1
       disk_gb: 8
