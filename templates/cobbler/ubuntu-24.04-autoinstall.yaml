@@ -10,6 +10,9 @@ autoinstall:
     hostname: $hostname
     username: ubuntu
     password: "$6$LOCKED$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
+  # Live-session cloud-config: this file is also the installer's own user-data,
+  # so this block shapes the live environment. The installed system is
+  # configured through `identity` and the late-commands below, not from here.
   users:
     - name: ubuntu
       shell: /bin/bash
@@ -48,8 +51,12 @@ autoinstall:
     - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
     - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
     - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
-    # Deploy account: non-root, key-only, sudo logged
-    - printf 'Defaults:ubuntu !requiretty\nDefaults log_output\n' > /target/etc/sudoers.d/90-cms-ha
+    # Deploy account: non-root, key-only, sudo logged, and passwordless —
+    # the SSH layer runs every privileged command as `sudo -n -H bash -c ...`,
+    # which fails without NOPASSWD. The `users:` block at the top of this file
+    # is the *live* session's cloud-config and never reaches the target, so the
+    # grant has to be written here.
+    - printf 'Defaults:ubuntu !requiretty\nDefaults log_output\nubuntu ALL=(ALL) NOPASSWD:ALL\n' > /target/etc/sudoers.d/90-cms-ha
     - chmod 440 /target/etc/sudoers.d/90-cms-ha
     # Harden SSH daemon on provisioned node
     - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config

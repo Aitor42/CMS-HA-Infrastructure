@@ -263,7 +263,22 @@ jobs:
 
           ./cms-ha -c "$CONFIG" vm install-batches \
             | tee "$ARTIFACTS_DIR/03-install-batches.log"
-          ./cms-ha -c "$CONFIG" status ssh
+
+          # Every batch is restarted with its final RAM once it is installed,
+          # so the last batch is still coming up when the batches phase ends:
+          # give the topology a few minutes instead of sampling it once.
+          for attempt in $(seq 1 10); do
+            if ./cms-ha -c "$CONFIG" status ssh \
+                2>&1 | tee -a "$ARTIFACTS_DIR/04-status-ssh.log"; then
+              break
+            fi
+            if [ "$attempt" = 10 ]; then
+              echo "::error::the lab did not come up within 5 minutes of provisioning"
+              exit 1
+            fi
+            echo "::warning::status ssh attempt $attempt failed; retrying in 30s"
+            sleep 30
+          done
 
       - name: Run the integration test (deploy + verify + failover)
         if: ${{ inputs.stage == 'full' }}
@@ -303,7 +318,8 @@ jobs:
               echo "-- ubuntu@$ip"
               timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null -o ConnectTimeout=6 \
-                -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" 'echo NODE_OK' 2>&1 \
+                -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" \
+                'echo NODE_OK; sudo -n -H true && echo SUDO_OK || echo SUDO_DENIED' 2>&1 \
                 | grep -vE "^debug1: (Reading|Offering|Trying|Authentications)" \
                 | tail -14 || true
             done
