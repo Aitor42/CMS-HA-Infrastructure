@@ -659,3 +659,38 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 		}
 	})
 }
+
+func TestConfig_HotdeskSpecsFollowMainCIDR(t *testing.T) {
+	cfg := &config.Config{
+		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/24"}},
+		Nodes:   config.NodesConfig{Hotdesks: config.HotdesksConf{Count: 2, BaseIPOctet: 201}},
+	}
+	specs := cfg.HotdeskSpecs()
+	if len(specs) != 2 {
+		t.Fatalf("expected 2 hotdesk specs, got %d", len(specs))
+	}
+	if got, want := specs[0].IP, "10.0.30.201"; got != want {
+		t.Errorf("hotdesk IP = %q, want %q (derived from network.main.cidr)", got, want)
+	}
+	if got, want := specs[1].IP, "10.0.30.202"; got != want {
+		t.Errorf("hotdesk IP = %q, want %q (derived from network.main.cidr)", got, want)
+	}
+}
+
+func TestConfig_PrefixFromCIDR(t *testing.T) {
+	tests := []struct {
+		cidr     string
+		fallback string
+		want     string
+	}{
+		{"192.168.30.0/24", "192.168.20.", "192.168.30."},
+		{"10.0.30.0/24", "192.168.20.", "10.0.30."},
+		{"", "192.168.20.", "192.168.20."},
+		{"not-a-cidr", "192.168.20.", "192.168.20."},
+	}
+	for _, tt := range tests {
+		if got := config.PrefixFromCIDR(tt.cidr, tt.fallback); got != tt.want {
+			t.Errorf("PrefixFromCIDR(%q, %q) = %q, want %q", tt.cidr, tt.fallback, got, tt.want)
+		}
+	}
+}

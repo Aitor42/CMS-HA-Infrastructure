@@ -165,20 +165,31 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 		hostCIDR   string
 		routerCIDR string
 	}
+	// Derive the bridge addresses from the configured CIDRs instead of
+	// hardcoding 192.168.10/20.0/24: the host takes .254 and the router uses the
+	// configured gateway (falling back to .1).
+	linkCIDR := func(gateway, prefix string) string {
+		if gateway != "" {
+			return gateway + "/24"
+		}
+		return prefix + "1/24"
+	}
+	internalPrefix := config.PrefixFromCIDR(p.cfg.Network.Internal.CIDR, "192.168.10.")
+	mainPrefix := config.PrefixFromCIDR(p.cfg.Network.Main.CIDR, "192.168.20.")
 	nets := []netDef{
 		{
 			name:       "internal",
 			tmplPath:   "templates/libvirt/internal-net.xml",
 			bridge:     p.cfg.Network.Internal.Bridge,
-			hostCIDR:   "192.168.10.254/24",
-			routerCIDR: "192.168.10.1/24",
+			hostCIDR:   internalPrefix + "254/24",
+			routerCIDR: linkCIDR(p.cfg.Network.Internal.Gateway, internalPrefix),
 		},
 		{
 			name:       "main",
 			tmplPath:   "templates/libvirt/main-net.xml",
 			bridge:     p.cfg.Network.Main.Bridge,
-			hostCIDR:   "192.168.20.254/24",
-			routerCIDR: "192.168.20.1/24",
+			hostCIDR:   mainPrefix + "254/24",
+			routerCIDR: linkCIDR(p.cfg.Network.Main.Gateway, mainPrefix),
 		},
 	}
 
