@@ -134,6 +134,9 @@ jobs:
               | grep -o '<boot dev="[a-z]*"' | tr '\n' ' ')"
             state="$(virsh -c qemu:///system domstate "$name" 2>/dev/null || echo none)"
             printf 'RESULT|case=%s|boot_order=%s|state=%s\n' "$label" "${boots:-none}" "$state"
+            printf 'RESULT|case=%s|os_block=%s\n' "$label" \
+              "$(virsh -c qemu:///system dumpxml "$name" 2>/dev/null \
+                 | tr -d '\n' | grep -o '<os>.*</os>' | cut -c1-280)"
             sudo virsh -c qemu:///system destroy "$name" >/dev/null 2>&1 || true
             sudo virsh -c qemu:///system undefine "$name" >/dev/null 2>&1 || true
             sudo rm -f "/tmp/$name.qcow2"
