@@ -18,7 +18,6 @@ vm:
 ssh:
   private_key: "~/.ssh/id_ed25519"
   connect_timeout: 10s
-  batch_mode: true
 
 network:
   internal:
@@ -189,10 +188,29 @@ deploy:
 	if len(allNodes) == 0 {
 		t.Errorf("expected allNodes to be populated")
 	}
+}
 
-	sshOpts := cfg.SSHOptions()
-	if len(sshOpts) == 0 {
-		t.Errorf("expected ssh options")
+// TestConfig_LegacyBatchModeFieldIsIgnored makes sure that removing the
+// batch_mode field does not break config.yaml files that still carry it.
+func TestConfig_LegacyBatchModeFieldIsIgnored(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := `
+vm:
+  storage_dir: "~/vm_storage"
+ssh:
+  private_key: "~/.ssh/id_ed25519"
+  batch_mode: true
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("loading a config with the removed batch_mode field failed: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected a non-nil config")
 	}
 }
 

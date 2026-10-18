@@ -14,7 +14,6 @@ ssh:
   known_hosts_file: "${HOME}/.ssh/cms_known_hosts"
   private_key: "${HOME}/.ssh/id_ed25519_gar"
   connect_timeout: 10s
-  batch_mode: true
 
 network:
   internal:

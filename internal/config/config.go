@@ -63,7 +63,6 @@ type SSHConfig struct {
 	KnownHostsFile string        `yaml:"known_hosts_file"`
 	PrivateKey     string        `yaml:"private_key"`
 	ConnectTimeout time.Duration `yaml:"connect_timeout"`
-	BatchMode      bool          `yaml:"batch_mode"`
 }
 
 // SSHUser returns the account used for every SSH connection. It defaults to
@@ -841,25 +840,4 @@ func (c *Config) AllNodeIPs() []string {
 		ips = append(ips, c.Nodes.Jumpstart.IPMain)
 	}
 	return ips
-}
-
-// SSHOptions returns the OpenSSH -o flags derived from the config, defaulting
-// ConnectTimeout to 10s when unset (OpenSSH treats 0 as "never time out").
-func (c *Config) SSHOptions() []string {
-	connectTimeout := int(c.SSH.ConnectTimeout.Seconds())
-	// OpenSSH treats -o ConnectTimeout=0 as "never time out"; use the same
-	// default as the CLI (10s) instead of an unbounded connect.
-	if connectTimeout <= 0 {
-		connectTimeout = 10
-	}
-	opts := []string{
-		"-i", c.SSH.PrivateKey,
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", fmt.Sprintf("ConnectTimeout=%d", connectTimeout),
-	}
-	if c.SSH.BatchMode {
-		opts = append(opts, "-o", "BatchMode=yes")
-	}
-	return opts
 }
