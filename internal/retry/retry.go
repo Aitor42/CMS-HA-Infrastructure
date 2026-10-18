@@ -42,6 +42,8 @@ func backoffInterval(cfg Config, attempt int) time.Duration {
 		// ±10% jitter only while backing off, so constant-interval callers
 		// keep their exact historic timing.
 		if jitter := interval / 5; jitter > 0 {
+			// #nosec G404 -- jitter only de-synchronises retries; it is not a
+			// security-sensitive random value, so math/rand is fine here.
 			interval += time.Duration(rand.Int63n(int64(jitter)+1)) - jitter/2
 		}
 	}
