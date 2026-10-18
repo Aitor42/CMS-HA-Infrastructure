@@ -473,13 +473,50 @@ func waitForInstalledNode(ctx context.Context, l *libvirt.Client, s *ssh.Pool, n
 // cannot be asked to reboot, so the host resets it instead; nothing is lost
 // because the installed system is already on its disk.
 func restartNode(ctx context.Context, l *libvirt.Client, name string) error {
-	if err := l.Destroy(ctx, name); err != nil {
+	if err := forceStop(ctx, l, name); err != nil {
 		logging.Warn("Could not force stop %s: %v", name, err)
 	}
 	if err := l.Start(ctx, name); err != nil {
 		return fmt.Errorf("start %s: %w", name, err)
 	}
 	return nil
+}
+
+// forceStopGrace bounds how long forceStop waits for a domain to end up shut
+// off after the force stop was issued.
+const forceStopGrace = 30 * time.Second
+
+// forceStop makes sure a domain ends up shut off, forcing it if needed.
+//
+// `virsh destroy` is not idempotent: it fails on a domain that is already off
+// and, on some libvirt versions, on one that is still finishing an ACPI
+// shutdown ("domain is being shut down"). Neither is a real failure, so after
+// an error the state is re-checked rather than trusted.
+func forceStop(ctx context.Context, l *libvirt.Client, name string) error {
+	deadline := time.Now().Add(forceStopGrace)
+	var lastErr error
+
+	for {
+		if err := l.Destroy(ctx, name); err != nil {
+			lastErr = err
+		} else {
+			return nil
+		}
+
+		if states, err := l.DomainStates(ctx); err == nil && states[name] == "shut off" {
+			return nil
+		}
+
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("force stop %s: %w", name, lastErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("force stop %s: %w", name, lastErr)
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s *ssh.Pool) error {
@@ -629,8 +666,8 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 		var errMsgs []string
 		for _, name := range pending {
 			logging.Warn("VM %s did not shut down gracefully; forcing stop", name)
-			if err := l.Destroy(ctx, name); err != nil {
-				errMsgs = append(errMsgs, fmt.Sprintf("force stop %s: %v", name, err))
+			if err := forceStop(ctx, l, name); err != nil {
+				errMsgs = append(errMsgs, err.Error())
 			}
 		}
 		if len(errMsgs) > 0 {
