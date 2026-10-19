@@ -312,8 +312,17 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Waiting for MariaDB pod to be Running...")
+	// The StatefulSet controller creates mariadb-0 asynchronously and
+	// `kubectl wait` fails outright when no pod matches yet, so wait for the
+	// pod object to appear before waiting on its phase.
+	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second, MaxInterval: 10 * time.Second, Timeout: 2 * time.Minute}, func(attemptCtx context.Context) error {
+		return runChecked(attemptCtx, p.pool, master1.IP, "kubectl get pod mariadb-0 -n cms", "wait for the MariaDB pod to be created")
+	})
+	if err != nil {
+		return fmt.Errorf("mariadb pod was never created: %w", err)
+	}
 	// kubectl wait returns as soon as the pod reaches the Running phase.
-	if err := runChecked(ctx, p.pool, master1.IP, "kubectl wait --for=jsonpath='{.status.phase}'=Running pod -l app=mariadb -n cms --timeout=300s", "wait for MariaDB pod"); err != nil {
+	if err := runChecked(ctx, p.pool, master1.IP, "kubectl wait --for=jsonpath='{.status.phase}'=Running pod mariadb-0 -n cms --timeout=300s", "wait for MariaDB pod"); err != nil {
 		return fmt.Errorf("mariadb pod failed to start: %w", err)
 	}
 
