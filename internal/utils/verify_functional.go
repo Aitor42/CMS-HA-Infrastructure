@@ -70,6 +70,26 @@ const mariadbRoundTripSQL = "DROP TABLE IF EXISTS cms_verify_tmp; " +
 	"SELECT COUNT(*) FROM wp_options; " +
 	"DROP TABLE cms_verify_tmp"
 
+// cmsSite is the pair of entry points the CMS checks talk to: HTTPS through
+// the load balancer and plain HTTP on the same address, which has to redirect.
+// The unit tests build it from local test servers, so the request logic can be
+// exercised without a lab.
+type cmsSite struct {
+	httpsBase string
+	httpBase  string
+	vhost     string
+}
+
+// site derives the CMS entry points from the configured VIP.
+func (v *Verifier) site() cmsSite {
+	vip := v.cfg.LBVIP()
+	return cmsSite{
+		httpsBase: "https://" + vip,
+		httpBase:  "http://" + vip,
+		vhost:     v.cfg.TrafficVHost(),
+	}
+}
+
 // phase10 runs the functional checks of the deployed stack concurrently and
 // aggregates them the way phase08 does: one phase, every sub-check reported in
 // its detail so a failure names the feature that broke.
@@ -85,13 +105,25 @@ func (v *Verifier) phase10(ctx context.Context) CheckResult {
 		return CheckResult{"Phase 10", name, false, "nodes.monitor.ip is not configured"}
 	}
 
+	// Ask every balancer on its own, excluding the VIP: it is covered through
+	// the checks that go through the site's HTTPS base.
+	var lbIPs []string
+	for _, lb := range v.cfg.Nodes.LBs {
+		if lb.IP != "" && lb.IP != vip {
+			lbIPs = append(lbIPs, lb.IP)
+		}
+	}
+	site := v.site()
+	vhost := site.vhost
+	promBase := "http://" + monitorIP + ":9090"
+
 	checks := []func() e2eOutcome{
-		func() e2eOutcome { return v.checkCMSPages(ctx, vip) },
-		func() e2eOutcome { return v.checkCMSREST(ctx, vip) },
+		func() e2eOutcome { return v.checkCMSPages(ctx, site) },
+		func() e2eOutcome { return v.checkCMSREST(ctx, site) },
 		func() e2eOutcome { return v.checkCMSFrontends(ctx) },
-		func() e2eOutcome { return v.checkLoadBalancers(ctx, vip) },
+		func() e2eOutcome { return v.checkLoadBalancers(ctx, vhost, lbIPs) },
 		func() e2eOutcome { return v.checkMariaDB(ctx) },
-		func() e2eOutcome { return v.checkMonitoringProbes(ctx, monitorIP) },
+		func() e2eOutcome { return v.checkMonitoringProbes(ctx, promBase) },
 		func() e2eOutcome { return v.checkGrafanaProvisioning(ctx, monitorIP) },
 	}
 
@@ -121,10 +153,10 @@ func (v *Verifier) phase10(ctx context.Context) CheckResult {
 // checkCMSPages exercises the pages a visitor or an administrator asks for: the
 // login form, the feed, an asset the theme references and the plain-HTTP entry
 // point.
-func (v *Verifier) checkCMSPages(ctx context.Context, vip string) e2eOutcome {
+func (v *Verifier) checkCMSPages(ctx context.Context, site cmsSite) e2eOutcome {
 	o := e2eOutcome{label: "CMS pages"}
-	vhost := v.cfg.TrafficVHost()
-	base := "https://" + vip
+	vhost := site.vhost
+	base := site.httpsBase
 	var steps []string
 
 	// The login form is rendered by PHP from the theme: an answer that is not
@@ -190,13 +222,13 @@ func (v *Verifier) checkCMSPages(ctx context.Context, vip string) e2eOutcome {
 	steps = append(steps, "asset 200")
 
 	// Plain HTTP has to hand the client over to HTTPS.
-	status, location, err := httpGetLocation(ctx, noRedirectClient, "http://"+vip+"/", vhost, functionalTimeout)
+	status, location, err := httpGetLocation(ctx, noRedirectClient, site.httpBase+"/", vhost, functionalTimeout)
 	if err != nil {
-		o.detail = fmt.Sprintf("GET http://%s/ failed: %v", vip, err)
+		o.detail = fmt.Sprintf("GET %s/ failed: %v", site.httpBase, err)
 		return o
 	}
 	if status != http.StatusMovedPermanently && status != http.StatusFound {
-		o.detail = fmt.Sprintf("GET http://%s/ returned HTTP %d, want a redirect to HTTPS", vip, status)
+		o.detail = fmt.Sprintf("GET %s/ returned HTTP %d, want a redirect to HTTPS", site.httpBase, status)
 		return o
 	}
 	if !strings.HasPrefix(location, "https://") {
@@ -212,10 +244,10 @@ func (v *Verifier) checkCMSPages(ctx context.Context, vip string) e2eOutcome {
 
 // checkCMSREST exercises WordPress' REST API and, with the permalink it returns,
 // the database-backed rendering of that content.
-func (v *Verifier) checkCMSREST(ctx context.Context, vip string) e2eOutcome {
+func (v *Verifier) checkCMSREST(ctx context.Context, site cmsSite) e2eOutcome {
 	o := e2eOutcome{label: "CMS REST API"}
-	vhost := v.cfg.TrafficVHost()
-	base := "https://" + vip
+	vhost := site.vhost
+	base := site.httpsBase
 
 	// /wp-json/ is the API index and has to list the registered namespaces.
 	status, body, err := httpGetWithClient(ctx, cmsHTTPClient, base+"/wp-json/", vhost, functionalTimeout)
@@ -356,20 +388,13 @@ func (v *Verifier) checkCMSFrontends(ctx context.Context) e2eOutcome {
 // only ever resolves to the active node, so without this a broken backup
 // balancer would stay hidden until a failover happened in the middle of an
 // incident. The VIP's own HTTPS answer is already covered by phase08.
-func (v *Verifier) checkLoadBalancers(ctx context.Context, vip string) e2eOutcome {
+func (v *Verifier) checkLoadBalancers(ctx context.Context, vhost string, ips []string) e2eOutcome {
 	o := e2eOutcome{label: "Load balancers"}
-	var ips []string
-	for _, lb := range v.cfg.Nodes.LBs {
-		if lb.IP != "" && lb.IP != vip {
-			ips = append(ips, lb.IP)
-		}
-	}
 	if len(ips) == 0 {
 		o.detail = "no load balancer configured"
 		return o
 	}
 
-	vhost := v.cfg.TrafficVHost()
 	// Each goroutine writes its own index of both slices, so no lock is needed.
 	oks := make([]bool, len(ips))
 	msg := make([]string, len(ips))
@@ -477,9 +502,8 @@ func (v *Verifier) checkMariaDB(ctx context.Context) e2eOutcome {
 // rules must be loaded and every blackbox probe must be up. The probes are an
 // independent end-to-end view of the same VIP and frontends, evaluated by the
 // monitoring stack itself.
-func (v *Verifier) checkMonitoringProbes(ctx context.Context, monitorIP string) e2eOutcome {
+func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOutcome {
 	o := e2eOutcome{label: "Prometheus probes"}
-	base := "http://" + monitorIP + ":9090"
 
 	status, body, err := httpGet(ctx, base+"/api/v1/rules", "", functionalTimeout, false)
 	if err != nil || status != http.StatusOK {
