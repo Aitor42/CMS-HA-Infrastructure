@@ -170,7 +170,58 @@ func (p *Phase) ensureAddresses(ctx context.Context, router config.NodeDetail) e
 	// address. `netplan apply` reconfigures the interfaces this SSH session
 	// rides on, so it runs detached and the result is verified from the
 	// router's state afterwards.
-	script := fmt.Sprintf(`set -e
+	script := netplanBootstrapScript(netplanStaging, netplanBackupDir, netplanPath)
+
+	if out, stderr, code, err := p.pool.RunCommand(ctx, router.IP, script); err != nil || code != 0 {
+		return fmt.Errorf("failed to apply the router netplan (exit %d): %s %v", code, strings.TrimSpace(stderr), err)
+	} else {
+		if !strings.Contains(out, "CMS_NETPLAN_APPLY_STARTED") {
+			return fmt.Errorf("unexpected output while applying the router netplan: %s", strings.TrimSpace(out))
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "CMS_NETPLAN_RETIRED:") {
+				logging.Info("Netplan: %s", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "CMS_NETPLAN_RETIRED:")))
+			}
+		}
+	}
+
+	if err := p.pool.WaitForSSH(ctx, router.IP, 2*time.Minute); err != nil {
+		return fmt.Errorf("router became unreachable after applying its netplan: %w", err)
+	}
+
+	// Verify that the addresses are really there: without them the main network
+	// has no gateway and every later phase fails. networkd applies the new
+	// configuration asynchronously, so poll instead of sampling once; on
+	// failure, put the installer's configuration back so the router is left in
+	// a working state.
+	if err := p.waitForAddresses(ctx, router.IP, []string{intAddr, mainAddr}); err != nil {
+		rollback := netplanRestoreScript(netplanBackupDir, netplanPath)
+		if _, _, code, rerr := p.pool.RunCommand(ctx, router.IP, rollback); rerr != nil || code != 0 {
+			logging.Warn("could not restore the router's previous netplan (exit %d): %v", code, rerr)
+		} else {
+			logging.Warn("Restored the router's previous netplan configuration.")
+		}
+		return fmt.Errorf("%w\n--- netplan log ---\n%s--- netplan configuration ---\n%s--- addresses ---\n%s",
+			err,
+			p.readLog(ctx, router.IP, "/tmp/cms-netplan.log"),
+			p.captureCommand(ctx, router.IP, "netplan get"),
+			p.captureCommand(ctx, router.IP, "ip -4 -o addr show"),
+		)
+	}
+	logging.Success("Router addressing: %s (internal) and %s (main), WAN %s on DHCP", intAddr, mainAddr, wanName)
+
+	return nil
+}
+
+// netplanBootstrapScript is the remote script that makes the rendered overlay
+// the router's only netplan configuration. It backs up the whole tree first
+// (keeping the original copy), disables cloud-init's network module so a
+// competing definition cannot come back after a reboot, reports the retired
+// files, and rolls the backup back if `netplan generate` rejects the overlay.
+// `netplan apply` is started detached because it reconfigures the interface
+// this SSH session rides on; the caller verifies the result afterwards.
+func netplanBootstrapScript(staging, backupDir, target string) string {
+	return fmt.Sprintf(`set -e
 export PATH="$PATH:/usr/sbin:/sbin"
 DIR=/etc/netplan
 BACKUP=%[2]s
@@ -197,52 +248,18 @@ if ! netplan generate >/tmp/cms-netplan.log 2>&1; then
 fi
 nohup netplan apply >>/tmp/cms-netplan.log 2>&1 &
 echo CMS_NETPLAN_APPLY_STARTED
-`, netplanStaging, netplanBackupDir, netplanPath)
+`, staging, backupDir, target)
+}
 
-	if out, stderr, code, err := p.pool.RunCommand(ctx, router.IP, script); err != nil || code != 0 {
-		return fmt.Errorf("failed to apply the router netplan (exit %d): %s %v", code, strings.TrimSpace(stderr), err)
-	} else {
-		if !strings.Contains(out, "CMS_NETPLAN_APPLY_STARTED") {
-			return fmt.Errorf("unexpected output while applying the router netplan: %s", strings.TrimSpace(out))
-		}
-		for _, line := range strings.Split(out, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "CMS_NETPLAN_RETIRED:") {
-				logging.Info("Netplan: %s", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "CMS_NETPLAN_RETIRED:")))
-			}
-		}
-	}
-
-	if err := p.pool.WaitForSSH(ctx, router.IP, 2*time.Minute); err != nil {
-		return fmt.Errorf("router became unreachable after applying its netplan: %w", err)
-	}
-
-	// Verify that the addresses are really there: without them the main network
-	// has no gateway and every later phase fails. networkd applies the new
-	// configuration asynchronously, so poll instead of sampling once; on
-	// failure, put the installer's configuration back so the router is left in
-	// a working state.
-	if err := p.waitForAddresses(ctx, router.IP, []string{intAddr, mainAddr}); err != nil {
-		rollback := fmt.Sprintf(`set -u
+// netplanRestoreScript puts the installer's netplan configuration back, so a
+// router that did not get its gateway addresses is left in a working state.
+func netplanRestoreScript(backupDir, target string) string {
+	return fmt.Sprintf(`set -u
 export PATH="$PATH:/usr/sbin:/sbin"
 rm -f %[2]s
 cp -a %[1]s/. /etc/netplan/ 2>/dev/null || true
 netplan apply >/dev/null 2>&1 || true
-echo CMS_NETPLAN_RESTORED`, netplanBackupDir, netplanPath)
-		if _, _, code, rerr := p.pool.RunCommand(ctx, router.IP, rollback); rerr != nil || code != 0 {
-			logging.Warn("could not restore the router's previous netplan (exit %d): %v", code, rerr)
-		} else {
-			logging.Warn("Restored the router's previous netplan configuration.")
-		}
-		return fmt.Errorf("%w\n--- netplan log ---\n%s--- netplan configuration ---\n%s--- addresses ---\n%s",
-			err,
-			p.readLog(ctx, router.IP, "/tmp/cms-netplan.log"),
-			p.captureCommand(ctx, router.IP, "netplan get"),
-			p.captureCommand(ctx, router.IP, "ip -4 -o addr show"),
-		)
-	}
-	logging.Success("Router addressing: %s (internal) and %s (main), WAN %s on DHCP", intAddr, mainAddr, wanName)
-
-	return nil
+echo CMS_NETPLAN_RESTORED`, backupDir, target)
 }
 
 // enableForwarding turns the router into an L3 hop and persists it.

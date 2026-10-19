@@ -97,6 +97,48 @@ func TestRouterNetplanTemplateRendersValidYAML(t *testing.T) {
 	}
 }
 
+// The two remote scripts are built with fmt.Sprintf, so a stray verb or an
+// unescaped percent sign would end up on a live router. Rendering them here
+// also keeps the rollback safety net covered: a broken overlay has to restore
+// the installer's configuration rather than lock the router out.
+func TestNetplanScriptsRender(t *testing.T) {
+	bootstrap := netplanBootstrapScript("/tmp/staged.yaml", "/root/cms-netplan-backup", "/etc/netplan/99-cms-router.yaml")
+	restore := netplanRestoreScript("/root/cms-netplan-backup", "/etc/netplan/99-cms-router.yaml")
+
+	for name, script := range map[string]string{"bootstrap": bootstrap, "restore": restore} {
+		if strings.Contains(script, "%!") {
+			t.Errorf("%s script has a bad Sprintf verb:\n%s", name, script)
+		}
+		if strings.Contains(script, "%%") || strings.Contains(script, "%[") {
+			t.Errorf("%s script has an unrendered placeholder:\n%s", name, script)
+		}
+	}
+
+	for _, want := range []string{
+		"install -m 600 -o root -g root /tmp/staged.yaml \"$TARGET\"",
+		"BACKUP=/root/cms-netplan-backup",
+		"TARGET=/etc/netplan/99-cms-router.yaml",
+		"-printf '%f '",
+		"netplan generate",
+		"netplan apply",
+		"CMS_NETPLAN_APPLY_STARTED",
+		"$BACKUP/.cms-backup-complete",
+	} {
+		if !strings.Contains(bootstrap, want) {
+			t.Errorf("bootstrap script is missing %q:\n%s", want, bootstrap)
+		}
+	}
+	for _, want := range []string{
+		"rm -f /etc/netplan/99-cms-router.yaml",
+		"cp -a /root/cms-netplan-backup/. /etc/netplan/",
+		"CMS_NETPLAN_RESTORED",
+	} {
+		if !strings.Contains(restore, want) {
+			t.Errorf("restore script is missing %q:\n%s", want, restore)
+		}
+	}
+}
+
 func TestWithPrefix(t *testing.T) {
 	cases := []struct {
 		ip, cidr, want string
