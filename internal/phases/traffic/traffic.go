@@ -98,7 +98,7 @@ func resolveBaseURL(cfg *config.Config, opts Options) string {
 		if len(cfg.Nodes.CMSFrontends) > 0 && cfg.Nodes.CMSFrontends[0].IP != "" {
 			return "http://" + cfg.Nodes.CMSFrontends[0].IP
 		}
-		return "http://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.10.") + "101"
+		return "http://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.20.") + "101"
 	}
 	if cfg.LBVIP() != "" {
 		return "https://" + cfg.LBVIP()
