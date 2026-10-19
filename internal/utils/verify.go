@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -233,40 +235,80 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase04(ctx context.Context) CheckResult {
-	// K3s cluster + MariaDB pod Running in single SSH session
-	if len(v.cfg.Nodes.Masters) > 0 {
-		cmd := `kubectl --request-timeout=10s get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers 2>/dev/null | wc -l`
-		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, cmd)
+	if len(v.cfg.Nodes.Masters) == 0 {
+		return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
+	}
+
+	// K3s cluster + MariaDB pod Running in a single SSH session. stderr is kept
+	// (no 2>/dev/null): when the API server is unreachable the count still reads
+	// 0, and the reason has to reach the failure detail instead of looking like
+	// an empty etcd cluster.
+	cmd := `kubectl --request-timeout=10s get nodes; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers | wc -l`
+
+	wantNodes := len(v.cfg.Nodes.Masters) + len(v.cfg.Nodes.Workers)
+	wantEtcd := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters))
+
+	readyNodes := 0
+	etcdOut := "0"
+	problem := ""
+	pass := false
+
+	// A k3s restart - the process can be lost to the OOM killer on the small CI
+	// guests - leaves the API server unreachable for a few seconds. A single
+	// shot would fail the whole verification for that blip, so retry within a
+	// bounded budget, mirroring the deploy phase's own etcd check.
+	_ = retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, MaxInterval: 6 * time.Second, Timeout: 90 * time.Second}, func(attemptCtx context.Context) error {
+		out, errOut, _, err := v.ssh.RunCommand(attemptCtx, v.cfg.Nodes.Masters[0].IP, cmd)
 		parts := strings.Split(out, "---CMS_DELIM---")
-		nodesOut := ""
+		nodesOut := out
 		podOut := ""
-		etcdOut := ""
+		etcdOut = ""
 		if len(parts) >= 2 {
 			nodesOut = parts[0]
 			podOut = parts[1]
-		} else {
-			nodesOut = out
 		}
 		if len(parts) >= 3 {
 			etcdOut = strings.TrimSpace(parts[2])
 		}
+
 		// The cluster is only healthy when every configured node is Ready: a
 		// node that vanished from the output must not pass just because the
 		// remaining ones are fine, and "NotReady" contains "Ready".
-		wantNodes := len(v.cfg.Nodes.Masters) + len(v.cfg.Nodes.Workers)
-		readyNodes := countReadyNodes(nodesOut)
-		pass := err == nil && wantNodes > 0 && readyNodes == wantNodes && strings.Contains(podOut, "Running")
+		readyNodes = countReadyNodes(nodesOut)
 		// etcd must report one member per configured master, otherwise the
 		// cluster has no real quorum even though the nodes look Ready. K3s
 		// keeps etcd inside the server process, so members are the nodes
 		// carrying the etcd role label rather than kube-system pods.
-		if want := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters)); etcdOut != want {
-			pass = false
+		pass = err == nil && wantNodes > 0 && readyNodes == wantNodes &&
+			strings.Contains(podOut, "Running") && etcdOut == wantEtcd
+		if pass {
+			problem = ""
+			return nil
 		}
-		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass,
-			fmt.Sprintf("ready nodes: %d/%d, etcd members: %s", readyNodes, wantNodes, etcdOut)}
+
+		switch {
+		case err != nil:
+			problem = fmt.Sprintf("ssh: %v", err)
+		case readyNodes != wantNodes:
+			problem = fmt.Sprintf("only %d of %d nodes Ready", readyNodes, wantNodes)
+		case !strings.Contains(podOut, "Running"):
+			problem = "mariadb pod is not Running"
+		default:
+			problem = "etcd query failed or returned no members"
+		}
+		if msg := strings.TrimSpace(errOut); msg != "" {
+			// kubectl repeats the same message for each call in the session.
+			lines := strings.Split(msg, "\n")
+			problem += ": " + strings.TrimSpace(lines[len(lines)-1])
+		}
+		return fmt.Errorf("%s", problem)
+	})
+
+	details := fmt.Sprintf("ready nodes: %d/%d, etcd members: %s", readyNodes, wantNodes, etcdOut)
+	if !pass && problem != "" {
+		details += "; " + problem
 	}
-	return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
+	return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, details}
 }
 
 func (v *Verifier) phase05(ctx context.Context) CheckResult {
