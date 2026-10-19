@@ -160,7 +160,22 @@ class role::loadbalancer {
   $lb_peer  = $lb_is_master ? { true => '192.168.20.104', default => '192.168.20.103' }
   $lb_prio  = $lb_is_master ? { true => '101',           default => '100' }
   $lb_state = $lb_is_master ? { true => 'MASTER',        default => 'BACKUP' }
-  $lb_src_ip = $facts['networking']['interfaces']['enp2s0']['ip']
+
+  # VRRP runs over the main network, but the kernel name of that NIC must not
+  # be hardcoded: a load balancer only has one interface (enp1s0), while a node
+  # with more NICs names the second one enp2s0. Resolve it from the primary
+  # interface, which is the one carrying this node's address and default route,
+  # and fail loudly instead of compiling a catalog with an undefined address.
+  $lb_primary = $facts['networking']['primary']
+  $lb_iface_candidates = $facts['networking']['interfaces'].filter |$name, $data| {
+    $name == $lb_primary and $data['ip'] != undef
+  }
+  $lb_ifaces = $lb_iface_candidates.keys
+  if $lb_ifaces.length == 0 {
+    fail("role::loadbalancer: no IPv4 address on the primary interface (${lb_primary}) in facts; cannot configure keepalived")
+  }
+  $lb_iface  = $lb_ifaces[0]
+  $lb_src_ip = $lb_iface_candidates[$lb_iface]['ip']
 
   file { '/etc/keepalived/keepalived.conf':
     ensure  => file,
@@ -179,7 +194,7 @@ class role::loadbalancer {
 
       vrrp_instance CMS_VIP {
           state ${lb_state}
-          interface enp2s0
+          interface ${lb_iface}
           virtual_router_id 51
           priority ${lb_prio}
           advert_int 1
