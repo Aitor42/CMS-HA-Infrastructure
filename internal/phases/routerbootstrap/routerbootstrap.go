@@ -184,7 +184,9 @@ fi
 mkdir -p /etc/cloud/cloud.cfg.d
 printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-cms-disable-network.cfg
 install -m 600 -o root -g root %[1]s "$TARGET"
+RETIRED=$(find "$DIR" -maxdepth 1 -name '*.yaml' ! -name '99-cms-router.yaml' -printf '%%f ')
 find "$DIR" -maxdepth 1 -name '*.yaml' ! -name '99-cms-router.yaml' -delete
+echo "CMS_NETPLAN_RETIRED: ${RETIRED:-none} (copies kept in $BACKUP)"
 if ! netplan generate >/tmp/cms-netplan.log 2>&1; then
     rm -f "$TARGET"
     cp -a "$BACKUP"/. "$DIR"/ 2>/dev/null || true
@@ -199,8 +201,15 @@ echo CMS_NETPLAN_APPLY_STARTED
 
 	if out, stderr, code, err := p.pool.RunCommand(ctx, router.IP, script); err != nil || code != 0 {
 		return fmt.Errorf("failed to apply the router netplan (exit %d): %s %v", code, strings.TrimSpace(stderr), err)
-	} else if !strings.Contains(out, "CMS_NETPLAN_APPLY_STARTED") {
-		return fmt.Errorf("unexpected output while applying the router netplan: %s", strings.TrimSpace(out))
+	} else {
+		if !strings.Contains(out, "CMS_NETPLAN_APPLY_STARTED") {
+			return fmt.Errorf("unexpected output while applying the router netplan: %s", strings.TrimSpace(out))
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "CMS_NETPLAN_RETIRED:") {
+				logging.Info("Netplan: %s", strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "CMS_NETPLAN_RETIRED:")))
+			}
+		}
 	}
 
 	if err := p.pool.WaitForSSH(ctx, router.IP, 2*time.Minute); err != nil {
