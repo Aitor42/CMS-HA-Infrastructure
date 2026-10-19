@@ -5,13 +5,16 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
@@ -79,8 +82,8 @@ func (p *Phase) Run(ctx context.Context) error {
 	port := p.cfg.BackupS3Port()
 
 	dataDir := p.cfg.BackupDataDir()
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
-		return fmt.Errorf("failed to create Garage data dir %s: %w", dataDir, err)
+	if err := ensureDataDir(dataDir); err != nil {
+		return fmt.Errorf("failed to prepare Garage data dir %s: %w", dataDir, err)
 	}
 
 	cfgPath := filepath.Join(dataDir, "garage.toml")
@@ -105,6 +108,35 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Success("Garage S3 backup store ready at %s (bucket %q).", p.cfg.BackupS3Endpoint(), p.cfg.BackupBucket())
+	return nil
+}
+
+// ensureDataDir makes sure the Garage data directory exists and is writable by
+// the account running the deploy. The default path lives under /var/lib while
+// the orchestrator runs unprivileged (the deploy account carries passwordless
+// sudo instead), so a fresh hypervisor needs sudo to create the directory and
+// to hand it over; the config file is written there right afterwards.
+func ensureDataDir(path string) error {
+	if err := os.MkdirAll(path, 0700); err != nil && !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	if err := syscall.Access(path, 2); err == nil { // W_OK
+		return nil
+	}
+
+	args := []string{
+		"-n", "install", "-d", "-m", "0700",
+		"-o", strconv.Itoa(os.Getuid()),
+		"-g", strconv.Itoa(os.Getgid()),
+		path,
+	}
+	cmd := exec.Command("sudo", args...) // #nosec G204 -- fixed argv; the path comes from the configuration
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("sudo install -d %s failed: %w: %s", path, err, strings.TrimSpace(string(out)))
+	}
+	if err := syscall.Access(path, 2); err != nil {
+		return fmt.Errorf("%s is still not writable after sudo install: %w", path, err)
+	}
 	return nil
 }
 
