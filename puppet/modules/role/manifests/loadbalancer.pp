@@ -254,13 +254,13 @@ class role::loadbalancer {
   # ---------------------------------------------------------------------------
   exec { 'ufw-lb-http':
     command => '/usr/sbin/ufw allow 80/tcp comment "HTTP"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW IN"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-lb-https':
     command => '/usr/sbin/ufw allow 443/tcp comment "HTTPS"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "443/tcp.*ALLOW IN"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "443/tcp.*ALLOW"',
     require => Exec['ufw-enable'],
   }
 
@@ -270,9 +270,13 @@ class role::loadbalancer {
     require => Exec['ufw-enable'],
   }
 
+  # Keepalived speaks VRRP (IP protocol 112) between the two balancers. ufw
+  # only accepts protocol *names* from its supported list, so "proto 112" is
+  # rejected ("ERROR: Unsupported protocol '112'") and the catalog fails; the
+  # supported spelling renders in `ufw status` as "192.168.20.0/24/vrrp".
   exec { 'ufw-lb-vrrp':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 proto 112 comment "keepalived VRRP"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "112"',
+    command => '/usr/sbin/ufw allow from 192.168.20.0/24 proto vrrp comment "keepalived VRRP"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "vrrp"',
     require => Exec['ufw-enable'],
   }
 }

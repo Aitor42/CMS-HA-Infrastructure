@@ -253,7 +253,7 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
   exec { 'ufw-cms-http':
     command => '/usr/sbin/ufw allow 80/tcp comment "HTTP WordPress"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW IN"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW"',
     require => Exec['ufw-enable'],
   }
 
