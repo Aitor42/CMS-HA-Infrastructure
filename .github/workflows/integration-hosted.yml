@@ -374,6 +374,28 @@ jobs:
               ' 2>&1 || true
           } > "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
 
+          # Cluster-side state once the deploy has moved past provisioning: the
+          # later phases (DRBD, Kubernetes, CMS, monitoring) fail inside the
+          # guests, where the libvirt journal says nothing useful.
+          {
+            echo "==== cluster nodes: role state ===="
+            guest() {
+              ip="$1"; cmd="$2"
+              echo "-- ubuntu@$ip"
+              timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+                -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" "$cmd" 2>&1 \
+                | tail -80 || true
+            }
+            guest 192.168.10.11 'echo "[drbd]"; sudo drbdadm status; echo "[k3s]"; sudo systemctl is-active k3s; echo "[nodes]"; sudo k3s kubectl get nodes -o wide; echo "[pods]"; sudo k3s kubectl get pods -A; echo "[journal]"; sudo journalctl -u k3s --no-pager -n 40'
+            guest 192.168.10.12 'echo "[drbd]"; sudo drbdadm status; echo "[k3s]"; sudo systemctl is-active k3s'
+            guest 192.168.10.13 'echo "[k3s-agent]"; sudo systemctl is-active k3s-agent; echo "[journal]"; sudo journalctl -u k3s-agent --no-pager -n 30'
+            guest 192.168.10.15 'echo "[nfs]"; sudo systemctl is-active nfs-kernel-server; echo "[exports]"; sudo exportfs -v'
+            guest 192.168.10.20 'echo "[units]"; systemctl is-active prometheus prometheus-node-exporter prometheus-alertmanager prometheus-blackbox-exporter grafana-server; echo "[prometheus]"; curl -sS -m 5 http://localhost:9090/-/ready; echo; echo "[grafana]"; curl -sS -m 5 http://localhost:3000/api/health; echo; echo "[config check]"; sudo promtool check config /etc/prometheus/prometheus.yml 2>&1 | tail -5'
+            guest 192.168.20.103 'echo "[units]"; systemctl is-active nginx keepalived prometheus-nginx-exporter; echo "[nginx -t]"; sudo nginx -t; echo "[vip]"; ip -4 -o addr show; echo "[keepalived]"; sudo journalctl -u keepalived --no-pager -n 30; echo "[vip https]"; curl -sk -m 8 -H "Host: cms.fake-enterprise.com" -o /dev/null -w "http_code=%{http_code}\n" https://192.168.20.100/'
+            guest 192.168.20.101 'echo "[units]"; systemctl is-active apache2 prometheus-apache-exporter; echo "[mounts]"; mount | grep -i nfs; echo "[apache log]"; sudo tail -20 /var/log/apache2/wordpress_error.log 2>/dev/null; echo "[db nodeport]"; timeout 5 bash -c "cat < /dev/null > /dev/tcp/192.168.10.11/30306" && echo mariadb-nodeport-open || echo mariadb-nodeport-closed'
+          } >> "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
+
           # Serial console and screen of the stalled installers. The serial
           # port is a pty chardev, so `virsh console` refuses to run without a
           # controlling TTY; reading the pty the domain holds gets the same
