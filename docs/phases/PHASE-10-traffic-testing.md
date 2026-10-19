@@ -34,6 +34,23 @@ The legacy script `scripts/11_traffic_mix.sh` generates simulated traffic agains
 ./scripts/11_traffic_mix.sh --internal --duration 60 --with-db
 ```
 
+### Functional Checks (`cms-ha verify`, Phase 10)
+
+> **Automated:** `cms-ha verify` runs a functional phase on top of the
+> end-to-end HTTP checks of Phase 08. It proves the deployed stack *works as an
+> application*, not only that its units are active, and it is part of the
+> integration driver (`tests/integration/run.sh`), so every CI run gates on it.
+
+| Check | What it proves |
+|:------|:---------------|
+| `CMS pages` | `/wp-login.php` returns the credential form, `/feed/` generates an RSS/Atom document from the database, an asset referenced by the home page is served, and plain HTTP redirects to HTTPS |
+| `CMS REST API` | `/wp-json/` lists its namespaces, `/wp-json/wp/v2/posts` returns the post `wp core install` created, and that post's permalink renders as HTML through the VIP |
+| `CMS frontends` | Each frontend's own `wp-cli` finds WordPress installed and counts posts (its whole database path), and the uploads directory is the NFS export instead of local disk |
+| `Load balancers` | Each load balancer answers the site directly, so a broken backup node does not stay hidden behind the VIP |
+| `MariaDB` | The NodePort is reachable and a SQL round-trip reads `wp_posts`/`wp_options` and writes a throwaway table, proving the database accepts writes |
+| `Prometheus probes` | The alert rules are loaded and every `blackbox_exporter` probe of the VIP and the frontends reports success |
+| `Grafana` | The datasource and at least one dashboard are provisioned |
+
 ### Types of Generated Traffic
 
 | Traffic Type | Tool Used | Description |
