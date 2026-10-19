@@ -2,43 +2,48 @@ package utils
 
 import "testing"
 
-func TestAllNodesReady(t *testing.T) {
+func TestCountReadyNodes(t *testing.T) {
 	tests := []struct {
 		name     string
 		nodesOut string
-		want     bool
+		want     int
 	}{
 		{
 			name:     "all ready",
 			nodesOut: "NAME   STATUS   ROLES\nm1     Ready    control-plane\nm2     Ready    control-plane\nm3     Ready    worker\n",
-			want:     true,
+			want:     3,
 		},
 		{
-			name:     "one notready",
+			name:     "notready is never counted",
 			nodesOut: "NAME   STATUS     ROLES\nm1     Ready      control-plane\nm2     NotReady   control-plane\nm3     Ready      worker\n",
-			want:     false,
+			want:     2,
 		},
 		{
-			name:     "all notready must not pass",
+			name:     "all notready counts zero",
 			nodesOut: "NAME   STATUS     ROLES\nm1     NotReady   control-plane\nm2     NotReady   control-plane\n",
-			want:     false,
+			want:     0,
 		},
 		{
 			name:     "empty output",
 			nodesOut: "",
-			want:     false,
+			want:     0,
 		},
 		{
 			name:     "header only",
 			nodesOut: "NAME   STATUS   ROLES   AGE   VERSION\n",
-			want:     false,
+			want:     0,
+		},
+		{
+			name:     "cordoned node still counts as ready",
+			nodesOut: "NAME   STATUS                     ROLES\nw1     Ready,SchedulingDisabled   worker\n",
+			want:     1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := allNodesReady(tt.nodesOut); got != tt.want {
-				t.Errorf("allNodesReady(%q) = %v, want %v", tt.nodesOut, got, tt.want)
+			if got := countReadyNodes(tt.nodesOut); got != tt.want {
+				t.Errorf("countReadyNodes(%q) = %d, want %d", tt.nodesOut, got, tt.want)
 			}
 		})
 	}

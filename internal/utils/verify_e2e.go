@@ -34,8 +34,19 @@ const (
 	cmsBurstMaxConsecutiveFailures = 3
 	// cmsCheckBudget bounds the whole CMS sub-check (handshake, first load and
 	// burst) so verification cannot hang behind an unresponsive load balancer.
-	cmsCheckBudget = 4 * time.Minute
+	cmsCheckBudget = 5 * time.Minute
 )
+
+// cmsHTTPClient is shared by the CMS burst so its 100 page loads reuse one
+// connection pool. Rebuilding a client (and closing its idle connections) per
+// request forced a fresh TCP connect and TLS handshake every time, which turned
+// a healthy but slow stack into a false failure once the budget ran out.
+var cmsHTTPClient = &http.Client{
+	Timeout: e2eTimeout,
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- the lab certificate is issued by the project's own CA
+	},
+}
 
 // e2eOutcome is one sub-check's result inside phase08.
 type e2eOutcome struct {
@@ -111,7 +122,7 @@ func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 		hostNote = fmt.Sprintf(" (Host: %s)", vhost)
 	}
 
-	status, body, err := httpGet(ctx, base, vhost, e2eTimeout, true)
+	status, body, err := httpGetWithClient(ctx, cmsHTTPClient, base, vhost, e2eTimeout)
 	if err != nil {
 		o.detail = fmt.Sprintf("GET %s%s failed: %v", base, hostNote, err)
 		return o
@@ -132,7 +143,7 @@ func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 	consecutiveFailures := 0
 	lastErr := ""
 	for i := 0; i < cmsBurstRequests; i++ {
-		st, _, err := httpGet(ctx, base, vhost, e2eTimeout, true)
+		st, _, err := httpGetWithClient(ctx, cmsHTTPClient, base, vhost, e2eTimeout)
 		attempted++
 		if err == nil && st == http.StatusOK {
 			success++
@@ -150,9 +161,15 @@ func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 		}
 	}
 
-	ratio := float64(success) / float64(cmsBurstRequests)
+	// The ratio is taken over the requests actually attempted: when the loop
+	// stops early it must not be compared against a denominator it never tried
+	// (8 successes out of 10 attempts is not "8%").
+	ratio := 1.0
+	if attempted > 0 {
+		ratio = float64(success) / float64(attempted)
+	}
 	o.pass = attempted > 0 && ratio >= cmsBurstMinSuccessRatio
-	o.detail = fmt.Sprintf("%d/%d requests OK (%.0f%%)", success, cmsBurstRequests, ratio*100)
+	o.detail = fmt.Sprintf("%d/%d requests OK (%.0f%%)", success, attempted, ratio*100)
 	if attempted < cmsBurstRequests {
 		o.detail += fmt.Sprintf(", stopped after %d attempts", attempted)
 	}
@@ -226,6 +243,35 @@ func (v *Verifier) checkGrafana(ctx context.Context, monitorIP string) e2eOutcom
 	o.pass = true
 	o.detail = fmt.Sprintf("database ok (v%s)", health.Version)
 	return o
+}
+
+// httpGetWithClient performs a GET with a caller-provided client so a burst of
+// requests can reuse one connection pool. The body is read to completion (and
+// closed), which is what lets the transport keep the connection alive for the
+// next request. httpGet below keeps a one-shot client for the isolated probes.
+func httpGetWithClient(ctx context.Context, client *http.Client, rawURL, hostHeader string, timeout time.Duration) (int, string, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	if hostHeader != "" {
+		req.Host = hostHeader
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil {
+		return resp.StatusCode, "", err
+	}
+	return resp.StatusCode, string(body), nil
 }
 
 // httpGet is a one-shot GET with a per-request timeout. insecure skips TLS

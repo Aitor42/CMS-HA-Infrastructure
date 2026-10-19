@@ -141,11 +141,18 @@ func serviceStatesActive(out string) bool {
 	return true
 }
 
-// allNodesReady reports whether `kubectl get nodes` output describes a healthy
-// cluster: at least one node Ready and none NotReady. "NotReady" contains the
-// substring "Ready", so both checks are required.
-func allNodesReady(nodesOut string) bool {
-	return strings.Contains(nodesOut, "Ready") && !strings.Contains(nodesOut, "NotReady")
+// countReadyNodes counts the nodes reported Ready in `kubectl get nodes`
+// output. "NotReady" contains the substring "Ready", so the negative form has
+// to be excluded explicitly, and the header line does not match either.
+func countReadyNodes(nodesOut string) int {
+	ready := 0
+	for _, line := range strings.Split(nodesOut, "\n") {
+		if strings.Contains(line, "NotReady") || !strings.Contains(line, "Ready") {
+			continue
+		}
+		ready++
+	}
+	return ready
 }
 
 func (v *Verifier) phase02(ctx context.Context) CheckResult {
@@ -228,7 +235,7 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 func (v *Verifier) phase04(ctx context.Context) CheckResult {
 	// K3s cluster + MariaDB pod Running in single SSH session
 	if len(v.cfg.Nodes.Masters) > 0 {
-		cmd := `kubectl get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl get nodes -l node-role.kubernetes.io/etcd --no-headers 2>/dev/null | wc -l`
+		cmd := `kubectl --request-timeout=10s get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers 2>/dev/null | wc -l`
 		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, cmd)
 		parts := strings.Split(out, "---CMS_DELIM---")
 		nodesOut := ""
@@ -243,10 +250,12 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		if len(parts) >= 3 {
 			etcdOut = strings.TrimSpace(parts[2])
 		}
-		// "NotReady" contains the substring "Ready", so both must be checked:
-		// the cluster is only healthy when at least one node is Ready and none
-		// reports NotReady.
-		pass := err == nil && allNodesReady(nodesOut) && strings.Contains(podOut, "Running")
+		// The cluster is only healthy when every configured node is Ready: a
+		// node that vanished from the output must not pass just because the
+		// remaining ones are fine, and "NotReady" contains "Ready".
+		wantNodes := len(v.cfg.Nodes.Masters) + len(v.cfg.Nodes.Workers)
+		readyNodes := countReadyNodes(nodesOut)
+		pass := err == nil && wantNodes > 0 && readyNodes == wantNodes && strings.Contains(podOut, "Running")
 		// etcd must report one member per configured master, otherwise the
 		// cluster has no real quorum even though the nodes look Ready. K3s
 		// keeps etcd inside the server process, so members are the nodes
@@ -254,7 +263,8 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		if want := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters)); etcdOut != want {
 			pass = false
 		}
-		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, fmt.Sprintf("etcd members: %s", etcdOut)}
+		return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass,
+			fmt.Sprintf("ready nodes: %d/%d, etcd members: %s", readyNodes, wantNodes, etcdOut)}
 	}
 	return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
 }
