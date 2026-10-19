@@ -58,6 +58,19 @@ class role::k3s_master {
     notify  => Service['prometheus-mysqld-exporter'],
   }
 
+  # dpkg starts the exporter as soon as the package lands, i.e. before the
+  # credentials above exist. The unit then fails, restarts and burns through
+  # systemd's start limit, after which every further start is refused with
+  # "Start request repeated too quickly" — the state a fresh node was stuck in.
+  # Clear it before the service resource touches the unit; the exec stays
+  # idempotent because it skips a unit that is already active.
+  exec { 'reset-failed-mysqld-exporter':
+    command => '/usr/bin/systemctl reset-failed prometheus-mysqld-exporter || true',
+    unless  => '/usr/bin/systemctl is-active --quiet prometheus-mysqld-exporter',
+    require => Package['prometheus-mysqld-exporter'],
+    before  => Service['prometheus-mysqld-exporter'],
+  }
+
   service { 'prometheus-mysqld-exporter':
     ensure    => running,
     enable    => true,
