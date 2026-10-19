@@ -9,7 +9,7 @@
 # and never a GitHub-hosted runner.
 #
 # Usage:
-#   tests/integration/run.sh [--resume] [--skip-deploy] [--skip-chaos] [--dry-run]
+#   tests/integration/run.sh [--resume] [--skip-deploy] [--skip-chaos] [--with-traffic] [--dry-run]
 #
 # Environment:
 #   CONFIG           configuration file             (default: config.yaml)
@@ -18,6 +18,8 @@
 #   SKIP_VM_CREATE   1 = the lab's networks and VMs are already provisioned, so
 #                     deploy runs with --skip-vm-create (Step 3 of the manual).
 #                     Set by workflows that provision (Step 1/2) beforehand.
+#   TRAFFIC_DURATION seconds of k6 load with --with-traffic (default: 45)
+#   TRAFFIC_VUS      k6 virtual users with --with-traffic    (default: 3)
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -28,23 +30,27 @@ CONFIG="${CONFIG:-config.yaml}"
 STATE_FILE="${STATE_FILE:-deploy.state}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-integration-artifacts}"
 SKIP_VM_CREATE="${SKIP_VM_CREATE:-0}"
+TRAFFIC_DURATION="${TRAFFIC_DURATION:-45}"
+TRAFFIC_VUS="${TRAFFIC_VUS:-3}"
 
 RESUME=0
 SKIP_DEPLOY=0
 SKIP_CHAOS=0
+WITH_TRAFFIC=0
 DRY_RUN=0
 
 usage() {
-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --resume)      RESUME=1 ;;
-    --skip-deploy) SKIP_DEPLOY=1 ;;
-    --skip-chaos)  SKIP_CHAOS=1 ;;
-    --dry-run)     DRY_RUN=1 ;;
-    -h|--help)     usage; exit 0 ;;
+    --resume)       RESUME=1 ;;
+    --skip-deploy)  SKIP_DEPLOY=1 ;;
+    --skip-chaos)   SKIP_CHAOS=1 ;;
+    --with-traffic) WITH_TRAFFIC=1 ;;
+    --dry-run)      DRY_RUN=1 ;;
+    -h|--help)      usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
@@ -124,6 +130,22 @@ if [ "$EXIT_CODE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     log "Verification passed"
   else
     fail "verification failed"
+    EXIT_CODE=1
+  fi
+fi
+
+# ── Traffic: k6 load profile ───────────────────────────────────────────────
+# Optional: the verify step above already proves the request path with a short
+# burst, so the load profile is opt-in (workflows enable it). k6 exits non-zero
+# when its thresholds are crossed, which makes the step a real gate.
+if [ "$EXIT_CODE" -eq 0 ] && [ "$WITH_TRAFFIC" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+  log "Generating k6 load against the CMS (${TRAFFIC_DURATION}s, ${TRAFFIC_VUS} VUs)"
+  if ./cms-ha -c "$CONFIG" traffic --external \
+      --duration "$TRAFFIC_DURATION" --concurrency "$TRAFFIC_VUS" \
+      | tee "$ARTIFACTS_DIR/traffic.log"; then
+    log "Traffic test passed"
+  else
+    fail "traffic test failed"
     EXIT_CODE=1
   fi
 fi

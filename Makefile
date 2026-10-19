@@ -165,6 +165,11 @@ integration: build ## End-to-end integration test on a real KVM host (deploy + v
 	@echo "▶ Running end-to-end integration test..."
 	tests/integration/run.sh
 
+.PHONY: integration-traffic
+integration-traffic: build ## Integration test including the k6 load profile (TRAFFIC_DURATION=45 TRAFFIC_VUS=3)
+	@echo "▶ Running end-to-end integration test with the k6 load profile..."
+	tests/integration/run.sh --with-traffic
+
 .PHONY: integration-resume
 integration-resume: build ## Resume the end-to-end integration test from the deploy checkpoint
 	@echo "▶ Resuming end-to-end integration test..."

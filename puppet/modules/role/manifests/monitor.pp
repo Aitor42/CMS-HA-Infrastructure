@@ -33,6 +33,19 @@ class role::monitor {
     require => Package['prometheus'],
   }
 
+  # k6 streams its metrics to Prometheus' remote-write endpoint
+  # (traffic.prometheus_rw_url) so the k6 panels of the HA overview dashboard
+  # have data. The package does not enable the receiver, so without this flag
+  # every `cms-ha traffic` run logs "Failed to send the time series data" and
+  # the panels stay empty. The flag is appended to the packaged ARGS - Debian
+  # compiles the config and storage paths into the binary, so an empty ARGS is
+  # complete - and Prometheus is restarted to pick it up.
+  exec { 'prometheus-enable-remote-write':
+    command => '/bin/sed -i "s|^ARGS=\"|ARGS=\"--web.enable-remote-write-receiver |" /etc/default/prometheus && /usr/bin/systemctl restart prometheus',
+    unless  => '/usr/bin/grep -q -- "--web.enable-remote-write-receiver" /etc/default/prometheus',
+    require => Service['prometheus'],
+  }
+
   # ---------------------------------------------------------------------------
   # PROMETHEUS ALERTMANAGER — alert routing/deduplication (same node)
   # Prometheus forwards firing alerts here (see the `alerting:` block in

@@ -368,20 +368,24 @@ Disk State: UpToDate/UpToDate
 
 `tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
 a real KVM host — **build → `deploy` → `verify` → `test failover`** — and is the
-entry point of the `Integration (KVM lab)` workflow. That workflow targets a
+entry point of the `Integration (KVM lab)` workflow. The k6 load profile runs
+after verify when the driver is called with `--with-traffic` (`make
+integration-traffic`), and its log is collected with the other artifacts. That
+workflow targets a
 self-hosted runner labelled `kvm` and is **manual only** (`workflow_dispatch`):
 the runner is not provisioned automatically, so it is started by hand when the
 lab host is free.
 
 ```bash
 make integration                 # full deploy + verify + DRBD failover
+make integration-traffic         # same, plus 45s of k6 load against the VIP
 make integration-resume          # resume from the deploy.state checkpoint
 tests/integration/run.sh --skip-deploy --skip-chaos   # verify only
 ```
 
 It requires `/dev/kvm`, a working libvirt connection, and a container runtime
 (docker/podman) for the pinned tooling images. The checkpoint and the
-`verify`/`failover` logs are uploaded as CI artifacts.
+`verify`/`traffic`/`failover` logs are uploaded as CI artifacts.
 
 The same driver also runs on a free GitHub-hosted runner through
 `.github/workflows/integration-hosted.yml`, which is manual as well. Hosted
@@ -404,7 +408,7 @@ The `internal-monitor` node centralises metrics collection and visualisation:
 
 **Alert rules (19).** Availability (nodes, MariaDB/Nginx/Apache exporters, HTTP 5xx), resource pressure (disk/memory), backup/restore health, and the high-availability set: `EtcdNoQuorum` (fewer than two of the three etcd members reachable), `DRBDPeerDown`, `DRBDSplitBrain`, `DRBDNoPrimary` and `KeepalivedState` (the VIP must be held by exactly one balancer). DRBD and keepalived metrics are published through node_exporter's textfile collector, so no extra exporter is required.
 
-**Load testing.** `./cms-ha traffic` runs a k6 profile in a pinned `grafana/k6` container against the VIP or an internal frontend and reports RPS, p95/p99 and error rate. With `traffic.prometheus_rw_url` set in `config.yaml`, those metrics are streamed into Prometheus so they appear on the HA Overview dashboard during the test.
+**Load testing.** `./cms-ha traffic` runs a k6 profile in a pinned `grafana/k6` container against the VIP or an internal frontend and reports RPS, p95/p99 and error rate. With `traffic.prometheus_rw_url` set in `config.yaml`, those metrics are streamed into Prometheus so they appear on the HA Overview dashboard during the test; `role::monitor` starts Prometheus with `--web.enable-remote-write-receiver` so the endpoint accepts them. The integration driver runs the profile after verify when it is called with `--with-traffic`.
 
 ### Critical Monitored Metrics
 *   **Infrastructure**: CPU usage (`node_cpu_seconds_total`), available memory (`node_memory_MemAvailable_bytes`), disk usage (`node_filesystem_avail_bytes`), and network traffic (`node_network_receive_bytes_total`).

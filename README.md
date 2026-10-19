@@ -508,13 +508,16 @@ Automated failover tests validate the HA design under real failure conditions:
 ## End-to-End Integration Test
 
 `tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
-a real KVM host: **build → `deploy` → `verify` → `test failover`**. It is the job
+a real KVM host: **build → `deploy` → `verify` → `test failover`**, plus an
+optional **k6 load profile** (`--with-traffic`, or `make integration-traffic`)
+between verify and failover. It is the job
 that `.github/workflows/integration.yml` runs on a **self-hosted runner labelled
 `kvm`**, triggered by hand (`workflow_dispatch`), because it needs libvirt and
 `/dev/kvm`.
 
 ```bash
 make integration           # full deploy + verify + failover
+make integration-traffic   # same, plus 45s of k6 load against the VIP
 make integration-resume    # resume from the deploy.state checkpoint
 tests/integration/run.sh --skip-deploy --skip-chaos   # verify only
 ```

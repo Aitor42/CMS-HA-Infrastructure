@@ -38,8 +38,9 @@ The legacy script `scripts/11_traffic_mix.sh` generates simulated traffic agains
 
 > **Automated:** `cms-ha verify` runs a functional phase on top of the
 > end-to-end HTTP checks of Phase 08. It proves the deployed stack *works as an
-> application*, not only that its units are active, and it is part of the
-> integration driver (`tests/integration/run.sh`), so every CI run gates on it.
+> application*, not only that its units are active. `tests/integration/run.sh
+> --with-traffic` (used by the CI workflows) adds a short k6 load profile after
+> it, so every CI run gates on both.
 
 | Check | What it proves |
 |:------|:---------------|
