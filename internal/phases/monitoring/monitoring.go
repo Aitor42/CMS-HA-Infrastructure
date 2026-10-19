@@ -89,10 +89,24 @@ func (p *Phase) Run(ctx context.Context) error {
 		// in kubernetes/monitoring/ and applied by the kubernetes phase, so no
 		// over-privileged cluster-admin binding is ever created here. This phase
 		// only mints the bearer token the scraper authenticates with.
-		tok, _, code, err := p.pool.RunCommand(ctx, masterIP, "kubectl create token prometheus -n kube-system --duration=8760h")
-		token := strings.TrimSpace(tok)
-		if err != nil || code != 0 {
-			logging.Warn("failed to mint the Prometheus bearer token (exit %d): %v", code, err)
+		// The token mint is retried: it depends on the ServiceAccount that the
+		// kubernetes phase applied, and a single API hiccup should not decide
+		// whether kubelet metrics exist. Still non-fatal by design (see the
+		// exporter note above): a monitoring gap must not stop the deploy.
+		var token string
+		mintErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 5, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+			out, _, _, rerr := p.pool.RunCommand(attemptCtx, masterIP, "kubectl create token prometheus -n kube-system --duration=8760h")
+			if rerr != nil {
+				return rerr
+			}
+			if strings.TrimSpace(out) == "" {
+				return fmt.Errorf("kubectl returned an empty token")
+			}
+			token = strings.TrimSpace(out)
+			return nil
+		})
+		if mintErr != nil {
+			logging.Warn("could not mint the Prometheus bearer token, so kubelet metrics will be missing from this deployment: %v", mintErr)
 		} else if token != "" {
 			// Token is bounded to 1 year (rotate by re-running the phase) so
 			// it is not an effectively permanent credential for the
