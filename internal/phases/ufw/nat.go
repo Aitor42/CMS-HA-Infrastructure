@@ -7,6 +7,7 @@ import (
 	"time"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -19,24 +20,35 @@ const DefaultWANIface = "enp3s0"
 const natRulesPath = "/tmp/nat.rules"
 
 // WANIface discovers the router's WAN uplink: first by the MAC declared in the
-// configuration, then by whichever interface holds the default route, and
-// finally DefaultWANIface. Discovery by MAC is the reliable path because it
-// survives the interface renaming that netplan/hardware enumeration can cause.
-func WANIface(ctx context.Context, pool *ssh.Pool, routerIP, wanMAC string) string {
+// configuration, then by whichever interface holds the default route, and only
+// then by the legacy DefaultWANIface name — which is accepted only when the
+// router really has such an interface. Rendering MASQUERADE/DNAT rules for an
+// interface that is not there leaves the lab without outbound connectivity
+// while every step still reports success, so an unresolvable WAN interface is
+// an error, not a guess.
+func WANIface(ctx context.Context, pool *ssh.Pool, routerIP, wanMAC string) (string, error) {
 	if wanMAC != "" {
+		// The MAC is interpolated into an awk filter: an unvalidated value
+		// would break the expression (or be read as part of it).
+		if !config.ValidMAC(wanMAC) {
+			return "", fmt.Errorf("config declares an invalid WAN MAC address for the router: %q", wanMAC)
+		}
 		cmd := fmt.Sprintf("ip -o link | awk '/%s/ {print $2}' | sed 's/://'", wanMAC)
 		if out, _, _, err := pool.RunCommand(ctx, routerIP, cmd); err == nil {
 			if name := strings.TrimSpace(out); name != "" {
-				return name
+				return name, nil
 			}
 		}
 	}
 	if out, _, _, err := pool.RunCommand(ctx, routerIP, "ip route show default | awk '{print $5}' | head -n1"); err == nil {
 		if name := strings.TrimSpace(out); name != "" {
-			return name
+			return name, nil
 		}
 	}
-	return DefaultWANIface
+	if _, _, code, err := pool.RunCommand(ctx, routerIP, "ip link show "+DefaultWANIface); err == nil && code == 0 {
+		return DefaultWANIface, nil
+	}
+	return "", fmt.Errorf("could not determine the router's WAN interface (nodes.router.mac_wan=%q matches nothing, there is no default route and %s does not exist)", wanMAC, DefaultWANIface)
 }
 
 // RenderNATRules renders templates/ufw/nat-rules with the discovered WAN

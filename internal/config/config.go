@@ -453,6 +453,7 @@ type NodeSpec struct {
 	IP           string
 	FQDN         string
 	MAC          string
+	MACWAN       string
 	RAMInstallMB int
 	RAMFinalMB   int
 	VCPUs        int
@@ -665,6 +666,10 @@ func (c *Config) Validate() error {
 		if n.MAC != "" && !macPattern.MatchString(n.MAC) {
 			return fmt.Errorf("node %s has an invalid MAC address: %q", n.Name, n.MAC)
 		}
+		// mac_wan is interpolated into an awk filter on the router too.
+		if n.MACWAN != "" && !macPattern.MatchString(n.MACWAN) {
+			return fmt.Errorf("node %s has an invalid WAN MAC address: %q", n.Name, n.MACWAN)
+		}
 	}
 
 	// These are interpolated unquoted into the backup shell command: a dot
@@ -702,6 +707,11 @@ func (c *Config) ValidatePartial() error {
 
 var fqdnPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
+
+// ValidMAC reports whether s is a colon-separated MAC address in the exact
+// shape the deploy interpolates into remote commands (awk filters).
+func ValidMAC(s string) bool { return macPattern.MatchString(s) }
+
 var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var dbIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 var cronPattern = regexp.MustCompile(`^[0-9A-Za-z*,/ @-]+$`)
@@ -726,6 +736,7 @@ func toSpec(n NodeDetail, fallbackIP string) NodeSpec {
 		IP:           ip,
 		FQDN:         n.FQDN,
 		MAC:          mac,
+		MACWAN:       n.MACWAN,
 		RAMInstallMB: n.RAMInstallMB,
 		RAMFinalMB:   n.RAMFinalMB,
 		VCPUs:        n.VCPUs,

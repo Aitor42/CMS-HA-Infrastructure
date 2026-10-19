@@ -44,7 +44,10 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Discovering WAN interface by MAC on Router...")
-	wanIface := WANIface(ctx, p.pool, routerIP, p.cfg.Nodes.Router.MACWAN)
+	wanIface, err := WANIface(ctx, p.pool, routerIP, p.cfg.Nodes.Router.MACWAN)
+	if err != nil {
+		return err
+	}
 	logging.Info("WAN interface on router: %s", wanIface)
 
 	// The Router Bootstrap phase already injected these rules early (and

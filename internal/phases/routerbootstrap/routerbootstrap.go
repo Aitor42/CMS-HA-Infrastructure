@@ -283,7 +283,10 @@ sysctl -n net.ipv4.ip_forward`
 // and in the live nat table, so clients can download packages before UFW is
 // configured.
 func (p *Phase) enableNAT(ctx context.Context, router config.NodeDetail) error {
-	wanIface := ufw.WANIface(ctx, p.pool, router.IP, router.MACWAN)
+	wanIface, err := ufw.WANIface(ctx, p.pool, router.IP, router.MACWAN)
+	if err != nil {
+		return err
+	}
 	logging.Info("Installing NAT rules on the router (WAN interface %s)...", wanIface)
 	if _, err := ufw.ConfigureNAT(ctx, p.pool, router.IP, wanIface, true); err != nil {
 		return err
