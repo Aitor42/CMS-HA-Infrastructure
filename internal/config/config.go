@@ -680,6 +680,14 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("%s must contain only letters, digits, or underscores: %q", field, v)
 		}
 	}
+
+	// The step versions are interpolated into the download URL that the jumpstart
+	// runs, so they must be plain release versions.
+	for field, v := range map[string]string{"pki.step_version": c.PKI.StepVersion, "pki.step_ca_version": c.PKI.StepCAVersion} {
+		if v != "" && !stepVersionPattern.MatchString(v) {
+			return fmt.Errorf("%s must be a plain release version such as \"0.31.0\": %q", field, v)
+		}
+	}
 	return nil
 }
 
@@ -711,6 +719,10 @@ var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 // ValidMAC reports whether s is a colon-separated MAC address in the exact
 // shape the deploy interpolates into remote commands (awk filters).
 func ValidMAC(s string) bool { return macPattern.MatchString(s) }
+
+// stepVersionPattern matches a plain release version ("0.31.0", optionally
+// prefixed with "v"), the only shape safe to interpolate into the release URL.
+var stepVersionPattern = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){1,3}$`)
 
 var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var dbIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)

@@ -47,17 +47,38 @@ func (p *Phase) Run(ctx context.Context) error {
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
 
 	logging.Info("Installing step-cli and step-ca on Jumpstart...")
-	installCmd := `set -e
+	// The release assets are pinned by pki.step_version / pki.step_ca_version.
+	// Downloading whatever "latest" happens to point at made a fresh deploy
+	// depend on that day's Smallstep release while the configuration claimed a
+	// version, so a future release that changes the CLI surface (or the Debian
+	// asset name) would break exactly the hosts that start from scratch.
+	//
+	// The asset name is not stable across releases: step-cli ships
+	// step-cli_<v>-1_<arch>.deb while step-ca has published both
+	// step-ca_<v>-1_<arch>.deb and step-ca_<v>_<arch>.deb, so every known shape
+	// is tried and the version-independent alias is used only when the version
+	// is left empty. A pin that cannot be downloaded is an error, not a reason
+	// to install something else.
+	installCmd := fmt.Sprintf(`set -e
 if ! command -v step >/dev/null 2>&1 || ! command -v step-ca >/dev/null 2>&1; then
 	ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-	wget -q "https://github.com/smallstep/cli/releases/latest/download/step-cli_${ARCH}.deb" -O /tmp/step-cli.deb
-	dpkg -i /tmp/step-cli.deb || apt-get install -f -y
-	rm -f /tmp/step-cli.deb
-
-	wget -q "https://github.com/smallstep/certificates/releases/latest/download/step-ca_${ARCH}.deb" -O /tmp/step-ca.deb
-	dpkg -i /tmp/step-ca.deb || apt-get install -f -y
-	rm -f /tmp/step-ca.deb
-fi`
+	install_deb() {
+		out="$1"; shift
+		for url in "$@"; do
+			if wget -q "$url" -O "$out"; then
+				dpkg -i "$out" || apt-get install -f -y
+				rm -f "$out"
+				return 0
+			fi
+			echo "  no such release asset: $url" >&2
+		done
+		return 1
+	}
+	install_deb /tmp/step-cli.deb %s
+	install_deb /tmp/step-ca.deb %s
+fi`,
+		quoteURLs(stepReleaseURLs("cli", "step-cli", p.cfg.PKI.StepVersion)),
+		quoteURLs(stepReleaseURLs("certificates", "step-ca", p.cfg.PKI.StepCAVersion)))
 	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, installCmd); err != nil || code != 0 {
 		return fmt.Errorf("failed to install step-ca (exit %d): %v", code, err)
 	}
@@ -283,6 +304,32 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 
 	logging.Success("Load-balancer certificate issued by the internal CA and distributed.")
 	return nil
+}
+
+// stepReleaseURLs returns the candidate download URLs for a step release. Both
+// known Debian asset shapes are returned for a pinned version; when the version
+// is empty the version-independent alias is used instead. ${ARCH} is expanded by
+// the remote shell, not here.
+func stepReleaseURLs(repo, asset, version string) []string {
+	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	base := fmt.Sprintf("https://github.com/smallstep/%s/releases", repo)
+	if v == "" {
+		return []string{fmt.Sprintf("%s/latest/download/%s_${ARCH}.deb", base, asset)}
+	}
+	return []string{
+		fmt.Sprintf("%s/download/v%s/%s_%s-1_${ARCH}.deb", base, v, asset, v),
+		fmt.Sprintf("%s/download/v%s/%s_%s_${ARCH}.deb", base, v, asset, v),
+	}
+}
+
+// quoteURLs renders candidate URLs for the remote shell, double-quoted so the
+// shell still expands ${ARCH} inside them.
+func quoteURLs(urls []string) string {
+	quoted := make([]string, 0, len(urls))
+	for _, u := range urls {
+		quoted = append(quoted, `"`+u+`"`)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // caPortOrDefault returns the CA port, applying the same 8443 default used

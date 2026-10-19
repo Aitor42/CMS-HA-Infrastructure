@@ -52,8 +52,8 @@ In a virtualised environment, device firmware selection is critical for compatib
 | **Grafana** | 11.x | Data visualisation and operational dashboards | prometheus-datasource | [Grafana Labs](https://grafana.com/) | `internal-monitor` |
 | **blackbox_exporter** | 0.24.x | End-to-end HTTP/TCP reachability probes (LB and CMS frontends) | None (standalone) | [Prometheus blackbox](https://github.com/prometheus/blackbox_exporter) | `internal-monitor` |
 | **UFW** | 0.36.2 | Perimeter and per-node firewall management | `iptables`, `nftables`, `python3` | [Launchpad UFW](https://launchpad.net/ufw) | `ufw-router`, all nodes |
-| **step-ca** | 0.27.5 | Private Certificate Authority for internal PKI | step CLI, SQLite | [Smallstep CA](https://github.com/smallstep/certificates) | `jumpstart` |
-| **step** | 0.27.5 | Command-line tool for interacting with step-ca | libc6 | [Smallstep CLI](https://github.com/smallstep/cli) | All nodes |
+| **step-ca** | 0.30.2 | Private Certificate Authority for internal PKI | step CLI, SQLite | [Smallstep CA](https://github.com/smallstep/certificates) | `jumpstart` |
+| **step** | 0.31.0 | Command-line tool for interacting with step-ca | libc6 | [Smallstep CLI](https://github.com/smallstep/cli) | All nodes |
 | **Ansible** | 2.16.x | Declarative creation of networks, disks and VM domains (infra as code) | Python 3, SSH, libvirt daemon | [Ansible](https://www.ansible.com/) | Hypervisor Host |
 | **community.libvirt** | 1.2.x | Ansible collection for libvirt networks and domains | Ansible core, `libvirt-python` | [community.libvirt](https://github.com/ansible-collections/community.libvirt) | Hypervisor Host |
 | **Garage** | v2.4.1 | S3-compatible object store for off-DRBD backups | Container runtime (Docker/Podman), SQLite | [Garage](https://garagehq.deuxfleurs.fr/) | Hypervisor Host |

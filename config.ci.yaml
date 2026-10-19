@@ -213,8 +213,12 @@ monitoring:
 pki:
   ca_port: 8443
   provisioner_password: ""
-  step_version: "0.27.5"
-  step_ca_version: "0.27.5"
+  # Pinned step-cli / step-ca releases: the deploy downloads these exact Debian
+  # assets on a fresh jumpstart (both known asset-name shapes are tried; the
+  # version-independent "latest" alias is used only when a version is empty).
+  # The versions below are the ones verified end to end with this phase.
+  step_version: "0.31.0"
+  step_ca_version: "0.30.2"
   domain: "ca.internal.local"
   # Common name of the internal CA. The verify phase asserts the load-balancer
   # certificate was issued by this CA (i.e. is no longer self-signed).
