@@ -228,7 +228,7 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 func (v *Verifier) phase04(ctx context.Context) CheckResult {
 	// K3s cluster + MariaDB pod Running in single SSH session
 	if len(v.cfg.Nodes.Masters) > 0 {
-		cmd := `kubectl get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl -n kube-system get pods -o name 2>/dev/null | grep -c 'pod/etcd-' || true`
+		cmd := `kubectl get nodes; echo "---CMS_DELIM---"; kubectl get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl get nodes -l node-role.kubernetes.io/etcd --no-headers 2>/dev/null | wc -l`
 		out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Masters[0].IP, cmd)
 		parts := strings.Split(out, "---CMS_DELIM---")
 		nodesOut := ""
@@ -248,7 +248,9 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		// reports NotReady.
 		pass := err == nil && allNodesReady(nodesOut) && strings.Contains(podOut, "Running")
 		// etcd must report one member per configured master, otherwise the
-		// cluster has no real quorum even though the nodes look Ready.
+		// cluster has no real quorum even though the nodes look Ready. K3s
+		// keeps etcd inside the server process, so members are the nodes
+		// carrying the etcd role label rather than kube-system pods.
 		if want := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters)); etcdOut != want {
 			pass = false
 		}

@@ -164,11 +164,14 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	// The whole point of the third master: etcd must have a real quorum.
 	// Verifying the member count (not just node readiness) catches a server
-	// that joined as an agent or failed to register with etcd.
+	// that joined as an agent or failed to register with etcd. K3s runs etcd
+	// inside the server process rather than as kube-system pods, so members
+	// are counted through the etcd role label (the one behind kubectl's ROLES
+	// column); that also matches how kubeadm clusters report it.
 	logging.Info("Verifying embedded etcd quorum (%d members required)...", len(p.cfg.Nodes.Masters))
 	expectedEtcd := strconv.Itoa(len(p.cfg.Nodes.Masters))
 	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
-		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl -n kube-system get pods -o name 2>/dev/null | grep -c 'pod/etcd-' || true")
+		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes -l node-role.kubernetes.io/etcd --no-headers 2>/dev/null | wc -l")
 		if err != nil {
 			return err
 		}
