@@ -28,6 +28,13 @@ const (
 	// cmsBurstMinSuccessRatio tolerates a couple of failures (a keepalived
 	// transition, a PHP worker restart) without hiding a broken CMS.
 	cmsBurstMinSuccessRatio = 0.95
+	// cmsBurstMaxConsecutiveFailures stops the burst early: a handful of
+	// failures in a row is already a verdict, and without this a black-holed
+	// VIP would spend the whole per-request timeout 100 times.
+	cmsBurstMaxConsecutiveFailures = 3
+	// cmsCheckBudget bounds the whole CMS sub-check (handshake, first load and
+	// burst) so verification cannot hang behind an unresponsive load balancer.
+	cmsCheckBudget = 4 * time.Minute
 )
 
 // e2eOutcome is one sub-check's result inside phase08.
@@ -91,6 +98,10 @@ func (v *Verifier) phase08(ctx context.Context) CheckResult {
 // load-balancer path keeps working.
 func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 	o := e2eOutcome{label: "CMS"}
+	budgetCtx, cancel := context.WithTimeout(ctx, cmsCheckBudget)
+	defer cancel()
+	ctx = budgetCtx
+
 	base := "https://" + vip + "/"
 	// The vhost is keyed on its server name, exactly as the load profile does
 	// it: without the Host header WordPress answers with a canonical redirect.
@@ -117,23 +128,34 @@ func (v *Verifier) checkCMS(ctx context.Context, vip string) e2eOutcome {
 	// Burst: the same request repeated through the VIP, which exercises
 	// keepalived + nginx + both frontends.
 	success := 0
+	attempted := 0
+	consecutiveFailures := 0
 	lastErr := ""
 	for i := 0; i < cmsBurstRequests; i++ {
 		st, _, err := httpGet(ctx, base, vhost, e2eTimeout, true)
+		attempted++
 		if err == nil && st == http.StatusOK {
 			success++
+			consecutiveFailures = 0
 			continue
 		}
+		consecutiveFailures++
 		if err != nil {
 			lastErr = err.Error()
 		} else {
 			lastErr = fmt.Sprintf("HTTP %d", st)
 		}
+		if consecutiveFailures >= cmsBurstMaxConsecutiveFailures {
+			break
+		}
 	}
 
 	ratio := float64(success) / float64(cmsBurstRequests)
-	o.pass = ratio >= cmsBurstMinSuccessRatio
+	o.pass = attempted > 0 && ratio >= cmsBurstMinSuccessRatio
 	o.detail = fmt.Sprintf("%d/%d requests OK (%.0f%%)", success, cmsBurstRequests, ratio*100)
+	if attempted < cmsBurstRequests {
+		o.detail += fmt.Sprintf(", stopped after %d attempts", attempted)
+	}
 	if !o.pass {
 		o.detail += fmt.Sprintf(", last failure: %s", lastErr)
 	}
