@@ -171,12 +171,18 @@ func (p *Phase) Run(ctx context.Context) error {
 	logging.Info("Verifying embedded etcd quorum (%d members required)...", len(p.cfg.Nodes.Masters))
 	expectedEtcd := strconv.Itoa(len(p.cfg.Nodes.Masters))
 	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
-		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes -l node-role.kubernetes.io/etcd --no-headers 2>/dev/null | wc -l")
-		if err != nil {
-			return err
+		// Count in Go rather than piping into `wc -l`: a kubectl failure there
+		// still exits 0 (the status belongs to wc), so a broken kubeconfig or an
+		// unavailable API server would be reported as "got 0 members" instead of
+		// the real error - exactly the blind spot that made an earlier failure
+		// look like a quorum problem.
+		out, errOut, code, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes -l node-role.kubernetes.io/etcd --no-headers")
+		if err != nil || code != 0 {
+			return fmt.Errorf("kubectl query failed (exit %d): %v %s", code, err, strings.TrimSpace(errOut))
 		}
-		if strings.TrimSpace(out) != expectedEtcd {
-			return fmt.Errorf("expected %s etcd members, got %s", expectedEtcd, strings.TrimSpace(out))
+		count := countNonEmptyLines(out)
+		if got := strconv.Itoa(count); got != expectedEtcd {
+			return fmt.Errorf("expected %s etcd members, got %s", expectedEtcd, got)
 		}
 		return nil
 	})
@@ -394,6 +400,19 @@ func buildKustomizeTar() ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// countNonEmptyLines counts the entries of a `kubectl get ... --no-headers`
+// listing. It lives outside the retry closure so the counting rule (blank lines
+// are not members) is unit tested.
+func countNonEmptyLines(out string) int {
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func runChecked(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
