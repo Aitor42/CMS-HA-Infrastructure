@@ -19,6 +19,12 @@ type FailoverOpts struct {
 	SkipRestore bool
 }
 
+// shutdownGracePeriod is how long a guest is given to honour the ACPI power
+// request before it is powered off the hard way. Node-loss scenarios care that
+// the node is gone, so a guest that wedges its own shutdown must not abort the
+// test (and must not be reported as a failover failure) — see shutdownForTest.
+const shutdownGracePeriod = 90 * time.Second
+
 // FailoverTester struct contains dependencies for failover tests.
 type FailoverTester struct {
 	cfg     *config.Config
@@ -36,28 +42,48 @@ func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 	timer := logging.PhaseStart("Failover Chaos Engineering Tests")
 	defer timer.End()
 
-	f.testDRBDFailover(ctx, opts)
+	// Every scenario's verdict is propagated: a scenario that reports FAIL must
+	// fail this command, otherwise the chaos gate is decorative and a broken
+	// cluster still exits zero. A scenario skipped for a small topology returns
+	// true (see printSkipped), so it is never counted as a failure.
+	failed := 0
+	if !f.testDRBDFailover(ctx, opts) {
+		failed++
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	f.testCMSFailover(ctx, opts)
+	if !f.testCMSFailover(ctx, opts) {
+		failed++
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	f.testK3sWorkerFailover(ctx, opts)
+	if !f.testK3sWorkerFailover(ctx, opts) {
+		failed++
+	}
 	// Distinguish "all scenarios ran" from "interrupted halfway through" so
 	// callers never mistake a cancelled run for a successful one.
-	return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d of 3 failover scenarios failed", failed)
+	}
+	return nil
 }
 
 // shutdownForTest shuts a VM down and verifies it actually reached "shut off".
 // A failed Shutdown must never be reported as PASS: without this check the
-// scenario would "verify" a failover that never happened.
+// scenario would "verify" a failover that never happened. A guest that ignores
+// the ACPI request past the grace period is powered off the hard way: a power
+// cut is still a valid node-loss scenario, and aborting because the guest
+// wedged its own shutdown would report a healthy cluster as broken.
 func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error {
 	if err := f.libvirt.Shutdown(ctx, name); err != nil {
 		return fmt.Errorf("shutdown %s: %w", name, err)
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(shutdownGracePeriod)
 	for {
 		state, err := f.libvirt.DomainState(ctx, name)
 		if err != nil {
@@ -67,7 +93,18 @@ func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s is still %s after 30s (test aborted so it cannot be reported as PASS)", name, state)
+			logging.Warn("%s is still %s after %s; forcing a power-off so the node-loss test can proceed",
+				name, state, shutdownGracePeriod)
+			if err := f.libvirt.Destroy(ctx, name); err != nil {
+				return fmt.Errorf("force power-off %s: %w", name, err)
+			}
+			if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+				st, derr := f.libvirt.DomainState(ctx, name)
+				return derr == nil && st == "shut off"
+			}) {
+				return fmt.Errorf("%s did not reach \"shut off\" even after a forced power-off (test aborted so it cannot be reported as PASS)", name)
+			}
+			return nil
 		}
 		if !sleepCtx(ctx, 2*time.Second) {
 			return fmt.Errorf("context cancelled waiting for %s to shut off", name)
@@ -75,7 +112,7 @@ func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error
 	}
 }
 
-func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts) {
+func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts) bool {
 	logging.Info("Scenario 1: DRBD Master Failover")
 	start := time.Now()
 	pass := true
@@ -83,7 +120,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	if len(f.cfg.Nodes.Masters) < 2 {
 		logging.Warn("Skipping DRBD failover test: requires at least 2 master nodes")
 		f.printSkipped("DRBD Master Failover")
-		return
+		return true
 	}
 
 	master1 := f.cfg.Nodes.Masters[0]
@@ -93,25 +130,37 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	if err := f.shutdownForTest(ctx, master1.Name); err != nil {
 		f.printSummary("DRBD Master Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return
+		return false
 	}
-	// Wait until master2 has promoted DRBD and the MariaDB pod is running there
-	// (poll until ready instead of sleeping a fixed 30s).
-	mariadbRunning := waitFor(ctx, 90*time.Second, 3*time.Second, func() bool {
-		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -n cms | grep mariadb")
-		return err == nil && strings.Contains(out, "Running")
+	// Wait until master2 has promoted DRBD and MariaDB is running *on master2*.
+	// Matching the pod by name only would also match the pod object left behind
+	// on the dead node and would pass without any failover at all, so the node
+	// it is scheduled on is part of the assertion. The window has to cover the
+	// DRBD ping timeout and its strikes, the fence action, the promote, the node
+	// label, the pod reschedule and the container start — and, if the pod object
+	// survives the guest's shutdown, the node controller's taint-based eviction
+	// (300s by default). It is generous on purpose: a slow-but-correct failover
+	// must not be recorded as a broken one.
+	mariadbRunning := waitFor(ctx, 480*time.Second, 5*time.Second, func() bool {
+		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP,
+			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
+		if err != nil {
+			return false
+		}
+		return strings.Contains(out, master2.Name) && strings.Contains(out, "Running")
 	})
 	if !mariadbRunning {
 		pass = false
-		logging.Warn("MariaDB pod not running on master2")
+		logging.Warn("MariaDB pod did not come back Running on %s", master2.Name)
 	}
 
-	// Verify HTTP / HTTPS reachability (via the keepalived VIP)
-	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+	// Only then check the CMS: every WordPress request needs the database, so
+	// the VIP is expected to serve again as soon as MariaDB is back.
+	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
 		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
-		logging.Warn("CMS frontend not reachable on Load Balancer VIP (HTTP 200/301/302)")
+		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the database recovered")
 	}
 
 	if !opts.SkipRestore {
@@ -124,9 +173,10 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 
 	duration := time.Since(start)
 	f.printSummary("DRBD Master Failover", pass, duration)
+	return pass
 }
 
-func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts) {
+func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts) bool {
 	logging.Info("Scenario 2: CMS Frontend Failover")
 	start := time.Now()
 	pass := true
@@ -134,7 +184,7 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	if len(f.cfg.Nodes.CMSFrontends) < 2 {
 		logging.Warn("Skipping CMS failover test: requires at least 2 frontend nodes")
 		f.printSkipped("CMS Frontend Failover")
-		return
+		return true
 	}
 
 	cms1 := f.cfg.Nodes.CMSFrontends[0]
@@ -143,10 +193,12 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	if err := f.shutdownForTest(ctx, cms1.Name); err != nil {
 		f.printSummary("CMS Frontend Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return
+		return false
 	}
-	// Verify HTTP / HTTPS reachability (routes to cms2, via the VIP)
-	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+	// Verify HTTP / HTTPS reachability (routes to cms2, via the VIP). The window
+	// covers nginx noticing the dead backend and the surviving frontend serving
+	// the request on its own.
+	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
 		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
@@ -163,9 +215,10 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 
 	duration := time.Since(start)
 	f.printSummary("CMS Frontend Failover", pass, duration)
+	return pass
 }
 
-func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts FailoverOpts) {
+func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts FailoverOpts) bool {
 	logging.Info("Scenario 3: K3s Worker Failover")
 	start := time.Now()
 	pass := true
@@ -173,27 +226,36 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	if len(f.cfg.Nodes.Workers) < 2 || len(f.cfg.Nodes.Masters) < 2 {
 		logging.Warn("Skipping Worker failover test: requires at least 2 workers and 2 masters")
 		f.printSkipped("K3s Worker Failover")
-		return
+		return true
 	}
 
 	worker1 := f.cfg.Nodes.Workers[0]
-	worker2 := f.cfg.Nodes.Workers[1]
 	master2 := f.cfg.Nodes.Masters[1]
 
 	// Shutdown worker1
 	if err := f.shutdownForTest(ctx, worker1.Name); err != nil {
 		f.printSummary("K3s Worker Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return
+		return false
 	}
-	// Verify pods reschedule to worker2 (poll until rescheduled, up to 90s)
-	rescheduled := waitFor(ctx, 90*time.Second, 5*time.Second, func() bool {
-		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl get pods -o wide -A | grep -v Terminating")
-		return err == nil && strings.Contains(out, worker2.Name)
-	})
-	if !rescheduled {
+
+	// Nothing is expected to *migrate*: the only stateful workload (mariadb-0)
+	// is pinned to the DRBD primary by node affinity and its volume is a
+	// hostPath, so the workers host no long-running pod that could move. What a
+	// worker loss must not do is take the database or the CMS down, so assert
+	// exactly that instead of a reschedule this design never performs.
+	if !waitFor(ctx, 120*time.Second, 5*time.Second, func() bool {
+		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl --request-timeout=10s get pods -n cms | grep mariadb")
+		return err == nil && strings.Contains(out, "Running")
+	}) {
 		pass = false
-		logging.Warn("Pods not rescheduled to worker2")
+		logging.Warn("MariaDB pod is not Running after worker1 was shut down")
+	}
+	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
+		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	}) {
+		pass = false
+		logging.Warn("CMS frontend not reachable on the Load Balancer VIP after worker1 was shut down")
 	}
 
 	if !opts.SkipRestore {
@@ -206,6 +268,7 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 
 	duration := time.Since(start)
 	f.printSummary("K3s Worker Failover", pass, duration)
+	return pass
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {
