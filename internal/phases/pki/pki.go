@@ -214,12 +214,15 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	}
 	subject := dnsNames[0]
 
-	// The primary DNS name (dnsNames[0]) is passed positionally as the subject;
-	// the remaining DNS names, the VIP and every balancer address are added
-	// with --san.
+	// The primary DNS name (dnsNames[0]) is passed positionally as the subject,
+	// but `step ca certificate` only puts the subject in the CommonName: it is
+	// added to the SAN extension *only* when no --san flag is given at all. With
+	// any --san present the subject has to be listed explicitly, otherwise the
+	// certificate has no DNS SAN and every modern TLS client (which ignores the
+	// CN) rejects it for the very name the balancer is meant to serve.
 	sanFlags := strings.Builder{}
 	for _, san := range p.cfg.LBTLSSANs() {
-		if san == "" || san == subject {
+		if san == "" {
 			continue
 		}
 		if ip := net.ParseIP(san); ip == nil && !validDNSName(san) {
