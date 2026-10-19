@@ -17,8 +17,14 @@ spec:
       targetPort: 3306
       protocol: TCP
       name: mysql
+  # `app: mariadb` alone would also enroll the backup/restore CronJob pods
+  # (they carry the same app label), and neither listens on 3306: a running
+  # backup would take a share of the connections to mariadb.cms.svc and the
+  # NodePort, breaking clients at random. The role label is what the
+  # StatefulSet already sets on the only pod that serves the database.
   selector:
     app: mariadb
+    role: database
 ---
 apiVersion: v1
 kind: Service
@@ -37,3 +43,4 @@ spec:
       name: mysql
   selector:
     app: mariadb
+    role: database

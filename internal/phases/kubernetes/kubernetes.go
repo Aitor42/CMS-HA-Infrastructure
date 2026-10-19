@@ -333,7 +333,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Applying init-db-job...")
-	p.pool.RunCommand(ctx, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true")
+	// The Job name is fixed, so a resumed deploy has to clear the previous
+	// object first. kubectl delete already waits for it to disappear, but the
+	// failure was discarded: a delete that did not happen turned into a
+	// confusing "object is being deleted" error on the apply instead.
+	if err := runChecked(ctx, p.pool, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true", "clear previous MariaDB initialization Job"); err != nil {
+		return err
+	}
 	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/jobs", manifestsDir), "apply MariaDB initialization Job"); err != nil {
 		return err
 	}
@@ -416,12 +422,21 @@ func countNonEmptyLines(out string) int {
 }
 
 func runChecked(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
-	_, stderr, code, err := pool.RunCommand(ctx, host, command)
+	stdout, stderr, code, err := pool.RunCommand(ctx, host, command)
 	if err != nil {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	if code != 0 {
-		return fmt.Errorf("%s failed (exit %d): %s", action, code, strings.TrimSpace(stderr))
+		// kubectl writes several classes of failures to stdout rather than
+		// stderr, so keep both streams in the message.
+		detail := strings.TrimSpace(stderr)
+		if out := strings.TrimSpace(stdout); out != "" {
+			if detail != "" {
+				detail += " | "
+			}
+			detail += out
+		}
+		return fmt.Errorf("%s failed (exit %d): %s", action, code, detail)
 	}
 	return nil
 }

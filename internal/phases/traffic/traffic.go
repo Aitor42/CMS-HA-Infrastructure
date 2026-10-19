@@ -273,7 +273,7 @@ func testDBQueries(ctx context.Context, pool *ssh.Pool, master, user, password, 
 	// ordinal, then run the client inside it (the only place a mysql client is
 	// guaranteed to exist). MYSQL_PWD avoids the password landing in argv.
 	script := fmt.Sprintf(
-		"POD=$(kubectl get pod -n cms -l app=mariadb -o jsonpath='{.items[0].metadata.name}') && "+
+		"POD=$(kubectl get pod -n cms -l app=mariadb,role=database -o jsonpath='{.items[0].metadata.name}') && "+
 			"kubectl exec -n cms \"$POD\" -- env MYSQL_PWD=%s mysql -h 127.0.0.1 -P 3306 -u %s %s -N -B -e %s",
 		shellQuote(password), shellQuote(user), shellQuote(dbName), shellQuote(query))
 
