@@ -278,14 +278,16 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 	}
 
 	// Derived (SSH) fencing needs a key on the hypervisor and a copy on the
-	// masters. A failure here is non-fatal but means automatic promotion will
-	// not be able to fence until it is resolved.
+	// masters. This is fatal on purpose when fencing is required: the watchdog
+	// refuses to promote a node that cannot fence its peer, so a "successful"
+	// deploy with no key would silently ship a cluster without automatic
+	// failover — and only reveal it at the end of the chaos test.
 	var fenceKey []byte
 	if p.cfg.DRBD.Fencing && !custom {
 		fenceKey, err = p.ensureFenceKey()
 		if err != nil {
-			logging.Warn("Could not provision the hypervisor fence SSH key; automatic promotion will fail to fence until fixed: %v", err)
-			fenceKey = nil
+			return fmt.Errorf("could not provision the hypervisor fence SSH key, so automatic promotion would never fence: %w "+
+				"(set drbd.fencing: false to accept that, or configure a custom drbd.fence_command)", err)
 		}
 	}
 
