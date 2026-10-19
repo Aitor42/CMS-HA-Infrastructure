@@ -93,21 +93,6 @@ fi`
 		return fmt.Errorf("failed to initialize step-ca (exit %d): %v %s%s", initCode, err, strings.TrimSpace(initOut), strings.TrimSpace(initErr))
 	}
 
-	// Raise the provisioner's x509 durations so the load-balancer certificate
-	// can outlive the verify threshold. step-ca defaults to 24h, which would
-	// make the "> 30 days" assertion impossible and force constant renewals.
-	// Best-effort: an older step CLI that rejects a flag must not abort the
-	// whole deploy, so log and continue.
-	certHours := p.cfg.LBTLSCertLifetimeHours()
-	durationsCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca provisioner update admin \
---x509-min-dur 24h --x509-default-dur %dh --x509-max-dur 8760h`, certHours)
-	if updOut, updErr, updCode, err := p.pool.RunCommand(ctx, jumpIP, durationsCmd); err != nil || updCode != 0 {
-		logging.Warn("Could not update CA provisioner durations; using CA defaults: %s%s",
-			strings.TrimSpace(updOut), strings.TrimSpace(updErr))
-	} else if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, "systemctl restart step-ca 2>/dev/null || true"); err != nil {
-		logging.Warn("Could not reload step-ca after updating provisioner durations: %v", err)
-	}
-
 	logging.Info("Starting step-ca service...")
 	serviceCmd := `cat << 'EOF' > /etc/systemd/system/step-ca.service
 [Unit]
@@ -135,6 +120,33 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	})
 	if err != nil {
 		return fmt.Errorf("step-ca health check failed: %w", err)
+	}
+
+	// Raise the provisioner's x509 durations so the load-balancer certificate
+	// can outlive the verify threshold. step-ca defaults to a 24h maximum, so
+	// without this the issuance below is rejected outright ("requested duration
+	// ... is more than the authorized maximum certificate duration").
+	//
+	// This has to happen after the service is up: `step ca provisioner update`
+	// is not an offline edit of ca.json, it talks to the CA's admin API, and the
+	// CA only picks the new limits up on restart.
+	certHours := p.cfg.LBTLSCertLifetimeHours()
+	durationsCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca provisioner update admin \
+--x509-min-dur 24h --x509-default-dur %dh --x509-max-dur 8760h \
+--ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt`, certHours, caDomain, caPort)
+	if updOut, updErr, updCode, err := p.pool.RunCommand(ctx, jumpIP, durationsCmd); err != nil || updCode != 0 {
+		return fmt.Errorf("failed to raise the CA provisioner x509 durations to %dh (exit %d): %v %s%s",
+			certHours, updCode, err, strings.TrimSpace(updOut), strings.TrimSpace(updErr))
+	}
+	if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, "systemctl restart step-ca"); err != nil {
+		return fmt.Errorf("failed to restart step-ca after raising the certificate durations: %w", err)
+	}
+	logging.Info("Waiting for CA health endpoint after reloading the provisioner...")
+	if err := retry.DoContext(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+		_, _, _, rerr := p.pool.RunCommand(attemptCtx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
+		return rerr
+	}); err != nil {
+		return fmt.Errorf("step-ca health check failed after reloading the provisioner: %w", err)
 	}
 
 	logging.Info("Distributing root CA cert to all nodes...")
