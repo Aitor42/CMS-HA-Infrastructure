@@ -65,7 +65,24 @@ class role::monitor {
     ensure => installed,
   }
 
-  file { '/etc/blackbox_exporter/config.yml':
+  # The Ubuntu package ships its configuration at /etc/prometheus/blackbox.yml
+  # and its unit reads $ARGS from this defaults file. It does *not* create
+  # /etc/blackbox_exporter, so writing the probe modules there (the previous
+  # behaviour) failed the run on the missing parent directory and left the
+  # exporter unable to start. Point the unit at the packaged path instead; the
+  # module's own probe definitions matter because they skip TLS verification
+  # for the lab's internally-issued certificate.
+  file { '/etc/default/prometheus-blackbox-exporter':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "ARGS=\"--config.file=/etc/prometheus/blackbox.yml\"\n",
+    require => Package['prometheus-blackbox-exporter'],
+    notify  => Service['prometheus-blackbox-exporter'],
+  }
+
+  file { '/etc/prometheus/blackbox.yml':
     ensure  => file,
     owner   => 'root',
     group   => 'root',
@@ -75,10 +92,25 @@ class role::monitor {
     notify  => Service['prometheus-blackbox-exporter'],
   }
 
+  # The package install starts the exporter before those files exist, so a
+  # fresh node burns through systemd's start limit and every later restart is
+  # refused ("Start request repeated too quickly"). Clear that state first; the
+  # exec stays idempotent by skipping a unit that is already active.
+  exec { 'reset-failed-blackbox-exporter':
+    command => '/usr/bin/systemctl reset-failed prometheus-blackbox-exporter || true',
+    unless  => '/usr/bin/systemctl is-active --quiet prometheus-blackbox-exporter',
+    require => Package['prometheus-blackbox-exporter'],
+    before  => Service['prometheus-blackbox-exporter'],
+  }
+
   service { 'prometheus-blackbox-exporter':
     ensure  => running,
     enable  => true,
-    require => Package['prometheus-blackbox-exporter'],
+    require => [
+      Package['prometheus-blackbox-exporter'],
+      File['/etc/default/prometheus-blackbox-exporter'],
+      File['/etc/prometheus/blackbox.yml'],
+    ],
   }
 
   # ---------------------------------------------------------------------------
