@@ -243,7 +243,12 @@ class role::cms_frontend {
   exec { 'wordpress-rewrite-structure':
     command => '/usr/local/bin/wp rewrite structure \'/%postname%/\' --hard --allow-root --path=/var/www/html',
     onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
-    unless  => '/usr/bin/test -x /usr/local/bin/wp && /usr/local/bin/wp rewrite list --allow-root --path=/var/www/html 2>/dev/null | grep -q "postname"',
+    # `wp rewrite list` prints the generated rewrite *rules*, not the permalink
+    # structure, so it never contains "postname" and the exec re-ran every time.
+    # The option is what the command actually sets, so read that and match it
+    # exactly (a different structure that merely contains "postname" must still
+    # be rewritten).
+    unless  => '/usr/bin/test -x /usr/local/bin/wp && /usr/local/bin/wp option get permalink_structure --allow-root --path=/var/www/html 2>/dev/null | grep -qx "/%postname%/"',
     require => Exec['wordpress-core-install'],
     user    => 'root',
   }

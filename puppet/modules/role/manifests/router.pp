@@ -37,7 +37,9 @@ class role::router {
   # Override the base 'deny incoming' with 'deny forward' as well
   exec { 'ufw-default-deny-forward':
     command => '/usr/sbin/ufw default deny forward',
-    unless  => '/usr/sbin/ufw status verbose | /usr/bin/grep -q "Default: deny (forward)"',
+    # ufw >= 0.36 renders this policy as "deny (routed)"; the old
+    # "deny (forward)" wording never matched, so the exec re-ran every run.
+    unless  => '/usr/sbin/ufw status verbose | /usr/bin/grep -q "Default: deny (routed)"',
     require => Package['ufw'],
   }
 
@@ -48,40 +50,43 @@ class role::router {
   # Allow Main network → Internet (WAN) — interface-agnostic rule via IP ranges
   exec { 'ufw-route-main-to-wan':
     command => '/usr/sbin/ufw route allow from 192.168.20.0/24 to any comment "Main -> Internet"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.20.0/24.*FWD"',
+    # Route rules render as "To  Action  From" (the To/From columns are the
+    # reverse of what a left-to-right regex expects), so anchor on the comment
+    # the command itself sets: it is unique per rule and column-order agnostic.
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "Main -> Internet"',
     require => Exec['ufw-enable'],
   }
 
   # Allow Internal network → Internet (WAN)
   exec { 'ufw-route-internal-to-wan':
     command => '/usr/sbin/ufw route allow from 192.168.10.0/24 to any comment "Internal -> Internet"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.10.0/24.*FWD.*Anywhere"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "Internal -> Internet"',
     require => Exec['ufw-enable'],
   }
 
   # Allow Internal ↔ Main bidirectional routing
   exec { 'ufw-route-internal-to-main':
     command => '/usr/sbin/ufw route allow from 192.168.10.0/24 to 192.168.20.0/24 comment "Internal -> Main"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.10.0/24.*192.168.20.0/24.*FWD"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "Internal -> Main"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-route-main-to-internal':
     command => '/usr/sbin/ufw route allow from 192.168.20.0/24 to 192.168.10.0/24 comment "Main -> Internal"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.20.0/24.*192.168.10.0/24.*FWD"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "Main -> Internal"',
     require => Exec['ufw-enable'],
   }
 
   # Allow DNAT forwarding: HTTP/HTTPS from WAN to load balancer
   exec { 'ufw-route-dnat-http':
     command => '/usr/sbin/ufw route allow proto tcp to 192.168.20.100 port 80 comment "DNAT HTTP -> LB"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.20.100.*80/tcp.*FWD"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "DNAT HTTP -> LB"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-route-dnat-https':
     command => '/usr/sbin/ufw route allow proto tcp to 192.168.20.100 port 443 comment "DNAT HTTPS -> LB"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "192.168.20.100.*443/tcp.*FWD"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "DNAT HTTPS -> LB"',
     require => Exec['ufw-enable'],
   }
 
