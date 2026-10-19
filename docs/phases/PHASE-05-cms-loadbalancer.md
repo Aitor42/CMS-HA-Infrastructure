@@ -26,8 +26,9 @@
 - **High availability:** Both balancers serve the same upstream pool; keepalived
   holds a **floating VIP (192.168.20.100)** using VRRP. `main-lb1` is the
   preferred MASTER (priority 101), `main-lb2` the BACKUP (priority 100). VRRP
-  runs **unicast** between `enp2s0` addresses, and a `track_script` demotes a
-  node whose Nginx is unhealthy so the VIP always follows a working balancer.
+  runs **unicast** between the two balancers' main-network addresses, and a
+  `track_script` demotes a node whose Nginx is unhealthy so the VIP always
+  follows a working balancer.
 - **Clients and the router DNAT** target the VIP, never the individual nodes.
 - **TLS:** Certificate issued by the internal **step-ca** CA (`/etc/nginx/ssl/cms.crt`),
   with SANs for `cms.fake-enterprise.com`, the VIP (`192.168.20.100`) and both
@@ -96,18 +97,19 @@ ssh ubuntu@192.168.20.103 "sudo -H nginx -t && systemctl is-active nginx && syst
 ssh ubuntu@192.168.20.104 "sudo -H nginx -t && systemctl is-active nginx && systemctl is-active keepalived"
 
 # Verify the VIP is owned by the MASTER (main-lb1)
-ssh ubuntu@192.168.20.103 "ip -4 addr show enp2s0 | grep 192.168.20.100"
+ssh ubuntu@192.168.20.103 "ip -4 addr show | grep 192.168.20.100"
 
-# Verify web frontends individually
-curl -s http://192.168.20.101/ | grep -i wordpress
-curl -s http://192.168.20.102/ | grep -i wordpress
+# Verify web frontends individually. TLS terminates on the LBs, so the vhost
+# answers a plain HTTP request with a redirect to HTTPS (expect 301).
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: cms.fake-enterprise.com' http://192.168.20.101/
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: cms.fake-enterprise.com' http://192.168.20.102/
 
 # Verify complete end-to-end load balancing (HTTPS via the VIP)
 curl -sk https://192.168.20.100/
 
 # Failover drill: stop keepalived/nginx on the MASTER and confirm the VIP moves
 ssh ubuntu@192.168.20.103 "sudo systemctl stop keepalived"
-ssh ubuntu@192.168.20.104 "ip -4 addr show enp2s0 | grep 192.168.20.100"   # VIP now here
+ssh ubuntu@192.168.20.104 "ip -4 addr show | grep 192.168.20.100"   # VIP now here
 curl -sk https://192.168.20.100/                                        # still served
 ssh ubuntu@192.168.20.103 "sudo systemctl start keepalived"
 
