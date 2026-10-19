@@ -6,11 +6,16 @@
 modules:
   # HTTP probe. insecure_skip_verify is required because the LB serves the
   # cluster's own (internal-CA) certificate, which the monitor does not trust.
+  # The Host header matters just as much: the LB and the frontends answer any
+  # other host with WordPress's canonical redirect (301, not a 2xx), so probing
+  # the VIP by IP without it reports a healthy site as down.
   http_2xx:
     prober: http
     timeout: 5s
     http:
       preferred_ip_protocol: ip4
+      headers:
+        Host: cms.fake-enterprise.com
       tls_config:
         insecure_skip_verify: true
 

@@ -92,7 +92,7 @@ scrape_configs:
           - '192.168.10.16:2381'  # internal-master3
 
   # ── Blackbox endpoint probes (end-to-end reachability) ─────────────────────
-  # Prometheus scrapes blackbox_exporter, which probes each target over HTTP.
+  # Prometheus scrapes blackbox_exporter, which probes each target.
   # probe_success == 0 means the endpoint (or the path to it) is down.
   - job_name: 'blackbox'
     metrics_path: /probe
@@ -101,8 +101,25 @@ scrape_configs:
     static_configs:
       - targets:
           - 'https://192.168.20.100/'  # LB VIP (HTTPS entrypoint)
-          - 'http://192.168.20.101/'   # main-cms1
-          - 'http://192.168.20.102/'   # main-cms2
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9115
+
+  # The frontends serve the site over plain HTTP only (TLS ends at the LB), and
+  # WordPress redirects anything but its canonical HTTPS URL, so probe them at
+  # the TCP level: the LB's own HTTP probe covers the full request path.
+  - job_name: 'blackbox-frontends'
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets:
+          - '192.168.20.101:80'  # main-cms1
+          - '192.168.20.102:80'  # main-cms2
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
