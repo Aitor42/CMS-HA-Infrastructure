@@ -1,34 +1,41 @@
 # Netplan overlay for the perimeter router (ufw-router).
 #
 # Rendered by the Router Bootstrap phase and installed as
-# /etc/netplan/99-cms-router.yaml, so it is processed after the configuration
-# the installer wrote (00-installer-config.yaml / 50-cloud-init.yaml).
+# /etc/netplan/99-cms-router.yaml. It is the *only* netplan file left in
+# /etc/netplan. netplan emits one systemd-networkd unit per definition and
+# networkd picks the lexicographically first unit that matches a link, so the
+# installer's `all-en` definition (`Match Name=en*`, which sorts before these
+# per-MAC units) shadows them: a second definition for the same NIC is silently
+# ignored. That is how the router ended up with a dynamic 192.168.20.50 on the
+# main network and no gateway address at all.
 #
-# Why the router needs its own overlay: the shared client autoinstall brings
-# every interface up with DHCP, which on the router means three DHCP leases and
-# three competing default routes — one of them pointing at the router itself.
-# The router is the gateway, so its addressing and its default route must be
-# deterministic:
+# Why the router needs its own file: the shared client autoinstall brings every
+# interface up with DHCP, which on a three-NIC router means three DHCP leases
+# and three competing default routes — one of them pointing at the router
+# itself. The router is the gateway, so its addressing and default route must
+# be deterministic:
 #   * internal and main carry the static gateway addresses of their networks
-#     (the client subnets point their `option routers` at exactly these);
+#     (the client subnets point their DHCP `option routers` at exactly these);
 #   * the WAN uplink keeps DHCP but wins the default route by metric, so
-#     forwarding to the internet is unambiguous.
+#     forwarding to the internet is unambiguous, and it provides the router's
+#     DNS as well.
 network:
   version: 2
+  renderer: networkd
   ethernets:
-    net0:
+    ${INT_NAME}:
       match:
         macaddress: "${INT_MAC}"
       dhcp4: false
       addresses:
         - ${INT_ADDR}
-    net1:
+    ${MAIN_NAME}:
       match:
         macaddress: "${MAIN_MAC}"
       dhcp4: false
       addresses:
         - ${MAIN_ADDR}
-    net2:
+    ${WAN_NAME}:
       match:
         macaddress: "${WAN_MAC}"
       dhcp4: true

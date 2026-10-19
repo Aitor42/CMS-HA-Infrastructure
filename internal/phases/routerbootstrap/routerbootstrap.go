@@ -143,6 +143,9 @@ func (p *Phase) ensureAddresses(ctx context.Context, router config.NodeDetail) e
 		return fmt.Errorf("failed to read router netplan template: %w", err)
 	}
 	rendered := strings.NewReplacer(
+		"${INT_NAME}", intName,
+		"${MAIN_NAME}", mainName,
+		"${WAN_NAME}", wanName,
 		"${INT_MAC}", router.MACInternal,
 		"${MAIN_MAC}", router.MACMain,
 		"${WAN_MAC}", router.MACWAN,
@@ -154,31 +157,49 @@ func (p *Phase) ensureAddresses(ctx context.Context, router config.NodeDetail) e
 		return fmt.Errorf("failed to upload the router netplan: %w", err)
 	}
 
-	// netplan generate validates the whole /etc/netplan tree before anything is
-	// applied, so a bad render is rolled back rather than locking the router
-	// out of its own network. `netplan apply` itself reconfigures the very
-	// interfaces this SSH session rides on, so it is started detached: the
-	// result is verified below from the router's state instead of from its
-	// exit code.
+	// This overlay has to be the only netplan file on the router. netplan emits
+	// one systemd-networkd unit per definition and networkd picks the
+	// *lexicographically first* unit that matches a link, so the installer's
+	// `all-en` (`Match Name=en*`) unit shadows these per-MAC static addresses
+	// (reproduced in a container: both units are generated and `all-en` sorts
+	// first; measured on a live router: it kept a dynamic 192.168.20.50 and
+	// never got 192.168.20.1, so the main network had no gateway).
+	//
+	// The whole tree is backed up first and restored if the overlay does not
+	// parse, so a bad render cannot lock the router out of its own management
+	// address. `netplan apply` reconfigures the interfaces this SSH session
+	// rides on, so it runs detached and the result is verified from the
+	// router's state afterwards.
 	script := fmt.Sprintf(`set -e
-mkdir -p /etc/netplan
-if [ ! -d %[2]s ]; then
-    mkdir -p %[2]s
-    cp -a /etc/netplan/. %[2]s/ 2>/dev/null || true
+export PATH="$PATH:/usr/sbin:/sbin"
+DIR=/etc/netplan
+BACKUP=%[2]s
+TARGET=%[3]s
+mkdir -p "$DIR" "$BACKUP"
+if [ ! -f "$BACKUP/.cms-backup-complete" ]; then
+    cp -a "$DIR"/. "$BACKUP"/ 2>/dev/null || true
+    touch "$BACKUP/.cms-backup-complete"
 fi
-install -m 600 -o root -g root %[1]s %[3]s
-if ! netplan generate; then
-    rm -f %[3]s
-    cp -a %[2]s/. /etc/netplan/ 2>/dev/null || true
+# cloud-init must not resurrect a competing definition on the next boot
+mkdir -p /etc/cloud/cloud.cfg.d
+printf 'network: {config: disabled}\n' > /etc/cloud/cloud.cfg.d/99-cms-disable-network.cfg
+install -m 600 -o root -g root %[1]s "$TARGET"
+find "$DIR" -maxdepth 1 -name '*.yaml' ! -name '99-cms-router.yaml' -delete
+if ! netplan generate >/tmp/cms-netplan.log 2>&1; then
+    rm -f "$TARGET"
+    cp -a "$BACKUP"/. "$DIR"/ 2>/dev/null || true
+    netplan apply >/dev/null 2>&1 || true
+    echo "netplan generate rejected the router overlay:" >&2
+    tail -20 /tmp/cms-netplan.log >&2
     exit 1
 fi
-nohup netplan apply >/tmp/cms-netplan-apply.log 2>&1 &
-echo CMS_NETPLAN_APPLIED
+nohup netplan apply >>/tmp/cms-netplan.log 2>&1 &
+echo CMS_NETPLAN_APPLY_STARTED
 `, netplanStaging, netplanBackupDir, netplanPath)
 
 	if out, stderr, code, err := p.pool.RunCommand(ctx, router.IP, script); err != nil || code != 0 {
 		return fmt.Errorf("failed to apply the router netplan (exit %d): %s %v", code, strings.TrimSpace(stderr), err)
-	} else if !strings.Contains(out, "CMS_NETPLAN_APPLIED") {
+	} else if !strings.Contains(out, "CMS_NETPLAN_APPLY_STARTED") {
 		return fmt.Errorf("unexpected output while applying the router netplan: %s", strings.TrimSpace(out))
 	}
 
@@ -186,12 +207,29 @@ echo CMS_NETPLAN_APPLIED
 		return fmt.Errorf("router became unreachable after applying its netplan: %w", err)
 	}
 
-	// Verify that the addresses are really there: a silently rolled back
-	// overlay would leave the main network without a gateway. networkd applies
-	// the new configuration asynchronously, so poll instead of sampling once.
+	// Verify that the addresses are really there: without them the main network
+	// has no gateway and every later phase fails. networkd applies the new
+	// configuration asynchronously, so poll instead of sampling once; on
+	// failure, put the installer's configuration back so the router is left in
+	// a working state.
 	if err := p.waitForAddresses(ctx, router.IP, []string{intAddr, mainAddr}); err != nil {
-		return fmt.Errorf("%w\n--- router netplan apply log ---\n%s", err,
-			p.readLog(ctx, router.IP, "/tmp/cms-netplan-apply.log"))
+		rollback := fmt.Sprintf(`set -u
+export PATH="$PATH:/usr/sbin:/sbin"
+rm -f %[2]s
+cp -a %[1]s/. /etc/netplan/ 2>/dev/null || true
+netplan apply >/dev/null 2>&1 || true
+echo CMS_NETPLAN_RESTORED`, netplanBackupDir, netplanPath)
+		if _, _, code, rerr := p.pool.RunCommand(ctx, router.IP, rollback); rerr != nil || code != 0 {
+			logging.Warn("could not restore the router's previous netplan (exit %d): %v", code, rerr)
+		} else {
+			logging.Warn("Restored the router's previous netplan configuration.")
+		}
+		return fmt.Errorf("%w\n--- netplan log ---\n%s--- netplan configuration ---\n%s--- addresses ---\n%s",
+			err,
+			p.readLog(ctx, router.IP, "/tmp/cms-netplan.log"),
+			p.captureCommand(ctx, router.IP, "netplan get"),
+			p.captureCommand(ctx, router.IP, "ip -4 -o addr show"),
+		)
 	}
 	logging.Success("Router addressing: %s (internal) and %s (main), WAN %s on DHCP", intAddr, mainAddr, wanName)
 
@@ -313,7 +351,7 @@ func (p *Phase) diagnostics(ctx context.Context, routerIP, host string) string {
 		{"ip_forward", "sysctl -n net.ipv4.ip_forward"},
 		{"ufw status", "ufw status verbose 2>&1 | head -20"},
 		{"nat table", "iptables -t nat -S POSTROUTING 2>&1 | head -10"},
-		{"netplan", "cat /tmp/cms-netplan-apply.log 2>/dev/null | tail -10"},
+		{"netplan", "cat /tmp/cms-netplan.log 2>/dev/null | tail -10"},
 	}
 	for _, c := range cmds {
 		out, errOut, _, err := p.pool.RunCommand(ctx, routerIP, c.cmd)
@@ -362,7 +400,16 @@ func (p *Phase) waitForAddresses(ctx context.Context, host string, addrs []strin
 func (p *Phase) readLog(ctx context.Context, host, remotePath string) string {
 	out, errOut, _, err := p.pool.RunCommand(ctx, host, "tail -20 "+remotePath+" 2>&1")
 	if err != nil {
-		return fmt.Sprintf("(could not read %s: %v)", remotePath, err)
+		return fmt.Sprintf("(could not read %s: %v)\n", remotePath, err)
+	}
+	return out + errOut
+}
+
+// captureCommand runs a read-only command for diagnostics, best effort.
+func (p *Phase) captureCommand(ctx context.Context, host, cmd string) string {
+	out, errOut, _, err := p.pool.RunCommand(ctx, host, cmd+" 2>&1")
+	if err != nil {
+		return fmt.Sprintf("(could not run %q: %v)\n", cmd, err)
 	}
 	return out + errOut
 }
