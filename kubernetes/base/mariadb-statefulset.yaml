@@ -27,6 +27,22 @@ spec:
         - key: "node-role.kubernetes.io/control-plane"
           operator: "Exists"
           effect: "NoSchedule"
+        # Node loss must not wait for Kubernetes' default 300s eviction
+        # tolerance: by the time a master is gone the DRBD watchdog has already
+        # fenced the failed peer, promoted the survivor and moved the
+        # drbd-status=primary label there, so the pod only has to be released to
+        # be recreated on the new primary. 60s sits well above the
+        # node-monitor-grace-period (40s), so a brief blip does not evict the
+        # database, and far below the default that would leave WordPress without
+        # a database for five minutes after a real master failure.
+        - key: "node.kubernetes.io/not-ready"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 60
+        - key: "node.kubernetes.io/unreachable"
+          operator: "Exists"
+          effect: "NoExecute"
+          tolerationSeconds: 60
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
