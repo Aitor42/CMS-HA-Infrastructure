@@ -333,6 +333,26 @@ jobs:
             done
             echo "==== neighbours on virbr-int ===="
             ip neigh show dev virbr-int 2>/dev/null || true
+            echo "==== router: netplan and networkd ===="
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.1 '
+                echo "-- /etc/netplan --"
+                sudo ls -l /etc/netplan 2>&1 || true
+                echo "-- overlay --"
+                sudo cat /etc/netplan/99-cms-router.yaml 2>&1 || true
+                echo "-- netplan get --"
+                sudo netplan get 2>&1 || true
+                echo "-- addresses --"
+                ip -4 -o addr show 2>&1 || true
+                echo "-- routes --"
+                ip -4 route 2>&1 || true
+                echo "-- backup --"
+                sudo ls -l /root/cms-netplan-backup 2>&1 || true
+                echo "-- apply log --"
+                sudo tail -20 /tmp/cms-netplan.log 2>&1 || true
+                echo "-- networkd journal (tail 40) --"
+                sudo journalctl -u systemd-networkd --no-pager -n 40 2>&1 || true
+              ' 2>&1 || true
             echo "==== jumpstart: netboot flags, services and logs ===="
             ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.10 '
