@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 )
 
@@ -575,12 +576,22 @@ func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOu
 	return o
 }
 
-// checkGrafanaProvisioning checks the provisioning the monitoring role is
-// responsible for. Grafana's API needs credentials the lab does not configure,
-// so a health endpoint alone (phase08) would still be green with no datasource
-// and no dashboard, i.e. with a Grafana that shows nothing.
+// checkGrafanaProvisioning proves the Grafana an operator opens really shows
+// the dashboards, not just that the files describing them exist. Phase 08 only
+// asks /api/health, which is happy with an instance that has no datasource and
+// no dashboard, and a file on disk says nothing about whether Grafana loaded it
+// or whether its panels point at a datasource that exists.
+//
+// The API is queried with the lab's admin credentials (admin/admin, see
+// MANUAL): the datasource must be provisioned and default, every shipped
+// dashboard must be loaded with its panels pointing at that datasource, and the
+// HA overview must be the home dashboard so the first page in the browser shows
+// graphs instead of Grafana's welcome screen.
 func (v *Verifier) checkGrafanaProvisioning(ctx context.Context, monitorIP string) e2eOutcome {
 	o := e2eOutcome{label: "Grafana"}
+
+	// Files first: a dashboard missing from the monitor node is a Puppet
+	// problem, and this reports it without needing the API.
 	cmd := "test -s /etc/grafana/provisioning/datasources/prometheus.yaml && " +
 		"test -d /etc/grafana/provisioning/dashboards && " +
 		"ls -1 /var/lib/grafana/dashboards/*.json | wc -l"
@@ -590,19 +601,205 @@ func (v *Verifier) checkGrafanaProvisioning(ctx context.Context, monitorIP strin
 		o.detail = fmt.Sprintf("provisioning check failed (exit %d): %v %s", exitCode, err, strings.TrimSpace(errOut))
 		return o
 	}
-	dashboards, convErr := strconv.Atoi(strings.TrimSpace(out))
+	onDisk, convErr := strconv.Atoi(strings.TrimSpace(out))
 	if convErr != nil {
 		o.detail = fmt.Sprintf("unreadable dashboard count %q", strings.TrimSpace(out))
 		return o
 	}
-	if dashboards < 1 {
+	if onDisk < 1 {
 		o.detail = "no provisioned Grafana dashboard found"
 		return o
 	}
 
+	shipped, err := dashboards.Load()
+	if err != nil {
+		o.detail = fmt.Sprintf("the shipped dashboards are unreadable: %v", err)
+		return o
+	}
+	if onDisk != len(shipped) {
+		o.detail = fmt.Sprintf("the monitor has %d dashboard file(s) but %d are shipped: a stale file is being loaded as well", onDisk, len(shipped))
+		return o
+	}
+
+	summary, err := v.inspectGrafana(ctx, monitorIP, shipped)
+	if err != nil {
+		o.detail = err.Error()
+		return o
+	}
+
 	o.pass = true
-	o.detail = fmt.Sprintf("datasource provisioned, %d dashboard(s)", dashboards)
+	o.detail = summary
 	return o
+}
+
+// inspectGrafana walks the Grafana API and returns the one-line summary the
+// phase prints. Every failure names the dashboard and panel at fault.
+func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped []dashboards.Dashboard) (string, error) {
+	status, body, err := grafanaGET(ctx, monitorIP, "/api/health")
+	if err != nil || status != http.StatusOK {
+		return "", fmt.Errorf("grafana health check failed (HTTP %d): %v", status, err)
+	}
+	var health struct {
+		Database string `json:"database"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		return "", fmt.Errorf("unreadable Grafana health payload: %w", err)
+	}
+	if health.Database != "ok" {
+		return "", fmt.Errorf("grafana reports database %q", health.Database)
+	}
+
+	// The datasource must exist with the UID the panels reference and be the
+	// default one; otherwise Grafana answers "Datasource not found".
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/datasources")
+	if err != nil {
+		return "", fmt.Errorf("listing Grafana datasources failed: %w", err)
+	}
+	if status == http.StatusUnauthorized {
+		return "", fmt.Errorf("grafana rejected the lab's admin credentials (admin/admin): the dashboards cannot be inspected")
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("listing Grafana datasources failed (HTTP %d): %s", status, strings.TrimSpace(string(body)))
+	}
+	var datasources []struct {
+		UID       string `json:"uid"`
+		Name      string `json:"name"`
+		Type      string `json:"type"`
+		IsDefault bool   `json:"isDefault"`
+	}
+	if err := json.Unmarshal(body, &datasources); err != nil {
+		return "", fmt.Errorf("unreadable Grafana datasource payload: %w", err)
+	}
+	datasource := ""
+	for _, ds := range datasources {
+		if ds.UID == dashboards.DatasourceUID {
+			if ds.Type != "prometheus" {
+				return "", fmt.Errorf("datasource %q is type %q, not prometheus", ds.UID, ds.Type)
+			}
+			if !ds.IsDefault {
+				return "", fmt.Errorf("datasource %q is not the default: new panels would open without data", ds.UID)
+			}
+			datasource = ds.Name + " (" + ds.UID + ")"
+		}
+	}
+	if datasource == "" {
+		return "", fmt.Errorf("datasource %q is not provisioned: every dashboard panel would show \"Datasource not found\"", dashboards.DatasourceUID)
+	}
+
+	// Grafana must have loaded every shipped dashboard.
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/search?type=dash-db")
+	if err != nil || status != http.StatusOK {
+		return "", fmt.Errorf("listing Grafana dashboards failed (HTTP %d): %v", status, err)
+	}
+	var loaded []struct {
+		UID string `json:"uid"`
+	}
+	if err := json.Unmarshal(body, &loaded); err != nil {
+		return "", fmt.Errorf("unreadable Grafana dashboard payload: %w", err)
+	}
+	loadedUIDs := make(map[string]bool, len(loaded))
+	for _, d := range loaded {
+		loadedUIDs[d.UID] = true
+	}
+
+	queries := 0
+	for _, d := range shipped {
+		if !loadedUIDs[d.UID] {
+			return "", fmt.Errorf("dashboard %q (%s) is not loaded by Grafana", d.Title, d.UID)
+		}
+
+		status, body, err := grafanaGET(ctx, monitorIP, "/api/dashboards/uid/"+url.PathEscape(d.UID))
+		if err != nil || status != http.StatusOK {
+			return "", fmt.Errorf("reading dashboard %q failed (HTTP %d): %v", d.Title, status, err)
+		}
+		var payload struct {
+			Dashboard dashboards.Dashboard `json:"dashboard"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return "", fmt.Errorf("unreadable dashboard %q payload: %w", d.Title, err)
+		}
+
+		// Compare with the shipped copy: a dashboard edited through the UI is
+		// stored in Grafana's database and would silently override the file.
+		want := make(map[string]string, len(d.Panels))
+		for _, p := range d.Panels {
+			want[p.Title] = panelQueries(p)
+		}
+		if len(payload.Dashboard.Panels) != len(d.Panels) {
+			return "", fmt.Errorf("dashboard %q exposes %d panel(s) but %d are shipped", d.Title, len(payload.Dashboard.Panels), len(d.Panels))
+		}
+		for _, p := range payload.Dashboard.Panels {
+			if p.Datasource.UID != dashboards.DatasourceUID {
+				return "", fmt.Errorf("dashboard %q panel %q points at datasource %q instead of %q", d.Title, p.Title, p.Datasource.UID, dashboards.DatasourceUID)
+			}
+			if len(p.Targets) == 0 {
+				return "", fmt.Errorf("dashboard %q panel %q has no query", d.Title, p.Title)
+			}
+			for _, t := range p.Targets {
+				if strings.TrimSpace(t.Expr) == "" {
+					return "", fmt.Errorf("dashboard %q panel %q has an empty query", d.Title, p.Title)
+				}
+				queries++
+			}
+			if got, ok := want[p.Title]; !ok {
+				return "", fmt.Errorf("dashboard %q panel %q was not shipped (edited in the UI?)", d.Title, p.Title)
+			} else if got != panelQueries(p) {
+				return "", fmt.Errorf("dashboard %q panel %q no longer matches the shipped query (%q)", d.Title, p.Title, panelQueries(p))
+			}
+		}
+	}
+
+	// First open in the browser: the HA overview, not the welcome page.
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/dashboards/home")
+	if err != nil || status != http.StatusOK {
+		return "", fmt.Errorf("reading Grafana's home dashboard failed (HTTP %d): %v", status, err)
+	}
+	var home struct {
+		Dashboard dashboards.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(body, &home); err != nil {
+		return "", fmt.Errorf("unreadable Grafana home dashboard payload: %w", err)
+	}
+	if home.Dashboard.UID != dashboards.HomeUID {
+		return "", fmt.Errorf("grafana opens on %q instead of the HA overview (%s): set [dashboards] default_home_dashboard_path", home.Dashboard.Title, dashboards.HomeUID)
+	}
+
+	return fmt.Sprintf("datasource %s, %d dashboard(s) loaded, home = %s, %d panel queries",
+		datasource, len(shipped), home.Dashboard.Title, queries), nil
+}
+
+// panelQueries renders a panel's queries for comparison with the shipped file.
+func panelQueries(p dashboards.Panel) string {
+	exprs := make([]string, 0, len(p.Targets))
+	for _, t := range p.Targets {
+		exprs = append(exprs, strings.TrimSpace(t.Expr))
+	}
+	return strings.Join(exprs, "\n")
+}
+
+// grafanaGET performs an authenticated GET against the monitor's Grafana.
+func grafanaGET(ctx context.Context, monitorIP, path string) (int, []byte, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, functionalTimeout)
+	defer cancel()
+
+	base := "http://" + net.JoinHostPort(monitorIP, "3000")
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	req.SetBasicAuth("admin", "admin")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, body, nil
 }
 
 // httpGetLocation performs a GET and returns the response's status and Location

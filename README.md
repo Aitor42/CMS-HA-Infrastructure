@@ -44,7 +44,7 @@ The environment is driven by three cooperating layers:
 | **Synchronous Block Replication** | DRBD 9 Protocol C between master nodes for zero data loss with dynamic node affinity |
 | **Automated Failover** | Autonomous DRBD watchdog daemon (`drbd-failover-watchdog.service`) + gateway quorum verification + Kubernetes pod migration + chaos testing suite |
 | **Load Balancing** | Nginx reverse proxy with health checks across 2 WordPress/Apache frontends |
-| **Full-stack Observability** | Prometheus + Grafana with 19 alert rules (DRBD/etcd quorum, keepalived VIP, service & backup health) and dynamic scrape targets |
+| **Full-stack Observability** | Prometheus + Grafana with 19 alert rules (DRBD/etcd quorum, keepalived VIP, service & backup health), dynamic scrape targets and dashboards whose every panel query is checked against Prometheus |
 | **Defense in Depth** | UFW perimeter firewall + dynamic WAN MAC detection + per-node iptables rules + network segmentation |
 | **Internal PKI** | Private Certificate Authority (step-ca) with automated TLS trust distribution |
 | **Infrastructure as Code** | Ansible (`community.libvirt`) creates & declares networks, disks and VM domains |
@@ -310,7 +310,7 @@ Each phase is invoked through the unified Go CLI (`cms-ha`). The third column li
 | **08** | `cms-ha phase setup-monitoring` | `scripts/08_setup_monitoring.sh` | `internal-monitor` + all | Prometheus, Grafana, alert rules, blackbox probes & node exporters |
 | **09** | `cms-ha phase setup-ufw` | `scripts/09_setup_ufw.sh` | `ufw-router` + all nodes | Perimeter routing, dynamic WAN NAT & per-node UFW |
 | **10** | `cms-ha phase setup-ca` | `scripts/10_setup_internal_ca.sh` | `jumpstart` + all nodes | Smallstep PKI (step-ca) & cluster-wide TLS trust |
-| **11** | `cms-ha traffic` | `scripts/11_traffic_mix.sh` | Workstations & LB | k6 HTTP load/smoke profile (RPS, p95/p99, error rate) with optional Prometheus remote-write |
+| **11** | `cms-ha traffic` | `scripts/11_traffic_mix.sh` | Workstations & LB | k6 HTTP load/smoke profile (RPS, p95/p99, error rate) with optional Prometheus remote-write; every Grafana panel query is then checked for data |
 
 ---
 
@@ -370,7 +370,7 @@ Example output from a fully converged environment:
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
 ✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v11.0.0))
-✓ Phase 10 - Stack functional checks (CMS, database, probes): [PASS] (CMS pages: login form 200, feed 200, asset 200, http->https 301, CMS REST API: 9 namespace(s), 1 post(s), permalink /hello-world/ 200, CMS frontends: 192.168.20.101: 1 post(s), uploads on nfs4; 192.168.20.102: 1 post(s), uploads on nfs4, Load balancers: 192.168.20.103: HTTP 200, 192.168.20.104: HTTP 200, MariaDB: NodePort 30306 open, wp_posts=1, wp_options=187, write round-trip ok, Prometheus probes: 19 rule(s) in 4 group(s), 3/3 blackbox probes up, Grafana: datasource provisioned, 3 dashboard(s))
+✓ Phase 10 - Stack functional checks (CMS, database, probes): [PASS] (CMS pages: login form 200, feed 200, asset 200, http->https 301, CMS REST API: 9 namespace(s), 1 post(s), permalink /hello-world/ 200, CMS frontends: 192.168.20.101: 1 post(s), uploads on nfs4; 192.168.20.102: 1 post(s), uploads on nfs4, Load balancers: 192.168.20.103: HTTP 200, 192.168.20.104: HTTP 200, MariaDB: NodePort 30306 open, wp_posts=1, wp_options=187, write round-trip ok, Prometheus probes: 19 rule(s) in 4 group(s), 3/3 blackbox probes up, Grafana: datasource Prometheus (prometheus-cms-infra), 2 dashboard(s) loaded, home = CMS HA — DRBD / etcd / LB overview, 15 panel queries)
 ✓ Completed phase: Infrastructure Verification in 21.37s
 ```
 
@@ -430,7 +430,7 @@ main-hotdesk3        192.168.20.203  running    OK
 | Service | URL | Purpose |
 |:--------|:----|:--------|
 | Prometheus | `http://192.168.10.20:9090` | Metrics collection and alerting engine (`/alerts` shows firing alerts) |
-| Grafana | `http://192.168.10.20:3000` | Dashboards and visualisation (node overview + HA overview) |
+| Grafana | `http://192.168.10.20:3000` | Dashboards and visualisation (opens on the HA overview; node overview + HA overview) |
 | Alertmanager | `http://192.168.10.20:9093` | Alert routing, grouping and deduplication; add a webhook/email/Slack receiver to enable delivery (see `docs/MANUAL.md` §4) |
 
 ### Alert Rules

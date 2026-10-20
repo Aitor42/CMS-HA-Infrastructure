@@ -194,7 +194,16 @@
               { "color": "red", "value": null },
               { "color": "green", "value": 1 }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red" },
+                "1": { "text": "UP", "color": "green" }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -209,7 +218,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-cms-infra" },
-          "expr": "probe_success{job=\"blackbox\"}",
+          "expr": "probe_success",
           "legendFormat": "{{instance}}",
           "refId": "A"
         }
@@ -250,6 +259,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
+          "noValue": "no load test in the selected window — run ./cms-ha traffic",
           "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "line",
@@ -265,8 +275,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-cms-infra" },
-          "expr": "sum by (instance) (rate(k6_http_reqs_total[1m]))",
-          "legendFormat": "{{instance}}",
+          "expr": "sum by (kind) (rate(k6_http_reqs_total[5m]))",
+          "legendFormat": "{{kind}}",
           "refId": "A"
         }
       ],
@@ -278,6 +288,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
+          "noValue": "no load test in the selected window — run ./cms-ha traffic",
           "color": { "mode": "palette-classic" },
           "custom": {
             "drawStyle": "line",
@@ -293,12 +304,12 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-cms-infra" },
-          "expr": "sum by (instance) (rate(k6_http_req_duration_seconds_sum[1m])) / sum by (instance) (rate(k6_http_req_duration_seconds_count[1m]))",
-          "legendFormat": "{{instance}}",
+          "expr": "k6_http_req_duration_p95",
+          "legendFormat": "p95 {{kind}}",
           "refId": "A"
         }
       ],
-      "title": "k6 load test — mean latency",
+      "title": "k6 load test — p95 latency",
       "type": "timeseries"
     }
   ],

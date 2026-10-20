@@ -15,6 +15,7 @@ import (
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/container"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -107,11 +108,38 @@ func (t *Traffic) Run(ctx context.Context) error {
 		return err
 	}
 
+	// The dashboards are part of the deliverable: an operator opens Grafana to
+	// read the test that was just run. Every panel query is evaluated against
+	// Prometheus now that the k6 series exist, so a query naming a series k6
+	// never exports fails here instead of showing "No data" in the browser.
+	if t.cfg.Traffic.PrometheusRWURL != "" {
+		if err := t.checkDashboardData(ctx); err != nil {
+			return err
+		}
+	}
+
 	if t.opts.WithDB {
 		if err := t.runDBCheck(ctx); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// checkDashboardData asserts that every panel of the shipped Grafana dashboards
+// resolves to at least one series in the Prometheus the load test streamed to.
+func (t *Traffic) checkDashboardData(ctx context.Context) error {
+	base := dashboards.PrometheusBaseURL(t.cfg.Traffic.PrometheusRWURL)
+	logging.Info("Checking the Grafana dashboards against Prometheus (%s)...", base)
+
+	report, err := dashboards.CheckPrometheus(ctx, base)
+	if err != nil {
+		return fmt.Errorf("dashboard data check failed: %w", err)
+	}
+	if !report.OK() {
+		return fmt.Errorf("dashboard data check failed: %s", report.Error())
+	}
+	logging.Success("Grafana dashboards: %d/%d panel queries return data", report.Queries, report.Queries)
 	return nil
 }
 
@@ -164,7 +192,15 @@ func buildArgs(image string, r k6Run) []string {
 		)
 	}
 	if r.rwURL != "" {
-		args = append(args, "-e", "K6_PROMETHEUS_RW_SERVER_URL="+r.rwURL)
+		args = append(args,
+			"-e", "K6_PROMETHEUS_RW_SERVER_URL="+r.rwURL,
+			// Remote write has no histogram support by default: k6 exports a
+			// gauge per requested trend statistic and defaults to p(99) only.
+			// The HA dashboard plots p95, and the profile's own thresholds are
+			// p(95)/p(99), so ask for both instead of letting the panel stay
+			// empty.
+			"-e", "K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99)",
+		)
 	}
 
 	args = append(args, image, "run")

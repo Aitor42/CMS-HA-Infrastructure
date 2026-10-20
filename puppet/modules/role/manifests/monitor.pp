@@ -244,6 +244,42 @@ class role::monitor {
     notify  => Service['grafana-server'],
   }
 
+  # First open in the browser must land on the HA graphs, not on Grafana's
+  # welcome page. [dashboards] default_home_dashboard_path reads the file
+  # straight from disk, so it works before the dashboard is registered in the
+  # database. The value is passed as a systemd drop-in environment variable
+  # (GF_<section>_<key>) to leave the packaged unit and grafana.ini untouched;
+  # `cms-ha verify` asserts the home dashboard through Grafana's API.
+  file { '/etc/systemd/system/grafana-server.service.d':
+    ensure  => directory,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    require => Package['grafana'],
+  }
+
+  file { '/etc/systemd/system/grafana-server.service.d/home-dashboard.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "[Service]\nEnvironment=GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/ha-overview.json\n",
+    require => [
+      Package['grafana'],
+      File['/etc/systemd/system/grafana-server.service.d'],
+      File['/var/lib/grafana/dashboards/ha-overview.json'],
+    ],
+    notify  => [Exec['grafana-systemd-reload'], Service['grafana-server']],
+  }
+
+  # Environment= in a drop-in only reaches the new process after systemd has
+  # re-read its units, and that has to happen before the restart above.
+  exec { 'grafana-systemd-reload':
+    command     => '/usr/bin/systemctl daemon-reload',
+    refreshonly => true,
+    before      => Service['grafana-server'],
+  }
+
   # ---------------------------------------------------------------------------
   # UFW — Firewall rules for the monitor node
   # ---------------------------------------------------------------------------

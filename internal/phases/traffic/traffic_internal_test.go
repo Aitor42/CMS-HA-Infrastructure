@@ -65,6 +65,7 @@ func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
 		"-v " + hostCACertPath + ":" + containerCACert + ":ro",
 		"-e SSL_CERT_FILE=" + containerCACert,
 		"-e K6_PROMETHEUS_RW_SERVER_URL=http://192.168.10.20:9090/api/v1/write",
+		"-e K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99)",
 		"grafana/k6:0.55.0 run",
 		"--vus 7",
 		"--duration 90s",
