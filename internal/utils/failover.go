@@ -53,6 +53,12 @@ func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if !f.testDRBDPowerCutFailover(ctx, opts) {
+		failed++
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !f.testCMSFailover(ctx, opts) {
 		failed++
 	}
@@ -68,7 +74,7 @@ func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 		return err
 	}
 	if failed > 0 {
-		return fmt.Errorf("%d of 3 failover scenarios failed", failed)
+		return fmt.Errorf("%d of 4 failover scenarios failed", failed)
 	}
 	return nil
 }
@@ -170,10 +176,126 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 			logging.Error("failed to restore %s: %v", master1.Name, err)
 		}
 		f.waitForSSH(ctx, master1.IP, 120*time.Second)
+
+		// The return path is part of the scenario: a restarted master must come
+		// back as the Secondary. A node that keeps the Primary role it had before
+		// the restart is a split brain — the pod runs on master2 while master1
+		// also believes it owns the volume.
+		if !waitFor(ctx, 120*time.Second, 5*time.Second, func() bool {
+			out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "drbdadm role cms_data")
+			return err == nil && strings.TrimSpace(out) == "Primary/Secondary"
+		}) {
+			pass = false
+			logging.Error("%s did not return as Secondary (%s is not Primary/Secondary)", master1.Name, master2.Name)
+			f.logFailoverDiagnostics(ctx, "restarted master did not come back as Secondary")
+		}
 	}
 
 	duration := time.Since(start)
 	f.printSummary("DRBD Master Failover", pass, duration)
+	return pass
+}
+
+// drbdPrimary reports which master currently holds the Primary role, as seen
+// from master1's DRBD ("<local>/<peer>").
+func (f *FailoverTester) drbdPrimary(ctx context.Context) (primary, standby config.NodeDetail, err error) {
+	master1, master2 := f.cfg.Nodes.Masters[0], f.cfg.Nodes.Masters[1]
+	out, _, _, runErr := f.ssh.RunCommand(ctx, master1.IP, "drbdadm role cms_data")
+	if runErr != nil {
+		return primary, standby, fmt.Errorf("querying DRBD role on %s: %w", master1.IP, runErr)
+	}
+	switch role := strings.TrimSpace(out); role {
+	case "Primary/Secondary":
+		return master1, master2, nil
+	case "Secondary/Primary":
+		return master2, master1, nil
+	default:
+		return primary, standby, fmt.Errorf("unexpected DRBD role on %s: %q (the volume is not a healthy Primary/Secondary pair)", master1.IP, role)
+	}
+}
+
+// testDRBDPowerCutFailover loses the master that currently holds the Primary
+// role the hard way: no ACPI shutdown, so DRBD never gets to demote itself and
+// the node keeps "Primary" in its metadata. This is the sequence that used to
+// leave two writers — the peer takes over while the dead node is down, and the
+// dead node comes back thinking it is still primary. drbd-cms-boot.service must
+// stand it down before k3s starts; this scenario asserts exactly that.
+func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts FailoverOpts) bool {
+	logging.Info("Scenario 2: DRBD Master Power Cut")
+	start := time.Now()
+	pass := true
+
+	if len(f.cfg.Nodes.Masters) < 2 {
+		logging.Warn("Skipping DRBD power-cut test: requires at least 2 master nodes")
+		f.printSkipped("DRBD Master Power Cut")
+		return true
+	}
+
+	primary, standby, err := f.drbdPrimary(ctx)
+	if err != nil {
+		logging.Error("%v", err)
+		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
+		return false
+	}
+
+	if err := f.libvirt.Destroy(ctx, primary.Name); err != nil {
+		logging.Error("failed to power off %s: %v", primary.Name, err)
+		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
+		return false
+	}
+	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+		state, derr := f.libvirt.DomainState(ctx, primary.Name)
+		return derr == nil && state == "shut off"
+	}) {
+		logging.Error("%s did not reach \"shut off\" after the power cut", primary.Name)
+		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
+		return false
+	}
+
+	// The survivor has to fence the dead domain (the fence helper exits 0 when
+	// it is already off) and promote itself. Same generous budget as scenario 1:
+	// a slow-but-correct failover must not be recorded as a broken one.
+	mariadbRunning := waitFor(ctx, 480*time.Second, 5*time.Second, func() bool {
+		out, _, _, err := f.ssh.RunCommand(ctx, standby.IP,
+			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
+		return err == nil && strings.Contains(out, standby.Name) && strings.Contains(out, "Running")
+	})
+	if !mariadbRunning {
+		pass = false
+		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running on %s after the power cut", standby.Name))
+	}
+	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
+		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	}) {
+		pass = false
+		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the power-cut failover")
+		f.logFailoverDiagnostics(ctx, "CMS frontend not reachable after the power-cut failover")
+	}
+
+	if !opts.SkipRestore {
+		if err := f.libvirt.Start(ctx, primary.Name); err != nil {
+			pass = false
+			logging.Error("failed to restore %s: %v", primary.Name, err)
+		}
+		f.waitForSSH(ctx, primary.IP, 120*time.Second)
+
+		// The point of the scenario: the node that comes back with stale Primary
+		// metadata must end up as the Secondary, with the survivor as the only
+		// writer. The budget covers the boot guard, the reconnect and the resync
+		// after-sb-1pri triggers.
+		if !waitFor(ctx, 180*time.Second, 5*time.Second, func() bool {
+			out, _, _, err := f.ssh.RunCommand(ctx, standby.IP, "drbdadm role cms_data")
+			return err == nil && strings.TrimSpace(out) == "Primary/Secondary"
+		}) {
+			pass = false
+			logging.Error("%s did not come back as Secondary (%s is not Primary/Secondary): stale Primary metadata can split the volume",
+				primary.Name, standby.Name)
+			f.logFailoverDiagnostics(ctx, "power-cut master did not come back as Secondary")
+		}
+	}
+
+	duration := time.Since(start)
+	f.printSummary("DRBD Master Power Cut", pass, duration)
 	return pass
 }
 

@@ -499,7 +499,8 @@ Automated failover tests validate the HA design under real failure conditions:
 
 | Test | Simulated Failure | Validated Behaviour |
 |:-----|:------------------|:-------------------|
-| DRBD Master Failover | Primary master node shutdown | Watchdog detects failure (15s), promotes Secondary, migrates MariaDB pod, CMS stays online |
+| DRBD Master Failover | Primary master node shutdown | Watchdog detects failure (15s), promotes Secondary, migrates MariaDB pod, CMS stays online; the restarted master must come back as Secondary |
+| DRBD Master Power Cut | Primary master destroyed (no shutdown) | Same failover with stale `Primary` metadata left on the dead node: the survivor promotes, and the restarted node stands down as Secondary instead of becoming a second writer |
 | CMS Frontend Failover | WordPress node shutdown | Nginx routes traffic to surviving frontend with zero downtime |
 | K3s Worker Failover | Worker node shutdown | Pods reschedule to remaining worker |
 
