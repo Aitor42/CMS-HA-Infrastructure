@@ -220,11 +220,11 @@ jobs:
           set -o pipefail
           mkdir -p "$ARTIFACTS_DIR"
 
-          # The runner has 15 GiB and the widest install batch allocates 18 GiB
-          # of guest RAM (five installers at 3 GiB plus the jumpstart). Disk
-          # swap turned that into a storm of block I/O and a ten-minute batch
-          # overran its budget, so give the host a compressed swap device
-          # first: zram keeps the pages in RAM at a fraction of their size.
+          # `deploy.install_batch_size` keeps each install batch at four guests,
+          # so the host is asked for four 3 GiB installers plus the jumpstart —
+          # right at its 15 GiB. Give it a compressed swap device as a safety
+          # net: zram keeps the pages in RAM at a fraction of their size, where
+          # disk swap turned a ten-minute batch into a twenty-minute one.
           # Best effort — without zram the run still works, just slower.
           sudo modprobe zram || true
           ZRAM_DEV=$(sudo zramctl --find --size 8G --algorithm zstd 2>/dev/null || true)

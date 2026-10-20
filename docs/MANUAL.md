@@ -120,6 +120,7 @@ Run the command that automates the creation and installation of client nodes in 
 ```
 **Key Operational Decisions During Batch Provisioning:**
 *   **Installation RAM Allocation:** VMs are spawned with 3–4 GB RAM. Canonical's hard minimum for an ISO install is 1.5 GB, but its *suggested* minimum is 3 GB and the installer also unpacks the base snaps, so this lab never installs below 3 GB — including on the hosted CI variant, whose batches are made to fit instead of shrinking the installers. `config.yaml` uses 4 GB on the masters and the workers; `config.ci.yaml` uses 3 GB everywhere because a 15 GiB runner cannot hold five 4 GiB installers.
+*   **Batch Width:** `deploy.install_batch_size` (default `0`) caps how many guests install at the same time. Zero keeps the documented batches: network and management, then the Kubernetes nodes, then the frontends. Set it to the hypervisor's vCPU count to re-split that same order into balanced batches, because each installer saturates about one vCPU and a batch wider than the host is simply a second install round. The hosted CI lab uses `4` for its 4 vCPU: the twelve guests install as 4/4/4 in three rounds instead of 3/5/4 in four, and four 3 GB installers plus the jumpstart fit its 15 GiB of RAM.
 *   **Production Disk Sizing:** The web frontends (`main-cms1`, `main-cms2`) and load balancers (`main-lb1`, `main-lb2`) are provisioned with **8 GB virtual disks** (upgraded from earlier 4 GB baseline) to provide ample room for Apache, PHP 8.3 modules, WordPress core files, Nginx logs, and OS kernel updates without risk of root partition exhaustion.
 *   **Automated Memory Shrinking:** Once a batch finishes OS installation, its memory is adjusted down to production footprint (768 MB – 2048 MB) and the batch is left shut down. The whole topology is booted together after the last batch: an idle batch still holds its RAM, and starting it immediately would add that footprint to every later batch's installers. The same sizing can be re-applied later on demand:
     ```bash
@@ -393,11 +394,12 @@ Linux runners do expose nested KVM, so the lab is real, but it is small: 4
 vCPU and 15 GiB of RAM. The workflow therefore deploys `config.ci.yaml` (the
 shipped topology without the three hotdesks) and provisions the clients with
 `vm install-batches`, the batched procedure of section 2, instead of booting
-every guest at once. Two details keep that 15 GiB host from thrashing while
-five 3 GB installers run: the batch phase leaves already-installed batches
-shut off until the very end, and the workflow sets up an 8 GB zram swap device
-before provisioning, so the residual overcommit is compressed in RAM instead
-of becoming disk swap.
+every guest at once. Three details keep that 15 GiB host from thrashing while
+its installers run: `deploy.install_batch_size` caps a batch at the runner's
+four vCPUs (four 3 GB installers plus the jumpstart), the batch phase leaves
+already-installed batches shut off until the very end, and the workflow sets up
+an 8 GB zram swap device before provisioning, so any residual overcommit is
+compressed in RAM instead of becoming disk swap.
 
 ---
 

@@ -519,6 +519,107 @@ func forceStop(ctx context.Context, l *libvirt.Client, name string) error {
 	}
 }
 
+// installNode is one guest of the batched provisioning pass.
+type installNode struct {
+	name         string
+	ip           string
+	ramInstallMB int
+	ramFinalMB   int
+}
+
+// installBatch is a set of guests whose installers run at the same time.
+type installBatch struct {
+	name  string
+	nodes []installNode
+}
+
+// planInstallBatches decides which client guests install together.
+//
+// The documented order is dependency order: the router and the management
+// nodes first, then the Kubernetes nodes, then the frontends and workstations.
+// Without a configured width that order is kept as three semantic batches.
+//
+// `deploy.install_batch_size` re-splits the same order into chunks of at most
+// that many guests, and exists because the width is what decides the wall
+// time: every installer saturates about one vCPU, so on a 4-vCPU host a group
+// of five costs two install rounds (~8 minutes each) while the same guests in
+// groups of four cost three rounds in total. It is also a memory setting:
+// four 3 GiB installers plus the jumpstart fit a 15 GiB host, five do not.
+func planInstallBatches(cfg *config.Config) []installBatch {
+	network := []installNode{
+		{cfg.Nodes.Router.Name, cfg.Nodes.Router.IP, cfg.Nodes.Router.RAMInstallMB, cfg.Nodes.Router.RAMFinalMB},
+		{cfg.Nodes.Monitor.Name, cfg.Nodes.Monitor.IP, cfg.Nodes.Monitor.RAMInstallMB, cfg.Nodes.Monitor.RAMFinalMB},
+		{cfg.Nodes.Storage.Name, cfg.Nodes.Storage.IP, cfg.Nodes.Storage.RAMInstallMB, cfg.Nodes.Storage.RAMFinalMB},
+	}
+
+	var kubernetes []installNode
+	for _, m := range cfg.Nodes.Masters {
+		kubernetes = append(kubernetes, installNode{m.Name, m.IP, m.RAMInstallMB, m.RAMFinalMB})
+	}
+	for _, w := range cfg.Nodes.Workers {
+		kubernetes = append(kubernetes, installNode{w.Name, w.IP, w.RAMInstallMB, w.RAMFinalMB})
+	}
+
+	var fronts []installNode
+	for _, lb := range cfg.Nodes.LBs {
+		fronts = append(fronts, installNode{lb.Name, lb.IP, lb.RAMInstallMB, lb.RAMFinalMB})
+	}
+	for _, c := range cfg.Nodes.CMSFrontends {
+		fronts = append(fronts, installNode{c.Name, c.IP, c.RAMInstallMB, c.RAMFinalMB})
+	}
+	for _, hd := range cfg.HotdeskSpecs() {
+		fronts = append(fronts, installNode{hd.Name, hd.IP, hd.RAMInstallMB, hd.RAMFinalMB})
+	}
+
+	if width := cfg.Deploy.InstallBatchSize; width > 0 {
+		ordered := make([]installNode, 0, len(network)+len(kubernetes)+len(fronts))
+		ordered = append(ordered, network...)
+		ordered = append(ordered, kubernetes...)
+		ordered = append(ordered, fronts...)
+		return chunkInstallNodes(ordered, width)
+	}
+
+	return []installBatch{
+		{name: "1: Network/Management", nodes: network},
+		{name: "2: Kubernetes & DB", nodes: kubernetes},
+		{name: "3: CMS Frontends & Workstations", nodes: fronts},
+	}
+}
+
+// chunkInstallNodes splits an ordered guest list into consecutive chunks of at
+// most width guests. Consecutive chunks are also the minimum number of rounds:
+// a chunk never mixes guests that could have installed earlier.
+func chunkInstallNodes(ordered []installNode, width int) []installBatch {
+	if width <= 0 || width > len(ordered) {
+		width = len(ordered)
+	}
+	if width == 0 {
+		return nil
+	}
+	rounds := (len(ordered) + width - 1) / width
+	batches := make([]installBatch, 0, rounds)
+	for i := 0; i < len(ordered); i += width {
+		end := i + width
+		if end > len(ordered) {
+			end = len(ordered)
+		}
+		batches = append(batches, installBatch{
+			name:  fmt.Sprintf("%d/%d", i/width+1, rounds),
+			nodes: ordered[i:end],
+		})
+	}
+	return batches
+}
+
+// installNodeNames returns the guest names of a batch for the phase log.
+func installNodeNames(nodes []installNode) string {
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.name
+	}
+	return strings.Join(names, ", ")
+}
+
 func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s *ssh.Pool) error {
 	timer := logging.PhaseStart("Install By Batches")
 	defer timer.End()
@@ -531,46 +632,10 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 		sshBudget = 15 * time.Minute
 	}
 
-	type nodeInfo struct {
-		name         string
-		ip           string
-		ramInstallMB int
-		ramFinalMB   int
-	}
-
-	// Batch 1: Network & Management
-	batch1 := []nodeInfo{
-		{cfg.Nodes.Router.Name, cfg.Nodes.Router.IP, cfg.Nodes.Router.RAMInstallMB, cfg.Nodes.Router.RAMFinalMB},
-		{cfg.Nodes.Monitor.Name, cfg.Nodes.Monitor.IP, cfg.Nodes.Monitor.RAMInstallMB, cfg.Nodes.Monitor.RAMFinalMB},
-		{cfg.Nodes.Storage.Name, cfg.Nodes.Storage.IP, cfg.Nodes.Storage.RAMInstallMB, cfg.Nodes.Storage.RAMFinalMB},
-	}
-
-	// Batch 2: K8s Masters & Workers
-	var batch2 []nodeInfo
-	for _, m := range cfg.Nodes.Masters {
-		batch2 = append(batch2, nodeInfo{m.Name, m.IP, m.RAMInstallMB, m.RAMFinalMB})
-	}
-	for _, w := range cfg.Nodes.Workers {
-		batch2 = append(batch2, nodeInfo{w.Name, w.IP, w.RAMInstallMB, w.RAMFinalMB})
-	}
-
-	// Batch 3: Load Balancers, CMS Frontends & Hotdesks
-	var batch3 []nodeInfo
-	for _, lb := range cfg.Nodes.LBs {
-		batch3 = append(batch3, nodeInfo{lb.Name, lb.IP, lb.RAMInstallMB, lb.RAMFinalMB})
-	}
-	for _, c := range cfg.Nodes.CMSFrontends {
-		batch3 = append(batch3, nodeInfo{c.Name, c.IP, c.RAMInstallMB, c.RAMFinalMB})
-	}
-	for _, hd := range cfg.HotdeskSpecs() {
-		batch3 = append(batch3, nodeInfo{hd.Name, hd.IP, hd.RAMInstallMB, hd.RAMFinalMB})
-	}
-
-	batches := [][]nodeInfo{batch1, batch2, batch3}
-	batchNames := []string{"1: Network/Management", "2: Kubernetes & DB", "3: CMS Frontends & Workstations"}
-
-	for i, batch := range batches {
-		logging.Info("Starting Batch %s...", batchNames[i])
+	batches := planInstallBatches(cfg)
+	for i, b := range batches {
+		batch := b.nodes
+		logging.Info("Starting Batch %s (%d VMs: %s)...", b.name, len(batch), installNodeNames(batch))
 
 		// 1. Define (when missing) and boot every VM in this batch. Creating
 		// the batch here, instead of relying on `init-vms` to have defined the
@@ -725,18 +790,18 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 	var startWg sync.WaitGroup
 	var startMu sync.Mutex
 	var startErrs []string
-	for _, batch := range batches {
-		for _, node := range batch {
-			n := node
-			if states[n.name] == "running" {
+	for _, b := range batches {
+		for _, n := range b.nodes {
+			name := n.name
+			if states[name] == "running" {
 				continue
 			}
 			startWg.Add(1)
 			go func() {
 				defer startWg.Done()
-				if err := l.Start(ctx, n.name); err != nil {
+				if err := l.Start(ctx, name); err != nil {
 					startMu.Lock()
-					startErrs = append(startErrs, fmt.Sprintf("start VM %s: %v", n.name, err))
+					startErrs = append(startErrs, fmt.Sprintf("start VM %s: %v", name, err))
 					startMu.Unlock()
 				}
 			}()

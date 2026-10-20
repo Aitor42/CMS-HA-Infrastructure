@@ -240,6 +240,16 @@ type DeployConfig struct {
 	// same time and share the host's vCPUs, so a host with fewer cores than
 	// the reference lab needs a larger budget than the 15m default.
 	NodeInstallTimeout time.Duration `yaml:"node_install_timeout"`
+	// InstallBatchSize caps how many guests install at the same time. Zero
+	// keeps the documented semantic batches (network and management, then the
+	// Kubernetes nodes, then the frontends); a positive value re-splits that
+	// same order into chunks of at most this many guests.
+	//
+	// It is both a memory and a speed setting. Each installer saturates about
+	// one vCPU, so the width that minimises wall time is the host's vCPU
+	// count: anything above it is a second round of installs, and anything
+	// below it leaves cores idle for no benefit.
+	InstallBatchSize int `yaml:"install_batch_size"`
 }
 
 // DRBDConfig controls the DRBD cms_data resource, in particular STONITH
@@ -554,6 +564,9 @@ func (c *Config) Validate() error {
 	}
 	if c.SSH.User != "" && !validUnixUser.MatchString(c.SSH.User) {
 		return fmt.Errorf("ssh.user is not a valid Unix user name: %q", c.SSH.User)
+	}
+	if c.Deploy.InstallBatchSize < 0 {
+		return fmt.Errorf("deploy.install_batch_size must not be negative (got %d)", c.Deploy.InstallBatchSize)
 	}
 	if _, _, err := net.ParseCIDR(c.Network.Internal.CIDR); err != nil {
 		return fmt.Errorf("network.internal.cidr is not a valid CIDR: %w", err)

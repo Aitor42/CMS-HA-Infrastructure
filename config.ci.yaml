@@ -12,11 +12,12 @@
 #   * `ram_install_mb` stays at 3072 (instead of 4096 in `config.yaml`).
 #     Canonical's hard minimum for an ISO install is 1.5 GiB, but its
 #     *suggested* minimum is 3 GiB and Subiquity also unpacks the base snaps,
-#     so this lab does not install below that. The 15 GiB runner still has to
-#     survive the widest batch (five installers plus the jumpstart) without
-#     thrashing: `vm install-batches` keeps already-installed batches shut off
-#     until the end, and the workflow gives the host a zram swap device, so the
-#     residual overcommit is compressed in RAM instead of becoming disk swap.
+#     so this lab does not install below that. To keep that 3 GiB affordable,
+#     `deploy.install_batch_size` caps each batch at the runner's four vCPUs
+#     (see the comment there): four 3 GiB installers plus the jumpstart fit the
+#     15 GiB host, and installed batches stay shut off until the end. The
+#     workflow still adds a zram swap device so a batch that dips past the
+#     limit is compressed in RAM instead of thrashing the disk.
 #     `ram_final_mb` — what each node actually runs on, k3s included — is the
 #     same as in `config.yaml` and is never touched.
 
@@ -240,13 +241,17 @@ pki:
 deploy:
   ssh_timeout: 600s
   stagger_delay: 5s
-  # A hosted runner has 4 vCPU for the whole lab, so a batch of three to five
+  # A hosted runner has 4 vCPU for the whole lab. Each installer saturates
+  # about one vCPU, so a batch of five pays two rounds of ~8 minutes while the
+  # same twelve guests in batches of four pay three rounds in total. It is also
+  # what keeps the 3 GiB installers inside the host: four installers plus the
+  # jumpstart fit 15 GiB, five do not.
+  install_batch_size: 4
+  # A hosted runner has 4 vCPU for the whole lab, so a batch of three or four
   # installers takes far longer than on the reference host. Give the batch
   # installer room for it instead of letting it give up at the 15m default.
-  # One budget covers every batch of a provision run. The widest batch
-  # allocates 18 GiB of guest RAM on a 15 GiB host and dips into the zram
-  # device the workflow sets up, so a slow-but-progressing batch must not be
-  # failed for it: this is a stall guard, not the expected duration.
+  # One budget covers every batch of a provision run, and it is a stall guard,
+  # not the expected duration: a slow-but-progressing batch must not be failed.
   node_install_timeout: 25m
 
 drbd:

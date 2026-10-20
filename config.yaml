@@ -212,6 +212,12 @@ deploy:
   # host with fewer cores than the reference lab needs a larger budget
   # (unset means the 15m default).
   node_install_timeout: 15m
+  # How many guests install at the same time. 0 keeps the documented batches
+  # (network and management, then the Kubernetes nodes, then the frontends).
+  # Set it to the hypervisor's vCPU count to re-split that order into balanced
+  # batches: every installer saturates about one vCPU, so a wider batch is a
+  # second install round, and one wider than the host's RAM swaps.
+  install_batch_size: 0
 
 drbd:
   # STONITH fencing (split-brain prevention). Before a node promotes itself it
