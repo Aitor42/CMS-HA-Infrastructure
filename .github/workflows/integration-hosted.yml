@@ -500,6 +500,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # Opt-in, and a real gate: this is the only place CI exercises the
+      # teardown path (VMs, disks and networks removed from whatever state the
+      # lab is in), so a failure here is a failure of the deliverable.
       - name: Tear the lab down
         if: ${{ inputs.teardown && always() }}
-        run: ./cms-ha -c "$CONFIG" cleanup --yes || true
+        run: ./cms-ha -c "$CONFIG" cleanup --yes

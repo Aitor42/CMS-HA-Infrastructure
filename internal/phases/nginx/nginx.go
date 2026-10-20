@@ -37,14 +37,15 @@ func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 
-	if p.cfg.Nodes.Storage.IP != "" {
-		logging.Info("Converging Storage node %s (%s) for NFS shared persistence...", p.cfg.Nodes.Storage.Name, p.cfg.Nodes.Storage.IP)
-		if _, _, err := phases.RunPuppetAgent(ctx, p.pool, p.cfg.Nodes.Storage.IP, "storage node"); err != nil {
-			return err
-		}
-	}
-
-	logging.Info("Running Puppet agent on LB nodes in parallel...")
+	// The Puppet phase (04) already converged every node once: the storage node
+	// serves the export and the balancers run nginx+keepalived, and that phase
+	// fails the deploy if any node does not converge. Nothing between then and
+	// now changes those catalogs, so re-running the agent on the storage node
+	// or the balancers only re-applied an identical catalog. This phase checks
+	// the preconditions instead and converges only the frontends, whose
+	// catalog really does depend on state that exists by now (the database is
+	// created in the Kubernetes phase and the NFS export is only reachable
+	// after the storage node converged).
 	var lbIPs []string
 	for _, lb := range p.cfg.Nodes.LBs {
 		if lb.IP == "" {
@@ -52,11 +53,10 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 		lbIPs = append(lbIPs, lb.IP)
 	}
-	if err := phases.RunPuppetAgentParallel(ctx, p.pool, lbIPs); err != nil {
-		return err
-	}
 
-	logging.Info("Running Puppet agent on CMS frontends sequentially to prevent install race conditions...")
+	// Sequential on purpose: the catalog installs WordPress (apt + unpack), and
+	// two frontends converging at the same time was the original install race.
+	logging.Info("Converging CMS frontends sequentially (database and uploads now exist)...")
 	for _, cms := range p.cfg.Nodes.CMSFrontends {
 		if cms.IP == "" {
 			continue
@@ -67,11 +67,11 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 	}
 
-	logging.Info("Verifying Nginx configuration on LB nodes...")
-	resLB := p.pool.RunParallel(ctx, lbIPs, "nginx -t && systemctl is-active nginx")
+	logging.Info("Verifying Nginx and keepalived on LB nodes...")
+	resLB := p.pool.RunParallel(ctx, lbIPs, "nginx -t && systemctl is-active nginx && systemctl is-active keepalived")
 	for _, r := range resLB {
 		if r.Err != nil || r.ExitCode != 0 {
-			return fmt.Errorf("nginx verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
+			return fmt.Errorf("nginx/keepalived verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
 		}
 	}
 
@@ -91,8 +91,10 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	if p.cfg.Nodes.Storage.IP != "" {
 		logging.Info("Verifying NFS server export on Storage node...")
-		if _, _, _, err := p.pool.RunCommand(ctx, p.cfg.Nodes.Storage.IP, "systemctl is-active nfs-kernel-server"); err != nil {
-			return fmt.Errorf("nfs-kernel-server verification failed on storage node: %w", err)
+		const exportCmd = "systemctl is-active nfs-kernel-server && exportfs -s | grep -q /srv/nfs/wp-uploads"
+		if _, stderr, code, err := p.pool.RunCommand(ctx, p.cfg.Nodes.Storage.IP, exportCmd); err != nil || code != 0 {
+			return fmt.Errorf("storage node %s is not exporting /srv/nfs/wp-uploads (exit %d): %v %s",
+				p.cfg.Nodes.Storage.Name, code, err, strings.TrimSpace(stderr))
 		}
 	}
 

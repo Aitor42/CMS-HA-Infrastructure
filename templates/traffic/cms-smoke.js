@@ -8,8 +8,9 @@
 //   VHOST     HTTP Host header the CMS vhost expects.
 //
 // TLS verification uses the container trust store; `cms-ha traffic` mounts the
-// lab root CA and sets SSL_CERT_FILE when it is present, otherwise it passes
-// `--insecure`. Metrics can be streamed to Prometheus with
+// lab root CA (the copy the PKI phase leaves under the deploy account's HOME)
+// and sets SSL_CERT_FILE when it is present, otherwise it passes
+// `--insecure-skip-tls-verify`. Metrics can be streamed to Prometheus with
 // `--out experimental-prometheus-rw` (see traffic.prometheus_rw_url).
 //
 // Run standalone with:

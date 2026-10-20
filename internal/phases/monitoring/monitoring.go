@@ -42,12 +42,12 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	monitorIP := p.cfg.Nodes.Monitor.IP
 
-	logging.Info("Running Puppet agent on Monitor node...")
-	if _, _, err := phases.RunPuppetAgent(ctx, p.pool, monitorIP, "monitor node"); err != nil {
-		return err
-	}
-
-	logging.Info("Running Puppet agent on exporter nodes in parallel...")
+	// The Puppet phase (04) converged the monitor node and every exporter once,
+	// and it fails the deploy when a node does not converge. Re-running the
+	// agent here only re-applied an identical catalog, so this phase proves the
+	// exporters are alive instead; the scrape-target count at the end of the
+	// phase reports their metrics, it does not gate.
+	logging.Info("Verifying node exporters installed by the Puppet phase...")
 	var exporterIPs []string
 	seen := make(map[string]struct{})
 	addExporter := func(ip string) {
@@ -75,9 +75,8 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 	addExporter(p.cfg.Nodes.Router.IP)
 
-	// Tolerant: a missing exporter is a monitoring gap, not a deploy stopper.
-	if err := phases.RunPuppetAgentParallel(ctx, p.pool, exporterIPs); err != nil {
-		logging.Warn("puppet agent issues on exporter nodes (continuing): %v", err)
+	if err := verifyNodeExporters(ctx, p.pool, exporterIPs); err != nil {
+		return err
 	}
 
 	logging.Info("Minting K3s bearer token for kubelet metrics...")
@@ -165,5 +164,25 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Success("Monitoring Setup completed successfully.")
+	return nil
+}
+
+// verifyNodeExporters fails when a node whose metrics the dashboards rely on is
+// not running the node exporter that role::base installs and enables. A silent
+// gap here would only show up as a hole in Grafana.
+func verifyNodeExporters(ctx context.Context, pool *ssh.Pool, hosts []string) error {
+	if len(hosts) == 0 {
+		return nil
+	}
+	var failures []string
+	for _, r := range pool.RunParallel(ctx, hosts, "systemctl is-active prometheus-node-exporter") {
+		if r.Err != nil || r.ExitCode != 0 {
+			failures = append(failures, fmt.Sprintf("%s (exit %d): %v", r.Host, r.ExitCode, r.Err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("node exporter is not active on %d/%d nodes:\n%s",
+			len(failures), len(hosts), strings.Join(failures, "\n"))
+	}
 	return nil
 }

@@ -3,6 +3,7 @@ package ufw
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
@@ -38,11 +39,11 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	routerIP := p.cfg.Nodes.Router.IP
 
-	logging.Info("Running Puppet agent on Router node...")
-	if _, _, err := phases.RunPuppetAgent(ctx, p.pool, routerIP, "router node"); err != nil {
-		return err
-	}
-
+	// Every node's firewall catalog (rules, policies, default-deny) was applied
+	// once by the Puppet phase (04), which fails the deploy when a node does not
+	// converge. Nothing here re-runs the agent: this phase finishes the parts
+	// that are not Puppet state (the NAT rules below) and then proves the
+	// firewall is up everywhere.
 	logging.Info("Discovering WAN interface by MAC on Router...")
 	wanIface, err := WANIface(ctx, p.pool, routerIP, p.cfg.Nodes.Router.MACWAN)
 	if err != nil {
@@ -64,7 +65,7 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to reload ufw on router: %w", err)
 	}
 
-	logging.Info("Running Puppet agent on all other nodes in parallel...")
+	logging.Info("Verifying UFW is active on all other nodes in parallel...")
 	var otherIPs []string
 	for _, node := range p.cfg.AllNodes() {
 		if node.IP != "" && node.IP != routerIP && node.IP != p.cfg.Nodes.Jumpstart.IP {
@@ -72,10 +73,15 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 	}
 
-	// Best-effort: a puppet-agent hiccup on a secondary node is logged, not
-	// fatal. The router's own firewall is verified strictly below.
-	if err := phases.RunPuppetAgentParallel(ctx, p.pool, otherIPs); err != nil {
-		logging.Warn("puppet agent issues on other nodes (continuing): %v", err)
+	var inactive []string
+	for _, r := range p.pool.RunParallel(ctx, otherIPs, "ufw status | grep -q 'Status: active'") {
+		if r.Err != nil || r.ExitCode != 0 {
+			inactive = append(inactive, fmt.Sprintf("%s (exit %d): %v", r.Host, r.ExitCode, r.Err))
+		}
+	}
+	if len(inactive) > 0 {
+		return fmt.Errorf("UFW is not active on %d/%d nodes:\n%s",
+			len(inactive), len(otherIPs), strings.Join(inactive, "\n"))
 	}
 
 	logging.Info("Verifying UFW status on Router...")
