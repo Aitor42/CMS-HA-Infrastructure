@@ -189,7 +189,7 @@ traffic-external: build ## Run external traffic test
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: lint
-lint: lint-go lint-shell lint-yaml lint-puppet lint-k8s lint-ansible ## Run all linters
+lint: lint-go lint-shell lint-yaml lint-actions lint-puppet lint-k8s lint-ansible ## Run all linters
 
 .PHONY: lint-go
 lint-go: ## Lint Go code (go vet + staticcheck)
@@ -209,6 +209,15 @@ lint-shell: ## Lint shell scripts (ShellCheck + bash -n syntax)
 		find . -name "*.sh" -not -path "./.git/*" -exec shellcheck -S warning -e SC2029,SC2087,SC2034,SC2155,SC2054,SC2046 {} +; \
 	else \
 		echo "  ℹ ShellCheck not installed — skipping"; \
+	fi
+
+.PHONY: lint-actions
+lint-actions: ## Lint GitHub Actions workflows (actionlint)
+	@echo "▶ Checking GitHub Actions workflows..."
+	@if command -v actionlint >/dev/null 2>&1; then \
+		actionlint; \
+	else \
+		echo "  ℹ actionlint not installed — skipping"; \
 	fi
 
 .PHONY: lint-yaml
