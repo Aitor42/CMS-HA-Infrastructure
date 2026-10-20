@@ -219,6 +219,25 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$ARTIFACTS_DIR"
+
+          # The runner has 15 GiB and the widest install batch allocates 18 GiB
+          # of guest RAM (five installers at 3 GiB plus the jumpstart). Disk
+          # swap turned that into a storm of block I/O and a ten-minute batch
+          # overran its budget, so give the host a compressed swap device
+          # first: zram keeps the pages in RAM at a fraction of their size.
+          # Best effort — without zram the run still works, just slower.
+          sudo modprobe zram || true
+          ZRAM_DEV=$(sudo zramctl --find --size 8G --algorithm zstd 2>/dev/null || true)
+          if [ -n "$ZRAM_DEV" ]; then
+            sudo mkswap "$ZRAM_DEV" >/dev/null 2>&1 || true
+            sudo swapon --priority 100 "$ZRAM_DEV" || true
+            echo "zram swap on $ZRAM_DEV"
+          else
+            echo "::warning::zram is not available; the batch installers will use disk swap"
+          fi
+          free -m
+          swapon --show || true
+
           make build
 
           # The documented order: jumpstart first, then Cobbler, then the node

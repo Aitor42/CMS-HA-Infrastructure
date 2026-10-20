@@ -119,7 +119,7 @@ Run the command that automates the creation and installation of client nodes in 
 # (Legacy v1: bash scripts/utils/install_by_batches.sh)
 ```
 **Key Operational Decisions During Batch Provisioning:**
-*   **Installation RAM Allocation:** VMs are spawned with 3–4 GB RAM so the Subiquity installer does not trigger Linux kernel OOM killer events. The hosted CI variant (`config.ci.yaml`) trims that to 2 GB for the batches that install four or five guests at once: the autoinstall installs no extra packages over the network, so Subiquity works from the ISO, and 2 GB is above its 1.5 GB minimum — whereas 4–5 × 3 GB on a 15 GiB runner pushed ~8 GB into swap and made a batch overrun its budget. Batch 1 keeps 3 GB: only three guests install there, next to the jumpstart.
+*   **Installation RAM Allocation:** VMs are spawned with 3–4 GB RAM. Canonical's hard minimum for an ISO install is 1.5 GB, but its *suggested* minimum is 3 GB and the installer also unpacks the base snaps, so this lab never installs below 3 GB — including on the hosted CI variant, whose batches are made to fit instead of shrinking the installers. `config.yaml` uses 4 GB on the masters and the workers; `config.ci.yaml` uses 3 GB everywhere because a 15 GiB runner cannot hold five 4 GiB installers.
 *   **Production Disk Sizing:** The web frontends (`main-cms1`, `main-cms2`) and load balancers (`main-lb1`, `main-lb2`) are provisioned with **8 GB virtual disks** (upgraded from earlier 4 GB baseline) to provide ample room for Apache, PHP 8.3 modules, WordPress core files, Nginx logs, and OS kernel updates without risk of root partition exhaustion.
 *   **Automated Memory Shrinking:** Once a batch finishes OS installation, its memory is adjusted down to production footprint (768 MB – 2048 MB) and the batch is left shut down. The whole topology is booted together after the last batch: an idle batch still holds its RAM, and starting it immediately would add that footprint to every later batch's installers. The same sizing can be re-applied later on demand:
     ```bash
@@ -130,7 +130,7 @@ Run the command that automates the creation and installation of client nodes in 
     ```bash
     ./cms-ha vm fix-boot-order
     ```
-*   **Batch SSH Budget:** `deploy.node_install_timeout` (default `15m`) bounds how long a whole batch may take to install and answer SSH. The nodes of a batch install in parallel and share the host's vCPUs, so hosts with few cores need a larger budget — the hosted CI lab, which has 4 vCPU for the entire topology, uses `25m`. The budget is a stall guard, not the expected duration: a wide batch installs in about ten minutes when the host is not swapping.
+*   **Batch SSH Budget:** `deploy.node_install_timeout` (default `15m`) bounds how long a whole batch may take to install and answer SSH. The nodes of a batch install in parallel and share the host's vCPUs, so hosts with few cores need a larger budget — the hosted CI lab, which has 4 vCPU for the entire topology, uses `25m`. The budget is a stall guard, not the expected duration.
 *   **Watching for the installed system, not the installer:** During a batch the live installer answers on port 22 too, but it refuses the deployment key by design; only the installed system accepts it. If a node goes silent right after its installer was answering, its shutdown wedged (the live media is an NFS mount whose squashfs stays loop-mounted, so `/cdrom` cannot be unmounted and the guest never reboots). The batch restarts such a node from the host, and since the boot order is already disk-first it comes straight back into the installed system. A healthy node reboots well inside that window and is never restarted.
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
@@ -393,7 +393,11 @@ Linux runners do expose nested KVM, so the lab is real, but it is small: 4
 vCPU and 15 GiB of RAM. The workflow therefore deploys `config.ci.yaml` (the
 shipped topology without the three hotdesks) and provisions the clients with
 `vm install-batches`, the batched procedure of section 2, instead of booting
-every guest at once.
+every guest at once. Two details keep that 15 GiB host from thrashing while
+five 3 GB installers run: the batch phase leaves already-installed batches
+shut off until the very end, and the workflow sets up an 8 GB zram swap device
+before provisioning, so the residual overcommit is compressed in RAM instead
+of becoming disk swap.
 
 ---
 
