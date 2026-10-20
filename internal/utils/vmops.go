@@ -618,7 +618,11 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 		}
 
 		// 3. Re-assert the boot order (idempotent) and signal shutdown, so the
-		// batch releases its RAM before the next one starts its installer.
+		// batch releases its RAM before the next one starts its installer. It
+		// is not restarted here: an idle batch still holds its final RAM, and
+		// with four or five installers in the next batch that idle footprint
+		// is what pushes a memory-tight host into swapping. The whole topology
+		// boots together once every batch is installed.
 		if err := FixBootOrder(ctx, l, batchNamesList); err != nil {
 			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
 		}
@@ -677,7 +681,8 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 			return err
 		}
 
-		// Resize and restart all VMs in the batch with final RAM (in parallel).
+		// Resize all VMs in the batch to their final RAM (in parallel). They
+		// stay shut off until the last batch is installed; see step 3 above.
 		var resizeWg sync.WaitGroup
 		var resizeMu sync.Mutex
 		var resizeErrs []string
@@ -699,13 +704,7 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 					resizeMu.Unlock()
 					return
 				}
-				if err := l.Start(ctx, n.name); err != nil {
-					resizeMu.Lock()
-					resizeErrs = append(resizeErrs, fmt.Sprintf("restart VM %s: %v", n.name, err))
-					resizeMu.Unlock()
-					return
-				}
-				logging.Success("Batch %d: %s resized to %d MB and running", i+1, n.name, n.ramFinalMB)
+				logging.Success("Batch %d: %s resized to %d MB", i+1, n.name, n.ramFinalMB)
 			}()
 		}
 		resizeWg.Wait()
@@ -714,7 +713,41 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 		}
 	}
 
-	logging.Success("All batches provisioned and resized")
+	// Start the whole topology now that no installer is left to compete with
+	// it. Booting thirteen guests together is the footprint the deploy phase
+	// runs on anyway, so it is a state this host has to hold; the difference
+	// is that it happens once, after the last install, instead of adding the
+	// idle batches to every later batch's installers.
+	states, err := l.DomainStates(ctx)
+	if err != nil {
+		return fmt.Errorf("list domains before starting the topology: %w", err)
+	}
+	var startWg sync.WaitGroup
+	var startMu sync.Mutex
+	var startErrs []string
+	for _, batch := range batches {
+		for _, node := range batch {
+			n := node
+			if states[n.name] == "running" {
+				continue
+			}
+			startWg.Add(1)
+			go func() {
+				defer startWg.Done()
+				if err := l.Start(ctx, n.name); err != nil {
+					startMu.Lock()
+					startErrs = append(startErrs, fmt.Sprintf("start VM %s: %v", n.name, err))
+					startMu.Unlock()
+				}
+			}()
+		}
+	}
+	startWg.Wait()
+	if len(startErrs) > 0 {
+		return fmt.Errorf("failed to start the provisioned topology: %s", strings.Join(startErrs, "; "))
+	}
+
+	logging.Success("All batches provisioned and resized; the whole topology is booting")
 	return nil
 }
 

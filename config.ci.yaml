@@ -9,14 +9,18 @@
 #     15 GiB with 13 VMs (16 without this change). Nothing in `verify` or in
 #     the DRBD failover exercise touches the hotdesks, so the HA pipeline under
 #     test is unchanged.
-#   * `ram_install_mb` is 3072 instead of 4096 on the masters and the workers.
-#     That is only the transient RAM Subiquity needs while it installs: the
-#     heaviest batch (3 masters + 2 workers) installs in parallel and would ask
-#     for 20 GiB on a 15 GiB host, pushing ~11 GiB into swap and slowing the
-#     whole batch down. 3072 MB is the low end of the 3-4 GB the manual calls
-#     safe, and installing three nodes with it already works on this runner.
-#     `ram_final_mb` — what each node actually runs on, k3s included — is the
-#     same as in `config.yaml` and is never touched.
+#   * `ram_install_mb` is 2048 instead of 4096 on the jumpstart and on the node
+#     groups whose batch installs four or five guests at once (masters,
+#     workers, load balancers and CMS frontends). That is only the transient
+#     RAM Subiquity needs while it installs; the autoinstall installs no extra
+#     packages over the network, so the installer works from the ISO and 2 GiB
+#     is above its 1.5 GiB documented minimum. It matters because the host has
+#     15 GiB: at 3072 MB per installer the widest batches asked for ~21 GiB,
+#     the host spent ~8 GiB in swap, and a batch that needs ten minutes ran
+#     past its budget. The batch-1 nodes (router, monitor, storage) keep
+#     3072 MB: only three of them install at a time, next to the jumpstart, and
+#     that fits. `ram_final_mb` — what each node actually runs on, k3s
+#     included — is the same as in `config.yaml` and is never touched.
 
 #   * the secret fields are left empty on purpose. The workflow fills them with
 #     freshly generated values into a throwaway `config.ci.local.yaml` (which is
@@ -76,19 +80,19 @@ nodes:
     mac_internal: "52:54:00:10:00:01"
     mac_main: "52:54:00:10:02:0a"
     mac_wan: "52:54:00:10:00:09"
-    ram_install_mb: 3072
+    ram_install_mb: 2048
     ram_final_mb: 2048
     vcpus: 2
     disk_gb: 30
-  # Install-time RAM of the masters and the workers is trimmed for this
-  # runner; see the note at the top of the file. It only affects the installer,
-  # not the RAM the cluster runs on (`ram_final_mb`, below, is unchanged).
+  # Install-time RAM of the master/worker batch is trimmed for this runner; see
+  # the note at the top of the file. It only affects the installer, not the RAM
+  # the cluster runs on (`ram_final_mb`, below, is unchanged).
   masters:
     - name: "internal-master1"
       ip: "192.168.10.11"
       fqdn: "internal-master1.internal.local"
       mac: "52:54:00:10:01:11"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -97,7 +101,7 @@ nodes:
       ip: "192.168.10.12"
       fqdn: "internal-master2.internal.local"
       mac: "52:54:00:10:01:12"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -110,7 +114,7 @@ nodes:
       ip: "192.168.10.16"
       fqdn: "internal-master3.internal.local"
       mac: "52:54:00:10:01:16"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -119,7 +123,7 @@ nodes:
       ip: "192.168.10.13"
       fqdn: "internal-worker1.internal.local"
       mac: "52:54:00:10:01:13"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 768
       vcpus: 1
       disk_gb: 8
@@ -127,7 +131,7 @@ nodes:
       ip: "192.168.10.14"
       fqdn: "internal-worker2.internal.local"
       mac: "52:54:00:10:01:14"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 768
       vcpus: 1
       disk_gb: 8
@@ -154,7 +158,7 @@ nodes:
       ip: "192.168.20.103"
       fqdn: "main-lb1.main.local"
       mac: "52:54:00:10:02:67"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 768
       vcpus: 1
       disk_gb: 8
@@ -162,7 +166,7 @@ nodes:
       ip: "192.168.20.104"
       fqdn: "main-lb2.main.local"
       mac: "52:54:00:10:02:68"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 768
       vcpus: 1
       disk_gb: 8
@@ -171,7 +175,7 @@ nodes:
       ip: "192.168.20.101"
       fqdn: "main-cms1.main.local"
       mac: "52:54:00:10:02:65"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -179,7 +183,7 @@ nodes:
       ip: "192.168.20.102"
       fqdn: "main-cms2.main.local"
       mac: "52:54:00:10:02:66"
-      ram_install_mb: 3072
+      ram_install_mb: 2048
       ram_final_mb: 1024
       vcpus: 1
       disk_gb: 8
@@ -240,10 +244,11 @@ deploy:
   # A hosted runner has 4 vCPU for the whole lab, so a batch of three to five
   # installers takes far longer than on the reference host. Give the batch
   # installer room for it instead of letting it give up at the 15m default.
-  # One budget covers every batch of a provision run, and the later batches
-  # pack more nodes into the runner's 4 vCPUs than batch 1 does, so this is
-  # sized for the slowest of them.
-  node_install_timeout: 20m
+  # One budget covers every batch of a provision run. The installers now run
+  # out of RAM rather than swap (see `ram_install_mb` at the top of the file),
+  # so a wide batch takes about ten minutes: this is a stall guard with a wide
+  # margin, not the expected duration.
+  node_install_timeout: 25m
 
 drbd:
   # STONITH fencing (split-brain prevention). Before a node promotes itself it

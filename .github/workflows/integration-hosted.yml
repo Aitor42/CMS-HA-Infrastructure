@@ -261,16 +261,18 @@ jobs:
           ./cms-ha -c "$CONFIG" vm install-batches \
             | tee "$ARTIFACTS_DIR/03-install-batches.log"
 
-          # Every batch is restarted with its final RAM once it is installed,
-          # so the last batch is still coming up when the batches phase ends:
-          # give the topology a few minutes instead of sampling it once.
-          for attempt in $(seq 1 10); do
+          # The batches phase leaves every guest shut off until the last one is
+          # installed, then boots the whole topology at once (that is what keeps
+          # an idle batch from competing for RAM with the next batch's
+          # installers). All thirteen guests therefore boot right here: give
+          # them ten minutes instead of sampling once.
+          for attempt in $(seq 1 20); do
             if ./cms-ha -c "$CONFIG" status ssh \
                 2>&1 | tee -a "$ARTIFACTS_DIR/04-status-ssh.log"; then
               break
             fi
-            if [ "$attempt" = 10 ]; then
-              echo "::error::the lab did not come up within 5 minutes of provisioning"
+            if [ "$attempt" = 20 ]; then
+              echo "::error::the lab did not come up within 10 minutes of provisioning"
               exit 1
             fi
             echo "::warning::status ssh attempt $attempt failed; retrying in 30s"
