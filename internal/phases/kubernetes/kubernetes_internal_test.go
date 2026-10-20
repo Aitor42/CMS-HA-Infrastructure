@@ -48,3 +48,35 @@ func TestCountNonEmptyLines(t *testing.T) {
 		})
 	}
 }
+
+// TestIsTransientAPIError pins the two sides of the retry decision: the
+// control plane being briefly unavailable is retried (k3s restarted under
+// memory pressure and came back ~15s later, which failed the whole deploy
+// when a bare kubectl delete hit the gap), while a real rejection of the
+// command is not.
+func TestIsTransientAPIError(t *testing.T) {
+	transient := []string{
+		"clear previous MariaDB initialization Job failed (exit 1): The connection to the server 127.0.0.1:6443 was refused - did you specify the right host or port?",
+		"apply MariaDB initialization Job failed (exit 1): Unable to connect to the server: dial tcp 127.0.0.1:6443: connect: connection refused",
+		"wait for MariaDB pod failed (exit 1): error: unexpected EOF",
+		"apply base kustomize overlay failed (exit 1): Error from server (ServiceUnavailable): the server is currently unable to handle the request",
+		"apply Kubernetes namespace failed (exit 1): etcdserver: request timed out",
+	}
+	for _, detail := range transient {
+		if !isTransientAPIError(detail) {
+			t.Errorf("expected transient: %s", detail)
+		}
+	}
+
+	permanent := []string{
+		"apply MariaDB initialization Job failed (exit 1): error: no objects passed to apply",
+		"apply Kubernetes namespace failed (exit 1): Error from server (NotFound): namespaces \"cms\" not found",
+		"wait for MariaDB initialization Job failed (exit 1): error: timed out waiting for the condition",
+		"install K3s on master1: Process exited with status 1",
+	}
+	for _, detail := range permanent {
+		if isTransientAPIError(detail) {
+			t.Errorf("expected permanent: %s", detail)
+		}
+	}
+}

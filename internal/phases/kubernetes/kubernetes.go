@@ -20,6 +20,12 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// apiRetryBudget bounds how long an idempotent kubectl command keeps waiting
+// for the control plane. k3s restarted under memory pressure took ~15s to
+// serve again; three minutes covers that with a wide margin without turning a
+// genuinely broken cluster into a very long hang.
+const apiRetryBudget = 3 * time.Minute
+
 // Phase implements the Kubernetes setup phase
 type Phase struct {
 	cfg  *config.Config
@@ -258,19 +264,19 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	// Namespace and generated credentials first, so no workload ever starts
 	// against a missing Secret.
-	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s/base/namespace.yaml", manifestsDir), "apply Kubernetes namespace"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s/base/namespace.yaml", manifestsDir), "apply Kubernetes namespace"); err != nil {
 		return err
 	}
-	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", secretPath), "apply MariaDB Secret"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", secretPath), "apply MariaDB Secret"); err != nil {
 		return err
 	}
 	_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", secretPath))
 
 	if backupsOn {
-		if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupConfigPath), "apply backup ConfigMap"); err != nil {
+		if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupConfigPath), "apply backup ConfigMap"); err != nil {
 			return err
 		}
-		if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupSecretPath), "apply backup Secret"); err != nil {
+		if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupSecretPath), "apply backup Secret"); err != nil {
 			return err
 		}
 		_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", backupSecretPath))
@@ -288,13 +294,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	// Least-privilege scrape RBAC for Prometheus (ServiceAccount + read-only
 	// ClusterRole/binding). It lives in its own kustomize root because it
 	// targets kube-system, which the other roots rewrite via `namespace:`.
-	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/monitoring", manifestsDir), "apply Prometheus scrape RBAC"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/monitoring", manifestsDir), "apply Prometheus scrape RBAC"); err != nil {
 		return err
 	}
 
 	// Off-DRBD backup stack (only when configured).
 	if backupsOn {
-		if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/backups", manifestsDir), "apply backup kustomize root"); err != nil {
+		if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/backups", manifestsDir), "apply backup kustomize root"); err != nil {
 			return err
 		}
 	}
@@ -328,7 +334,7 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("mariadb pod was never created: %w", err)
 	}
 	// kubectl wait returns as soon as the pod reaches the Running phase.
-	if err := runChecked(ctx, p.pool, master1.IP, "kubectl wait --for=jsonpath='{.status.phase}'=Running pod mariadb-0 -n cms --timeout=300s", "wait for MariaDB pod"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, "kubectl wait --for=jsonpath='{.status.phase}'=Running pod mariadb-0 -n cms --timeout=300s", "wait for MariaDB pod"); err != nil {
 		return fmt.Errorf("mariadb pod failed to start: %w", err)
 	}
 
@@ -337,16 +343,16 @@ func (p *Phase) Run(ctx context.Context) error {
 	// object first. kubectl delete already waits for it to disappear, but the
 	// failure was discarded: a delete that did not happen turned into a
 	// confusing "object is being deleted" error on the apply instead.
-	if err := runChecked(ctx, p.pool, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true", "clear previous MariaDB initialization Job"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, "kubectl delete job init-wordpress-db -n cms --ignore-not-found=true", "clear previous MariaDB initialization Job"); err != nil {
 		return err
 	}
-	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/jobs", manifestsDir), "apply MariaDB initialization Job"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/jobs", manifestsDir), "apply MariaDB initialization Job"); err != nil {
 		return err
 	}
 
 	logging.Info("Waiting for init-db-job completion...")
 	// The Job exists as soon as it is applied; wait for its complete condition.
-	if err := runChecked(ctx, p.pool, master1.IP, "kubectl wait --for=condition=complete job/init-wordpress-db -n cms --timeout=300s", "wait for MariaDB initialization Job"); err != nil {
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, "kubectl wait --for=condition=complete job/init-wordpress-db -n cms --timeout=300s", "wait for MariaDB initialization Job"); err != nil {
 		return fmt.Errorf("init-wordpress-db job did not complete: %w", err)
 	}
 
@@ -423,7 +429,10 @@ func countNonEmptyLines(out string) int {
 
 func runChecked(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
 	stdout, stderr, code, err := pool.RunCommand(ctx, host, command)
-	if err != nil {
+	// A non-zero exit status arrives as an error as well, but it carries the
+	// command's own output, which is what explains the failure. Only a
+	// transport-level failure (code < 0) has nothing to add.
+	if err != nil && code < 0 {
 		return fmt.Errorf("%s: %w", action, err)
 	}
 	if code != 0 {
@@ -436,9 +445,66 @@ func runChecked(ctx context.Context, pool *ssh.Pool, host, command, action strin
 			}
 			detail += out
 		}
+		if detail == "" && err != nil {
+			detail = err.Error()
+		}
 		return fmt.Errorf("%s failed (exit %d): %s", action, code, detail)
 	}
 	return nil
+}
+
+// transientAPIErrors are the failures a healthy but busy control plane
+// produces while k3s settles: a restarted service, an etcd election, or the
+// API server dropping connections under load. They say nothing about the
+// manifest being applied, so they are worth retrying instead of failing a
+// deployment that is otherwise fine.
+var transientAPIErrors = []string{
+	"connection refused",
+	"connection reset by peer",
+	"no route to host",
+	"i/o timeout",
+	"TLS handshake timeout",
+	"unexpected EOF",
+	"Unable to connect to the server",
+	"The connection to the server",
+	"the server is currently unable to handle the request",
+	"ServiceUnavailable",
+	"etcdserver: request timed out",
+	"etcdserver: leader changed",
+	"etcdserver: no leader",
+}
+
+// isTransientAPIError reports whether a kubectl failure is the control plane
+// being briefly unavailable rather than the command being wrong.
+func isTransientAPIError(detail string) bool {
+	for _, marker := range transientAPIErrors {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// runCheckedRetry is runChecked for idempotent kubectl commands (apply, get,
+// delete, wait): a control-plane hiccup is retried for up to apiRetryBudget,
+// while a real rejection (a bad manifest, a missing object) fails at once.
+func runCheckedRetry(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
+	deadline := time.Now().Add(apiRetryBudget)
+	for attempt := 1; ; attempt++ {
+		err := runChecked(ctx, pool, host, command, action)
+		if err == nil {
+			return nil
+		}
+		if !isTransientAPIError(err.Error()) || time.Now().After(deadline) {
+			return err
+		}
+		logging.Warn("%s: the control plane is not answering yet (attempt %d); retrying", action, attempt)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(3 * time.Second):
+		}
+	}
 }
 
 // makeMariaDBSecret builds the Kubernetes Secret manifest from runtime config.
