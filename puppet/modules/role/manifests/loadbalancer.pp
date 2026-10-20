@@ -243,16 +243,49 @@ class role::loadbalancer {
     source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.sh',
   }
 
-  cron { 'cms-keepalived-metrics':
-    ensure  => present,
-    command => '/usr/local/bin/cms-keepalived-metrics.sh 192.168.20.100 >/dev/null 2>&1',
-    user    => 'root',
-    minute  => '*',
+  # A systemd timer, not cron: the lab images do not reliably run a cron
+  # daemon, and a missing publisher only shows up as blank dashboard panels and
+  # silent alerts. systemd is the one scheduler guaranteed to be running.
+  file { '/etc/systemd/system/cms-keepalived-metrics.service':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0644',
+    source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.service',
+    notify => Exec['cms-keepalived-metrics-daemon-reload'],
+  }
+
+  file { '/etc/systemd/system/cms-keepalived-metrics.timer':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0644',
+    source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.timer',
+    notify => Exec['cms-keepalived-metrics-daemon-reload'],
+  }
+
+  exec { 'cms-keepalived-metrics-daemon-reload':
+    command     => '/bin/systemctl daemon-reload',
+    refreshonly => true,
+    before      => Service['cms-keepalived-metrics.timer'],
+  }
+
+  service { 'cms-keepalived-metrics.timer':
+    ensure  => running,
+    enable  => true,
     require => [
       File['/usr/local/bin/cms-keepalived-metrics.sh'],
       File['/var/lib/prometheus/node-exporter'],
-      Service['keepalived'],
+      File['/etc/systemd/system/cms-keepalived-metrics.service'],
+      File['/etc/systemd/system/cms-keepalived-metrics.timer'],
+      Exec['cms-keepalived-metrics-daemon-reload'],
     ],
+  }
+
+  # Earlier revisions published from cron; remove the entry so an upgraded node
+  # does not also run the script every minute.
+  cron { 'cms-keepalived-metrics':
+    ensure => absent,
   }
 
   # ---------------------------------------------------------------------------

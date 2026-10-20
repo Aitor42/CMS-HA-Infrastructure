@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cms-drbd-metrics.sh — publish DRBD health as node-exporter textfile metrics.
 #
-# Runs from cron on the DRBD nodes (internal-master1/2). It writes an atomic
+# Runs from a systemd timer on the DRBD nodes (internal-master1/2). It writes an atomic
 # .prom file that node_exporter's textfile collector exposes, so DRBD can be
 # alerted on without deploying a dedicated DRBD exporter.
 #
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 OUT_DIR="${CMS_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
-RESOURCE="${CMS_DRBD_RESOURCE:-cms-data}"
+RESOURCE="${CMS_DRBD_RESOURCE:-cms_data}"
 OUT="${OUT_DIR}/cms_drbd.prom"
 TMP="${OUT}.$$"
 

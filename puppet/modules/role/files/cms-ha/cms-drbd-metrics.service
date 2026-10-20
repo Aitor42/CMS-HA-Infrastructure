@@ -1,0 +1,6 @@
+[Unit]
+Description=Publish DRBD replication health to node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cms-drbd-metrics.sh

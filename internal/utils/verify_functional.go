@@ -571,9 +571,47 @@ func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOu
 		return o
 	}
 
+	// The overview panels and the HA alerts do not read anything blackbox
+	// exports: they read textfile series published by the nodes themselves
+	// (DRBD on the masters, keepalived on the balancers). A publisher that is
+	// not running leaves those panels blank without failing a single probe, so
+	// ask Prometheus for the series by name.
+	for _, series := range []struct {
+		name   string
+		source string
+	}{
+		{"cms_drbd_connected", "the DRBD textfile publisher on internal-master1/2"},
+		{"cms_keepalived_vip_present", "the keepalived textfile publisher on main-lb1/2"},
+	} {
+		samples, err := prometheusSeries(ctx, base, series.name)
+		if err != nil {
+			o.detail = fmt.Sprintf("%s: %v", series.name, err)
+			return o
+		}
+		if len(samples) == 0 {
+			o.detail = fmt.Sprintf("Prometheus has no %s series: %s is not feeding node_exporter's textfile collector", series.name, series.source)
+			return o
+		}
+	}
+
 	o.pass = true
-	o.detail = fmt.Sprintf("%d rule(s) in %d group(s), %d/%d blackbox probes up", rules, groups, up, len(values))
+	o.detail = fmt.Sprintf("%d rule(s) in %d group(s), %d/%d blackbox probes up, DRBD and keepalived metrics present", rules, groups, up, len(values))
 	return o
+}
+
+// prometheusSeries evaluates an instant query and returns its samples. It is
+// used for "this series must exist" checks, where an empty result is a failure
+// with a different cause than a transport error.
+func prometheusSeries(ctx context.Context, base, expr string) ([]float64, error) {
+	query := url.Values{"query": {expr}}
+	status, body, err := httpGet(ctx, base+"/api/v1/query?"+query.Encode(), "", functionalTimeout, false)
+	if err != nil {
+		return nil, fmt.Errorf("query %s failed: %w", expr, err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("query %s failed (HTTP %d)", expr, status)
+	}
+	return prometheusValues(body)
 }
 
 // checkGrafanaProvisioning proves the Grafana an operator opens really shows

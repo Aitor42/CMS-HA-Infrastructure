@@ -222,20 +222,47 @@ func TestCheckLoadBalancers(t *testing.T) {
 }
 
 func TestCheckMonitoringProbes(t *testing.T) {
-	serverFor := func(t *testing.T, probes, rules string) string {
+	const (
+		emptyVector = `{"status":"success","data":{"resultType":"vector","result":[]}}`
+		haGauge     = `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"1"]}]}}`
+	)
+
+	// The handler answers per query string: verify asks Prometheus for
+	// probe_success and then for the textfile series the HA panels read, and a
+	// catch-all answer would hide a check that asks for the wrong series.
+	serverFor := func(t *testing.T, rules string, series map[string]string) string {
 		t.Helper()
-		return newTestServer(t, false, routeHandler(
-			httpRoute{path: "/api/v1/rules", body: rules},
-			httpRoute{path: "/api/v1/query", body: probes},
-		)).URL
+		return newTestServer(t, false, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/rules":
+				_, _ = io.WriteString(w, rules)
+			case "/api/v1/query":
+				body, ok := series[r.URL.Query().Get("query")]
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			default:
+				http.NotFound(w, r)
+			}
+		})).URL
 	}
 
-	t.Run("rules loaded and probes up", func(t *testing.T) {
-		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, probesAllUp, alertRulesDoc))
+	healthy := func() map[string]string {
+		return map[string]string{
+			"probe_success":              probesAllUp,
+			"cms_drbd_connected":         haGauge,
+			"cms_keepalived_vip_present": haGauge,
+		}
+	}
+
+	t.Run("rules loaded, probes up and HA metrics published", func(t *testing.T) {
+		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, alertRulesDoc, healthy()))
 		if !out.pass {
 			t.Fatalf("expected pass, got %q", out.detail)
 		}
-		for _, want := range []string{"3 rule(s) in 2 group(s)", "2/2 blackbox probes up"} {
+		for _, want := range []string{"3 rule(s) in 2 group(s)", "2/2 blackbox probes up", "DRBD and keepalived metrics present"} {
 			if !strings.Contains(out.detail, want) {
 				t.Errorf("detail %q does not mention %q", out.detail, want)
 			}
@@ -243,15 +270,18 @@ func TestCheckMonitoringProbes(t *testing.T) {
 	})
 
 	t.Run("a probe is down", func(t *testing.T) {
-		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, probesOneDown, alertRulesDoc))
+		series := healthy()
+		series["probe_success"] = probesOneDown
+		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, alertRulesDoc, series))
 		if out.pass || !strings.Contains(out.detail, "1 of 2 blackbox probes are failing") {
 			t.Errorf("expected a probe failure, got pass=%v detail=%q", out.pass, out.detail)
 		}
 	})
 
 	t.Run("no probe series", func(t *testing.T) {
-		empty := `{"status":"success","data":{"resultType":"vector","result":[]}}`
-		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, empty, alertRulesDoc))
+		series := healthy()
+		series["probe_success"] = emptyVector
+		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, alertRulesDoc, series))
 		if out.pass || !strings.Contains(out.detail, "not being scraped") {
 			t.Errorf("expected a missing-series failure, got pass=%v detail=%q", out.pass, out.detail)
 		}
@@ -259,9 +289,27 @@ func TestCheckMonitoringProbes(t *testing.T) {
 
 	t.Run("no rules loaded", func(t *testing.T) {
 		noRules := `{"status":"success","data":{"groups":[]}}`
-		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, probesAllUp, noRules))
+		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, noRules, healthy()))
 		if out.pass || !strings.Contains(out.detail, "no alert rules loaded") {
 			t.Errorf("expected a missing-rules failure, got pass=%v detail=%q", out.pass, out.detail)
+		}
+	})
+
+	t.Run("DRBD publisher silent", func(t *testing.T) {
+		series := healthy()
+		series["cms_drbd_connected"] = emptyVector
+		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, alertRulesDoc, series))
+		if out.pass || !strings.Contains(out.detail, "cms_drbd_connected") || !strings.Contains(out.detail, "textfile collector") {
+			t.Errorf("expected a missing DRBD series failure, got pass=%v detail=%q", out.pass, out.detail)
+		}
+	})
+
+	t.Run("keepalived publisher silent", func(t *testing.T) {
+		series := healthy()
+		series["cms_keepalived_vip_present"] = emptyVector
+		out := (&Verifier{}).checkMonitoringProbes(context.Background(), serverFor(t, alertRulesDoc, series))
+		if out.pass || !strings.Contains(out.detail, "cms_keepalived_vip_present") || !strings.Contains(out.detail, "main-lb1/2") {
+			t.Errorf("expected a missing keepalived series failure, got pass=%v detail=%q", out.pass, out.detail)
 		}
 	})
 }

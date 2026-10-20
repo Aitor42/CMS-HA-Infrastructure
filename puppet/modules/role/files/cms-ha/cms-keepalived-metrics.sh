@@ -2,7 +2,7 @@
 # cms-keepalived-metrics.sh <vip> — publish VIP ownership as node-exporter
 # textfile metrics.
 #
-# Runs from cron on both load balancers. The VRRP state is derived from whether
+# Runs from a systemd timer on both load balancers. The VRRP state is derived from whether
 # the floating VIP is actually present on this host, which is what matters for
 # routing: exactly one balancer must hold it. The series is always published so
 # the KeepalivedState alert can tell "nobody is MASTER" (0) from "VRRP split"

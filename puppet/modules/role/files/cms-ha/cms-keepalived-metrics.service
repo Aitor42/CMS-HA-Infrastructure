@@ -1,0 +1,6 @@
+[Unit]
+Description=Publish keepalived VIP ownership to node_exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cms-keepalived-metrics.sh 192.168.20.100

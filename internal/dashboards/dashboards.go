@@ -205,8 +205,11 @@ func (r Report) Error() string {
 	return strings.Join(parts, " | ")
 }
 
-// maxReported caps how many entries of one category are spelled out.
-const maxReported = 3
+// maxReported caps how many entries of one category are spelled out. The
+// shipped dashboard set has fewer panels than this, so a failure names every
+// empty panel; the cap only keeps a pathological dashboard from flooding the
+// log.
+const maxReported = 32
 
 func joinCapped(items []string) string {
 	if len(items) <= maxReported {

@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"text/template"
@@ -162,5 +163,20 @@ func TestDRBD_WatchdogServiceDefinition(t *testing.T) {
 		if !strings.Contains(svc, d) {
 			t.Errorf("watchdog service missing expected directive: %s", d)
 		}
+	}
+}
+
+// TestDrbdMetricsScriptUsesTheResourceName keeps the textfile publisher in step
+// with templates/drbd/cms-data.res. When the names drift apart "drbdadm status"
+// fails, the script deletes its .prom file, and the DRBD panels go blank while
+// DRBDPeerDown/DRBDSplitBrain stay silent: nothing else in the lab notices.
+func TestDrbdMetricsScriptUsesTheResourceName(t *testing.T) {
+	script, err := os.ReadFile("../puppet/modules/role/files/cms-ha/cms-drbd-metrics.sh")
+	if err != nil {
+		t.Fatalf("read the DRBD metrics script: %v", err)
+	}
+	const want = `RESOURCE="${CMS_DRBD_RESOURCE:-cms_data}"`
+	if !strings.Contains(string(script), want) {
+		t.Fatalf("cms-drbd-metrics.sh must query the resource created by templates/drbd/cms-data.res, want %s", want)
 	}
 }

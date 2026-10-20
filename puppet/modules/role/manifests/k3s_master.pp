@@ -95,15 +95,49 @@ class role::k3s_master {
     source => 'puppet:///modules/role/cms-ha/cms-drbd-metrics.sh',
   }
 
-  cron { 'cms-drbd-metrics':
-    ensure  => present,
-    command => '/usr/local/bin/cms-drbd-metrics.sh >/dev/null 2>&1',
-    user    => 'root',
-    minute  => '*',
+  # A systemd timer, not cron: the lab images do not reliably run a cron
+  # daemon, and a missing publisher only shows up as blank dashboard panels and
+  # silent alerts. systemd is the one scheduler guaranteed to be running.
+  file { '/etc/systemd/system/cms-drbd-metrics.service':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0644',
+    source => 'puppet:///modules/role/cms-ha/cms-drbd-metrics.service',
+    notify => Exec['cms-drbd-metrics-daemon-reload'],
+  }
+
+  file { '/etc/systemd/system/cms-drbd-metrics.timer':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0644',
+    source => 'puppet:///modules/role/cms-ha/cms-drbd-metrics.timer',
+    notify => Exec['cms-drbd-metrics-daemon-reload'],
+  }
+
+  exec { 'cms-drbd-metrics-daemon-reload':
+    command     => '/bin/systemctl daemon-reload',
+    refreshonly => true,
+    before      => Service['cms-drbd-metrics.timer'],
+  }
+
+  service { 'cms-drbd-metrics.timer':
+    ensure  => running,
+    enable  => true,
     require => [
       File['/usr/local/bin/cms-drbd-metrics.sh'],
       File['/var/lib/prometheus/node-exporter'],
+      File['/etc/systemd/system/cms-drbd-metrics.service'],
+      File['/etc/systemd/system/cms-drbd-metrics.timer'],
+      Exec['cms-drbd-metrics-daemon-reload'],
     ],
+  }
+
+  # Earlier revisions published from cron; remove the entry so an upgraded node
+  # does not also run the script every minute.
+  cron { 'cms-drbd-metrics':
+    ensure => absent,
   }
 
   # ---------------------------------------------------------------------------
