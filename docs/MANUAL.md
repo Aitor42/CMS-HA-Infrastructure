@@ -711,13 +711,14 @@ If MariaDB enters `CrashLoopBackOff`, see section 8.4.
 
 The following configurations were installed permanently and activate automatically on every boot without manual intervention:
 
-#### a) `drbd-cms-primary.service` (on `internal-master1`)
+#### a) `drbd-cms-boot.service` (on both masters)
 
-Location: `/etc/systemd/system/drbd-cms-primary.service`
+Location: `/etc/systemd/system/drbd-cms-boot.service` and
+`/usr/local/sbin/drbd-boot.sh` on `internal-master1` and `internal-master2`.
 
 ```ini
 [Unit]
-Description=Promote DRBD cms_data to Primary on master1
+Description=Resolve the DRBD cms_data role before k3s starts
 After=drbd.service network-online.target
 Wants=drbd.service network-online.target
 Before=k3s.service
@@ -725,18 +726,29 @@ Before=k3s.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c "drbdadm up all 2>/dev/null; sleep 3; drbdadm primary cms_data 2>/dev/null || true"
-ExecStartPost=/bin/bash -c "drbdadm status 2>/dev/null || true"
+Environment=PROMOTE=1        # 0 on internal-master2
+ExecStart=/usr/local/sbin/drbd-boot.sh
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-**Effect:** Ensures DRBD reaches `Primary/Secondary UpToDate` state before K3s attempts to schedule pods.
+**Effect:** brings the resource up and resolves its role before K3s starts. A
+node that reboots still carries its previous role in the DRBD metadata: after a
+power cut, a hypervisor crash or a fence, that role can be `Primary` even though
+the peer took over in the meantime. Attaching as `Primary` in that situation is
+a split brain (`after-sb-2pri disconnect` leaves two disconnected writers, and
+both watchdogs would mount the volume). The script therefore demotes and
+reconnects when it finds `Primary` with `cstate=StandAlone`, lets
+`after-sb-1pri discard-secondary` resync the disk from the peer, and only then
+promotes — and only `internal-master1`, and only if DRBD accepts (it refuses
+while the peer is `Primary`). The old promote-only `drbd-cms-primary.service` is
+removed and disabled by the deploy.
 
 ```bash
 # Verify the service status
-systemctl status drbd-cms-primary.service
+systemctl status drbd-cms-boot.service
+journalctl -u drbd-cms-boot.service -b
 ```
 
 #### b) MariaDB Data Directory Guarantee (`tmpfiles.d`)
@@ -831,7 +843,7 @@ WantedBy=multi-user.target
   - Reassigns Kubernetes label `drbd-status=primary` to the local node.
   - Triggers reschedule of the MariaDB StatefulSet pod to the active storage node.
 - **Autonomous Recovery & Split-Brain Healing:**
-  - When the offline master node powers back on, DRBD kernel handlers (`after-sb-1pri discard-secondary`) automatically resynchronize block differences.
+  - When the offline master node powers back on, `drbd-cms-boot.service` stands it down if its metadata still says `Primary` while the peer also holds `Primary` (`cstate=StandAlone`), then reconnects so DRBD kernel handlers (`after-sb-1pri discard-secondary`) resynchronise block differences. The restarted node ends up as the Secondary; it is checked by the failover test (both the graceful and the hard power-cut scenario).
   - The watchdog on the Secondary master node ensures `/mnt/data/mariadb` is unmounted and clears any stale `drbd-status=primary` labels from Kubernetes.
 
 ```bash

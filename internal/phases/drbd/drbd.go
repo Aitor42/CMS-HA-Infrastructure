@@ -211,9 +211,25 @@ fi
 		}
 	}
 
-	logging.Info("Deploying DRBD boot-time service and tmpfiles on Master 1...")
-	primaryService := `[Unit]
-Description=Promote DRBD cms_data to Primary on master1
+	logging.Info("Deploying DRBD boot-time role resolution on both masters...")
+	bootScript, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-boot.sh")
+	if err != nil {
+		return fmt.Errorf("failed to read drbd-boot.sh template: %w", err)
+	}
+	// This unit is the only thing that promotes on boot. It resolves a stale
+	// Primary (power cut, hypervisor crash, fence) before k3s starts, so a node
+	// that restarts while its peer is primary comes back as Secondary instead of
+	// becoming a second writer. Master 1 is the designated primary; master 2
+	// only resolves its role and never promotes itself.
+	for _, m := range []struct {
+		node    config.NodeDetail
+		promote int
+	}{{master1, 1}, {master2, 0}} {
+		if err := p.pool.CopyContent(ctx, m.node.IP, bootScript, "/usr/local/sbin/drbd-boot.sh", 0755); err != nil {
+			return fmt.Errorf("failed to deploy drbd-boot.sh to %s: %w", m.node.IP, err)
+		}
+		unit := fmt.Sprintf(`[Unit]
+Description=Resolve the DRBD cms_data role before k3s starts
 After=drbd.service network-online.target
 Wants=drbd.service network-online.target
 Before=k3s.service
@@ -221,17 +237,23 @@ Before=k3s.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c "drbdadm up all 2>/dev/null; sleep 3; drbdadm primary cms_data 2>/dev/null || true"
-ExecStartPost=/bin/bash -c "drbdadm status 2>/dev/null || true"
+Environment=PROMOTE=%d
+ExecStart=/usr/local/sbin/drbd-boot.sh
 
 [Install]
 WantedBy=multi-user.target
-`
-	if err := p.pool.CopyContent(ctx, master1.IP, []byte(primaryService), "/etc/systemd/system/drbd-cms-primary.service", 0644); err != nil {
-		logging.Warn("Failed to upload drbd-cms-primary.service: %v", err)
-	} else {
-		if _, _, _, err := p.pool.RunCommand(ctx, master1.IP, "systemctl daemon-reload && systemctl enable drbd-cms-primary.service"); err != nil {
-			return fmt.Errorf("failed to enable drbd-cms-primary.service on %s: %w", master1.IP, err)
+`, m.promote)
+		if err := p.pool.CopyContent(ctx, m.node.IP, []byte(unit), "/etc/systemd/system/drbd-cms-boot.service", 0644); err != nil {
+			logging.Warn("Failed to upload drbd-cms-boot.service to %s: %v", m.node.IP, err)
+			continue
+		}
+		// Retire the old promote-only unit: if both were enabled the old one
+		// could promote before the stale-Primary guard had run.
+		cmd := "systemctl disable --now drbd-cms-primary.service 2>/dev/null; " +
+			"rm -f /etc/systemd/system/drbd-cms-primary.service; " +
+			"systemctl daemon-reload && systemctl enable drbd-cms-boot.service"
+		if _, _, _, err := p.pool.RunCommand(ctx, m.node.IP, cmd); err != nil {
+			return fmt.Errorf("failed to enable drbd-cms-boot.service on %s: %w", m.node.IP, err)
 		}
 	}
 
