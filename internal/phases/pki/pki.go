@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -185,6 +187,21 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 
 	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
 	certBytes := []byte(caCert)
+
+	// Leave a copy where the unprivileged deploy account can read it. The
+	// traffic phase mounts it into the k6 container so the load test verifies
+	// the lab's certificate chain instead of skipping TLS verification.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dir := filepath.Join(home, ".cms-ha")
+		certPath := filepath.Join(dir, "cms_root_ca.crt")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			logging.Warn("Could not create %s for the root CA copy: %v", dir, err)
+		} else if err := os.WriteFile(certPath, certBytes, 0o644); err != nil {
+			logging.Warn("Could not save the root CA to %s: %v", certPath, err)
+		} else {
+			logging.Info("Root CA copy for the load test: %s", certPath)
+		}
+	}
 	for _, ip := range allIPs {
 		nodeIP := ip
 		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {

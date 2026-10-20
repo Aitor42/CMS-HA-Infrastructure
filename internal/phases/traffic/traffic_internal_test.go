@@ -1,6 +1,8 @@
 package traffic
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -72,8 +74,8 @@ func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
 			t.Errorf("args missing %q\nfull: %s", want, joined)
 		}
 	}
-	if strings.Contains(joined, "--insecure") {
-		t.Errorf("--insecure must not be set when a CA is mounted: %s", joined)
+	if strings.Contains(joined, "insecure-skip-tls-verify") {
+		t.Errorf("TLS verification must not be skipped when a CA is mounted: %s", joined)
 	}
 	if !strings.HasSuffix(joined, " -") {
 		t.Errorf("script must be read from stdin (trailing '-'): %s", joined)
@@ -89,16 +91,38 @@ func TestBuildArgs_NoCASkipsTLSVerification(t *testing.T) {
 	})
 	joined := strings.Join(args, " ")
 
-	if !strings.Contains(joined, "run --insecure") && !strings.Contains(joined, "run --insecure ") {
-		// --insecure must immediately follow `k6 run`.
-		if !strings.Contains(joined, "run --insecure --vus 5") {
-			t.Errorf("expected --insecure right after `run`: %s", joined)
-		}
+	// k6 removed the bare `--insecure` flag; the load test must use the
+	// documented `--insecure-skip-tls-verify`, right after `k6 run`.
+	if !strings.Contains(joined, "run --insecure-skip-tls-verify --vus 5") {
+		t.Errorf("expected --insecure-skip-tls-verify right after `run`: %s", joined)
 	}
 	if strings.Contains(joined, "SSL_CERT_FILE") {
 		t.Errorf("no CA should be mounted: %s", joined)
 	}
 	if strings.Contains(joined, "experimental-prometheus-rw") {
 		t.Errorf("no remote-write output when prometheus_rw_url is empty: %s", joined)
+	}
+}
+
+// TestFirstExistingFile covers the CA lookup the load test performs before it
+// mounts the certificate into the k6 container: the home copy the PKI phase
+// leaves for the unprivileged account must be used when it is there, and a
+// missing CA must fall through to skipping verification instead of failing.
+func TestFirstExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "present.crt")
+	if err := os.WriteFile(present, []byte("cert"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.crt")
+
+	if got := firstExistingFile([]string{missing, present}); got != present {
+		t.Errorf("firstExistingFile = %q, want %q", got, present)
+	}
+	if got := firstExistingFile([]string{missing}); got != "" {
+		t.Errorf("firstExistingFile with no match = %q, want empty", got)
+	}
+	if got := firstExistingFile(nil); got != "" {
+		t.Errorf("firstExistingFile(nil) = %q, want empty", got)
 	}
 }

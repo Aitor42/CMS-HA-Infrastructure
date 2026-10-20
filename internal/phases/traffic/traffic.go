@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,13 +22,42 @@ import (
 const (
 	// k6ScriptPath is the embedded k6 profile executed against the CMS.
 	k6ScriptPath = "templates/traffic/cms-smoke.js"
-	// hostCACertPath is the lab root CA installed by the PKI phase on the
-	// hypervisor. When present it is mounted into the k6 container so TLS is
+	// hostCACertPath is the lab root CA installed system-wide by the PKI
+	// phase. When present it is mounted into the k6 container so TLS is
 	// verified instead of skipped.
 	hostCACertPath = "/usr/local/share/ca-certificates/cms_root_ca.crt"
+	// hostCACertCopy is the copy the PKI phase leaves under the deploy
+	// account's HOME, which is readable without root.
+	hostCACertCopy = ".cms-ha/cms_root_ca.crt"
 	// containerCACert is the mount point of the root CA inside the container.
 	containerCACert = "/certs/cms_root_ca.crt"
 )
+
+// findHostCACert returns the first existing copy of the lab root CA, or "" when
+// the PKI phase has not run on this host.
+func findHostCACert() string {
+	return firstExistingFile(hostCACertCandidates())
+}
+
+// hostCACertCandidates lists the places the PKI phase may have left the root
+// CA, most privileged first.
+func hostCACertCandidates() []string {
+	candidates := []string{hostCACertPath}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, hostCACertCopy))
+	}
+	return candidates
+}
+
+// firstExistingFile returns the first path that exists, or "".
+func firstExistingFile(paths []string) string {
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
 
 // Options configuration for the traffic test.
 type Options struct {
@@ -141,7 +171,9 @@ func buildArgs(image string, r k6Run) []string {
 	if r.caCert == "" {
 		// No CA to mount: fall back to skipping TLS verification; the
 		// `cms-ha verify` command still asserts the certificate chain.
-		args = append(args, "--insecure")
+		// The flag is `--insecure-skip-tls-verify`: bare `--insecure` was
+		// removed from k6 long ago and only produced "unknown flag".
+		args = append(args, "--insecure-skip-tls-verify")
 	}
 	args = append(args, "--vus", strconv.Itoa(r.vus), "--duration", fmt.Sprintf("%ds", r.duration))
 	if r.rwURL != "" {
@@ -164,11 +196,9 @@ func (t *Traffic) runK6(ctx context.Context, baseURL string, script []byte) erro
 		image = t.cfg.K6Image()
 	}
 
-	caCert := ""
-	if _, statErr := os.Stat(hostCACertPath); statErr == nil {
-		caCert = hostCACertPath
-	} else if t.opts.Verbose {
-		logging.Warn("Root CA %s not found; k6 will skip TLS verification", hostCACertPath)
+	caCert := findHostCACert()
+	if caCert == "" && t.opts.Verbose {
+		logging.Warn("No copy of the lab root CA found; k6 will skip TLS verification")
 	}
 
 	args := buildArgs(image, k6Run{
