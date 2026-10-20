@@ -117,8 +117,13 @@ while true; do
       # Verify MariaDB pod is scheduled on this node
       CURRENT_POD_NODE=$(kubectl get pod mariadb-0 -n cms --request-timeout=3s -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
       if [ -n "$CURRENT_POD_NODE" ] && [ "$CURRENT_POD_NODE" != "$LOCAL_NODE" ]; then
-        log "MariaDB pod currently scheduled on non-primary node ($CURRENT_POD_NODE). Rescheduling to $LOCAL_NODE..."
-        kubectl delete pod mariadb-0 -n cms --request-timeout=3s 2>/dev/null || true
+        # A graceful delete is not enough: the pod object stays in Terminating
+        # while its old node is unreachable, and the StatefulSet cannot create
+        # the replacement until the object is gone. The peer was fenced off
+        # before this node was promoted, so a forced delete cannot split the
+        # volume and is what actually moves the database here.
+        log "MariaDB pod scheduled on non-primary node ($CURRENT_POD_NODE). Force-deleting it so it can reschedule to $LOCAL_NODE..."
+        kubectl delete pod mariadb-0 -n cms --force --grace-period=0 --request-timeout=3s 2>/dev/null || true
       fi
     fi
 

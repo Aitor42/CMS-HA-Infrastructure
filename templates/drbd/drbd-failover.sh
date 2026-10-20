@@ -47,9 +47,20 @@ case "${1:-status}" in
         kubectl label node "$PEER_NODE" drbd-status- 2>/dev/null || true
       fi
 
-      # Trigger pod reschedule to the new Primary node
+      # Trigger pod reschedule to the new Primary node.
+      #
+      # A pod that lived on the failed node stays in Terminating until that
+      # node's kubelet confirms the deletion, and a dead kubelet never does.
+      # A StatefulSet must see its old pod object disappear before it creates
+      # the replacement, so a graceful delete here leaves the database down
+      # until the failed node comes back. The peer was fenced off before this
+      # script ran, so nothing is writing the volume and a forced delete is
+      # safe: it lets the StatefulSet recreate the pod on the new Primary.
       echo "  [+] Ensuring MariaDB runs on new Primary..."
-      kubectl delete pod mariadb-0 -n cms 2>/dev/null || true
+      POD_NODE=$(kubectl get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+      if [ -n "$POD_NODE" ] && [ "$POD_NODE" != "$LOCAL_NODE" ]; then
+        kubectl delete pod mariadb-0 -n cms --force --grace-period=0 --request-timeout=10s 2>/dev/null || true
+      fi
       kubectl scale statefulset mariadb -n cms --replicas=1 2>/dev/null || true
     fi
 

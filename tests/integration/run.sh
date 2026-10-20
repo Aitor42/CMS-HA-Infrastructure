@@ -4,9 +4,10 @@
 #
 # This is the entry point of the "Integration (KVM lab)" workflow: it deploys
 # the whole lab, verifies it and runs the DRBD failover chaos exercise. It has
-# to run on the hypervisor itself, because the orchestrator talks to libvirt and
-# SSHes into the VMs — that is why CI uses a self-hosted runner labelled `kvm`
-# and never a GitHub-hosted runner.
+# to run on a hypervisor with libvirt access, because the orchestrator manages
+# the VMs directly and SSHes into them: CI runs it on the self-hosted `kvm`
+# runner for the full topology, and on a GitHub-hosted runner where a smaller
+# topology has already been provisioned (SKIP_VM_CREATE=1).
 #
 # Usage:
 #   tests/integration/run.sh [--resume] [--skip-deploy] [--skip-chaos] [--with-traffic] [--dry-run]
@@ -126,7 +127,7 @@ fi
 # ── Verify ─────────────────────────────────────────────────────────────────
 if [ "$EXIT_CODE" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   log "Verifying the infrastructure"
-  if ./cms-ha -c "$CONFIG" verify | tee "$ARTIFACTS_DIR/verify.log"; then
+  if ./cms-ha -c "$CONFIG" verify 2>&1 | tee "$ARTIFACTS_DIR/verify.log"; then
     log "Verification passed"
   else
     fail "verification failed"
@@ -142,7 +143,7 @@ if [ "$EXIT_CODE" -eq 0 ] && [ "$WITH_TRAFFIC" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; 
   log "Generating k6 load against the CMS (${TRAFFIC_DURATION}s, ${TRAFFIC_VUS} VUs)"
   if ./cms-ha -c "$CONFIG" traffic --external \
       --duration "$TRAFFIC_DURATION" --concurrency "$TRAFFIC_VUS" \
-      | tee "$ARTIFACTS_DIR/traffic.log"; then
+      2>&1 | tee "$ARTIFACTS_DIR/traffic.log"; then
     log "Traffic test passed"
   else
     fail "traffic test failed"
@@ -153,7 +154,8 @@ fi
 # ── Chaos: DRBD failover ───────────────────────────────────────────────────
 if [ "$EXIT_CODE" -eq 0 ] && [ "$SKIP_CHAOS" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   log "Running the DRBD failover chaos exercise"
-  if ./cms-ha -c "$CONFIG" test failover | tee "$ARTIFACTS_DIR/failover.log"; then
+  # stderr carries the FAIL verdict (logging.Error), so it must be captured too.
+  if ./cms-ha -c "$CONFIG" test failover 2>&1 | tee "$ARTIFACTS_DIR/failover.log"; then
     log "Failover exercise passed"
   else
     fail "failover exercise failed"

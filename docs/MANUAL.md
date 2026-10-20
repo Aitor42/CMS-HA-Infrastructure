@@ -604,7 +604,9 @@ tar -czf wp-files-backup.tar.gz --exclude='wp-content/uploads' /var/www/html/
 
 > **Note (June 2026 update):** The MariaDB data directory (`/mnt/data/mariadb`) resides directly on the replicated DRBD device (`/dev/drbd0`). The initial incompatibility between InnoDB and the DRBD+qcow2 virtual block backend under `io_uring` was successfully resolved by applying a custom MariaDB ConfigMap that disables native AIO (`innodb_use_native_aio=0`) and forces `fsync` for page flushing. Therefore, the volume is mounted on the active Primary node at all times, ensuring synchronous replication.
 
-If `internal-master1` goes down completely, the MariaDB pod will enter `Unknown` state. Manual recovery steps:
+If `internal-master1` goes down completely, the MariaDB pod on it becomes unreachable and the DRBD watchdog on `internal-master2` takes over automatically: it fences the failed domain, promotes DRBD, mounts the replicated volume, moves the `drbd-status=primary` label and force-deletes the zombie pod so the StatefulSet recreates it on the surviving master. Nothing needs to be done by hand, and the pod cannot simply be deleted gracefully: while the old node is unreachable the pod object stays in `Terminating` and the StatefulSet will not create a replacement.
+
+If that automated path ever fails, the manual fallback is:
 ```bash
 # 1. Check cluster status from master2
 ssh ubuntu@192.168.10.12 'sudo -H kubectl get nodes; sudo -H kubectl get pods -n cms'

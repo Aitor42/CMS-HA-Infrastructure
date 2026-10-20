@@ -137,10 +137,10 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	// on the dead node and would pass without any failover at all, so the node
 	// it is scheduled on is part of the assertion. The window has to cover the
 	// DRBD ping timeout and its strikes, the fence action, the promote, the node
-	// label, the pod reschedule and the container start — and, if the pod object
-	// survives the guest's shutdown, the node controller's taint-based eviction
-	// (300s by default). It is generous on purpose: a slow-but-correct failover
-	// must not be recorded as a broken one.
+	// label, the forced deletion of the pod stranded on the dead node, the pod
+	// reschedule and the container start (which may have to pull the MariaDB
+	// image on a master that never ran it). It is generous on purpose: a
+	// slow-but-correct failover must not be recorded as a broken one.
 	mariadbRunning := waitFor(ctx, 480*time.Second, 5*time.Second, func() bool {
 		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP,
 			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
@@ -151,7 +151,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	})
 	if !mariadbRunning {
 		pass = false
-		logging.Warn("MariaDB pod did not come back Running on %s", master2.Name)
+		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running on %s", master2.Name))
 	}
 
 	// Only then check the CMS: every WordPress request needs the database, so
@@ -161,6 +161,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the database recovered")
+		f.logFailoverDiagnostics(ctx, "CMS frontend not reachable after the DRBD failover")
 	}
 
 	if !opts.SkipRestore {
@@ -203,6 +204,7 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200/301/302 after cms1 shutdown")
+		f.logFailoverDiagnostics(ctx, "CMS frontend not reachable after the frontend failover")
 	}
 
 	if !opts.SkipRestore {
@@ -250,12 +252,14 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	}) {
 		pass = false
 		logging.Warn("MariaDB pod is not Running after worker1 was shut down")
+		f.logFailoverDiagnostics(ctx, "MariaDB pod is not Running after the worker failover")
 	}
 	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
 		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on the Load Balancer VIP after worker1 was shut down")
+		f.logFailoverDiagnostics(ctx, "CMS frontend not reachable after the worker failover")
 	}
 
 	if !opts.SkipRestore {
@@ -278,6 +282,30 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-time.After(d):
 		return true
 	}
+}
+
+// logFailoverDiagnostics dumps the surviving cluster's view into the log when a
+// scenario fails. Without it a failure only reports that a wait expired, which
+// says nothing about why: a pod stuck Terminating on the dead node, a node that
+// never became Ready, DRBD not promoted, or the replicated volume not mounted
+// all look identical from the assertion. The first master that answers is used
+// because during scenario 1 the primary master is the one that was shut down.
+func (f *FailoverTester) logFailoverDiagnostics(ctx context.Context, reason string) {
+	const cmd = "kubectl --request-timeout=10s get nodes 2>&1; " +
+		"kubectl --request-timeout=10s get pods -n cms -o wide 2>&1; " +
+		"echo -n 'mariadb-0: '; kubectl --request-timeout=10s get pod mariadb-0 -n cms " +
+		"-o jsonpath='{.metadata.deletionTimestamp} node={.spec.nodeName} phase={.status.phase}' 2>&1; echo; " +
+		"drbdadm status cms_data 2>&1; " +
+		"findmnt -n -o TARGET,SOURCE,FSTYPE /mnt/data/mariadb 2>&1"
+	for _, master := range f.cfg.Nodes.Masters {
+		out, _, _, err := f.ssh.RunCommand(ctx, master.IP, cmd)
+		if err != nil {
+			continue
+		}
+		logging.Warn("%s\n%s", reason, strings.TrimSpace(out))
+		return
+	}
+	logging.Warn("%s (diagnostics unavailable: no master accepted a command)", reason)
 }
 
 func (f *FailoverTester) printSummary(name string, pass bool, duration time.Duration) {
