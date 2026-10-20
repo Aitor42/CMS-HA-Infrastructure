@@ -246,7 +246,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-cms-infra" },
-          "expr": "histogram_quantile(0.95, sum by (instance, le) (rate(probe_duration_seconds_bucket{job=\"blackbox\"}[5m])))",
+          "expr": "quantile_over_time(0.95, probe_duration_seconds{job=\"blackbox\"}[5m])",
           "legendFormat": "p95 {{instance}}",
           "refId": "A"
         }
