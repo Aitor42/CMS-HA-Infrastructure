@@ -102,7 +102,37 @@ jobs:
       - name: Install the hypervisor stack
         run: |
           set -x
-          sudo apt-get update -qq
+          # The runner image ships third-party APT sources (Microsoft, Azure
+          # CLI, Docker...) that periodically stop refreshing — a 403 or an
+          # unsigned InRelease there aborts `apt-get update`, and with it the
+          # hypervisor install, even though nothing this job needs comes from
+          # them. Disable only the sources apt cannot fetch and retry; a
+          # genuine Ubuntu archive outage still fails the step, as it should.
+          updated=0
+          for attempt in 1 2 3; do
+            if sudo apt-get update -qq 2>/tmp/apt-update.err; then
+              updated=1
+              break
+            fi
+            echo "::warning::apt-get update failed (attempt $attempt)"
+            cat /tmp/apt-update.err
+            hosts=$(grep -hoE 'https?://[^/ ]+' /tmp/apt-update.err \
+              | sed -E 's|https?://||' | sort -u || true)
+            if [ -z "$hosts" ]; then
+              break
+            fi
+            for host in $hosts; do
+              sudo grep -rlsF "$host" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null |
+                while read -r src; do
+                  echo "::warning::disabling $src: $host cannot be reached"
+                  sudo sed -i -E 's/^[^#[:space:]]/#&/' "$src"
+                done
+            done
+          done
+          if [ "$updated" -ne 1 ]; then
+            echo "::error::apt-get update failed and no unreachable third-party source could be disabled"
+            exit 1
+          fi
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virtinst \
             xorriso dnsmasq-base bridge-utils openssh-server python3-yaml >/dev/null
