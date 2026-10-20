@@ -300,7 +300,7 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 }
 
 func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts) bool {
-	logging.Info("Scenario 2: CMS Frontend Failover")
+	logging.Info("Scenario 3: CMS Frontend Failover")
 	start := time.Now()
 	pass := true
 
@@ -343,7 +343,7 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 }
 
 func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts FailoverOpts) bool {
-	logging.Info("Scenario 3: K3s Worker Failover")
+	logging.Info("Scenario 4: K3s Worker Failover")
 	start := time.Now()
 	pass := true
 
