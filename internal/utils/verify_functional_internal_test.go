@@ -1,6 +1,10 @@
 package utils
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
+)
 
 func TestFirstAssetPath(t *testing.T) {
 	tests := []struct {
@@ -244,5 +248,51 @@ func TestShellQuote(t *testing.T) {
 		if got := shellQuote(tt.in); got != tt.want {
 			t.Errorf("shellQuote(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestDashboardUIDFromURL(t *testing.T) {
+	tests := map[string]string{
+		"/d/default-home-dashboard/cms-ha-e28094-drbd-etcd-lb-overview": "default-home-dashboard",
+		"/d/cms-ha-overview/ha":                                "cms-ha-overview",
+		"http://192.168.10.20:3000/d/default-home-dashboard/x": "default-home-dashboard",
+		"/":           "",
+		"/dashboards": "",
+		"/d/only-uid": "only-uid",
+		"":            "",
+	}
+	for in, want := range tests {
+		if got := dashboardUIDFromURL(in); got != want {
+			t.Errorf("dashboardUIDFromURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCheckHomeDashboard(t *testing.T) {
+	shipped, err := dashboards.Load()
+	if err != nil {
+		t.Fatalf("load dashboards: %v", err)
+	}
+	home, ok := dashboards.Home(shipped)
+	if !ok {
+		t.Fatalf("no dashboard with uid %q", dashboards.HomeUID)
+	}
+
+	if err := checkHomeDashboard(home, shipped); err != nil {
+		t.Errorf("the HA overview must pass the home check: %v", err)
+	}
+
+	// Grafana's built-in welcome page: no graphs, so it must be rejected.
+	welcome := dashboards.Dashboard{Title: "Home"}
+	if err := checkHomeDashboard(welcome, shipped); err == nil {
+		t.Error("the welcome dashboard must not pass the home check")
+	}
+
+	// The right title with a different query is still the wrong dashboard.
+	edited := home
+	edited.Panels = append([]dashboards.Panel(nil), home.Panels...)
+	edited.Panels[0].Targets = []dashboards.Target{{RefID: "A", Expr: "up"}}
+	if err := checkHomeDashboard(edited, shipped); err == nil {
+		t.Error("a home dashboard with an edited panel must not pass")
 	}
 }

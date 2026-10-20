@@ -142,6 +142,17 @@ func Load() ([]Dashboard, error) {
 	return out, nil
 }
 
+// Home returns the dashboard Grafana is configured to open on and whether it is
+// part of the shipped set.
+func Home(ds []Dashboard) (Dashboard, bool) {
+	for _, d := range ds {
+		if d.UID == HomeUID {
+			return d, true
+		}
+	}
+	return Dashboard{}, false
+}
+
 // Queries returns every panel query with a human-readable origin, so a failing
 // gate can name the panel an operator would have to look at.
 type Query struct {

@@ -750,22 +750,96 @@ func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped
 	}
 
 	// First open in the browser: the HA overview, not the welcome page.
-	status, body, err = grafanaGET(ctx, monitorIP, "/api/dashboards/home")
-	if err != nil || status != http.StatusOK {
-		return "", fmt.Errorf("reading Grafana's home dashboard failed (HTTP %d): %v", status, err)
+	home, err := v.readHomeDashboard(ctx, monitorIP)
+	if err != nil {
+		return "", err
 	}
-	var home struct {
-		Dashboard dashboards.Dashboard `json:"dashboard"`
-	}
-	if err := json.Unmarshal(body, &home); err != nil {
-		return "", fmt.Errorf("unreadable Grafana home dashboard payload: %w", err)
-	}
-	if home.Dashboard.UID != dashboards.HomeUID {
-		return "", fmt.Errorf("grafana opens on %q instead of the HA overview (%s): set [dashboards] default_home_dashboard_path", home.Dashboard.Title, dashboards.HomeUID)
+	if err := checkHomeDashboard(home, shipped); err != nil {
+		return "", err
 	}
 
 	return fmt.Sprintf("datasource %s, %d dashboard(s) loaded, home = %s, %d panel queries",
-		datasource, len(shipped), home.Dashboard.Title, queries), nil
+		datasource, len(shipped), home.Title, queries), nil
+}
+
+// readHomeDashboard asks Grafana which page `/` opens on. The endpoint answers
+// with the dashboard inline (`{"dashboard": {...}}`) when it serves a static
+// home file, and with a redirect (`{"redirectUri": "/d/<uid>/<slug>"}`) when the
+// home dashboard is a saved dashboard (the shape Grafana 13 returns). Both are
+// resolved to the dashboard they point at, so the check asks the same question
+// whichever shape the installed Grafana uses.
+func (v *Verifier) readHomeDashboard(ctx context.Context, monitorIP string) (dashboards.Dashboard, error) {
+	status, body, err := grafanaGET(ctx, monitorIP, "/api/dashboards/home")
+	if err != nil || status != http.StatusOK {
+		return dashboards.Dashboard{}, fmt.Errorf("reading Grafana's home dashboard failed (HTTP %d): %v", status, err)
+	}
+
+	var home struct {
+		RedirectURI string               `json:"redirectUri"`
+		Dashboard   dashboards.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(body, &home); err != nil {
+		return dashboards.Dashboard{}, fmt.Errorf("unreadable Grafana home dashboard payload: %w", err)
+	}
+	if home.RedirectURI == "" {
+		return home.Dashboard, nil
+	}
+
+	uid := dashboardUIDFromURL(home.RedirectURI)
+	if uid == "" {
+		return dashboards.Dashboard{}, fmt.Errorf("grafana's home dashboard redirect %q is not a /d/<uid>/<slug> URL", home.RedirectURI)
+	}
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/dashboards/uid/"+url.PathEscape(uid))
+	if err != nil || status != http.StatusOK {
+		return dashboards.Dashboard{}, fmt.Errorf("resolving the home dashboard %q (uid %s) failed (HTTP %d): %v", home.RedirectURI, uid, status, err)
+	}
+	var payload struct {
+		Dashboard dashboards.Dashboard `json:"dashboard"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return dashboards.Dashboard{}, fmt.Errorf("unreadable home dashboard %q payload: %w", uid, err)
+	}
+	return payload.Dashboard, nil
+}
+
+// dashboardUIDFromURL extracts the uid from a Grafana dashboard URL
+// (/d/<uid>/<slug>).
+func dashboardUIDFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "d" {
+		return parts[1]
+	}
+	return ""
+}
+
+// checkHomeDashboard asserts that the page Grafana serves at `/` is the HA
+// overview with the shipped panels, not the built-in welcome dashboard.
+func checkHomeDashboard(home dashboards.Dashboard, shipped []dashboards.Dashboard) error {
+	want, ok := dashboards.Home(shipped)
+	if !ok {
+		return fmt.Errorf("the shipped dashboards do not include the home dashboard %q", dashboards.HomeUID)
+	}
+	if home.Title != want.Title {
+		return fmt.Errorf("grafana opens on %q instead of %q: set [dashboards] default_home_dashboard_path", home.Title, want.Title)
+	}
+	if len(home.Panels) != len(want.Panels) {
+		return fmt.Errorf("the home dashboard %q exposes %d panel(s) but %d ship with it", home.Title, len(home.Panels), len(want.Panels))
+	}
+
+	wantQueries := make(map[string]string, len(want.Panels))
+	for _, p := range want.Panels {
+		wantQueries[p.Title] = panelQueries(p)
+	}
+	for _, p := range home.Panels {
+		if got, ok := wantQueries[p.Title]; !ok || got != panelQueries(p) {
+			return fmt.Errorf("the home dashboard %q panel %q does not match the shipped dashboard", home.Title, p.Title)
+		}
+	}
+	return nil
 }
 
 // panelQueries renders a panel's queries for comparison with the shipped file.
