@@ -133,6 +133,9 @@ func TestBackupManifests(t *testing.T) {
 			"backup-secret",
 			"rclone/rclone:",
 			"mariadb-install-db",
+			// The pod runs as root, so mariadbd needs the explicit opt-in;
+			// without it the drill aborts before restoring anything.
+			"--user=root",
 			"cms_backup_restore_last_success_timestamp_seconds",
 			"cms_backup_restore_duration_seconds",
 		} {

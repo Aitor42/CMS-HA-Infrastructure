@@ -100,8 +100,12 @@ spec:
                   mariadb-install-db --datadir=/tmp/mysqldata --auth-root-authentication-method=normal >/dev/null
 
                   echo "[$(date)] Starting ephemeral MariaDB..."
+                  # The pod runs as root (it writes the metric into the host
+                  # textfile directory), and mariadbd refuses to start as root
+                  # unless it is told explicitly to do so.
                   mariadbd --datadir=/tmp/mysqldata --socket=/tmp/mysqld.sock \
-                    --skip-networking --pid-file=/tmp/mysqld.pid >/tmp/mysqld.log 2>&1 &
+                    --skip-networking --pid-file=/tmp/mysqld.pid --user=root \
+                    >/tmp/mysqld.log 2>&1 &
                   READY=0
                   for _ in $(seq 1 60); do
                     if mariadb --socket=/tmp/mysqld.sock -e 'SELECT 1' >/dev/null 2>&1; then
