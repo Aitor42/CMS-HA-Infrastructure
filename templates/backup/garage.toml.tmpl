@@ -3,27 +3,34 @@
 # Single-node, single-replica Garage on the hypervisor. The data and metadata
 # directories live on a volume OUTSIDE the DRBD device (see backup.data_dir),
 # so a DRBD split-brain never takes the backup copies with it.
+#
+# The container runs on the host network: the S3 API binds the hypervisor's
+# internal bridge address directly (never the WAN), and the RPC, web and admin
+# APIs stay on loopback. Publishing the port with Docker instead is not enough:
+# a container on a bridge network is not reliably reachable from the lab's
+# libvirt guests (the backup CronJob got "connection refused" from the cluster
+# while the hypervisor itself could reach the store).
 metadata_dir = "/var/lib/garage/meta"
 data_dir = "/var/lib/garage/data"
 db_engine = "sqlite"
 
 replication_factor = 1
 
-rpc_bind_addr = "[::]:3901"
+rpc_bind_addr = "127.0.0.1:3901"
 rpc_public_addr = "127.0.0.1:3901"
 rpc_secret = "{{RPC_SECRET}}"
 
 [s3_api]
 s3_region = "{{S3_REGION}}"
-api_bind_addr = "[::]:{{S3_PORT}}"
+api_bind_addr = "{{S3_BIND_ADDR}}:{{S3_PORT}}"
 root_domain = ".s3.garage.internal"
 
 [s3_web]
-bind_addr = "[::]:3902"
+bind_addr = "127.0.0.1:3902"
 root_domain = ".web.garage.internal"
 index = "index.html"
 
 [admin]
-api_bind_addr = "[::]:3903"
+api_bind_addr = "127.0.0.1:3903"
 admin_token = "{{ADMIN_TOKEN}}"
 metrics_token = "{{METRICS_TOKEN}}"

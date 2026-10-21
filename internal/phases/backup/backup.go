@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -87,17 +88,11 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	cfgPath := filepath.Join(dataDir, "garage.toml")
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if err := p.writeGarageConfig(cfgPath); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return fmt.Errorf("failed to stat %s: %w", cfgPath, err)
-	} else {
-		logging.Info("Reusing existing Garage config at %s", cfgPath)
+	if err := p.ensureGarageConfig(cfgPath, hostIP, port); err != nil {
+		return err
 	}
 
-	if err := p.ensureContainer(ctx, runtime, hostIP, port, dataDir, cfgPath); err != nil {
+	if err := p.ensureContainer(ctx, runtime, dataDir, cfgPath); err != nil {
 		return err
 	}
 	if err := p.waitForS3(ctx, hostIP, port); err != nil {
@@ -167,6 +162,7 @@ func (p *Phase) writeGarageConfig(path string) error {
 		"{{ADMIN_TOKEN}}", adminToken,
 		"{{METRICS_TOKEN}}", metricsToken,
 		"{{S3_REGION}}", p.cfg.BackupS3Region(),
+		"{{S3_BIND_ADDR}}", p.cfg.HypervisorIP(),
 		"{{S3_PORT}}", strconv.Itoa(p.cfg.BackupS3Port()),
 	).Replace(string(tmpl))
 
@@ -177,20 +173,48 @@ func (p *Phase) writeGarageConfig(path string) error {
 	return nil
 }
 
+// ensureGarageConfig keeps the configuration in sync with the way the container
+// is run. A config written by an older deploy binds the S3 API on "[::]" inside
+// a bridge-networked container; such a store answers on the hypervisor but is
+// unreachable from the lab's guests, so the bind address is the marker that
+// tells us the config has to be regenerated.
+func (p *Phase) ensureGarageConfig(path, hostIP string, port int) error {
+	want := fmt.Sprintf("api_bind_addr = %q", net.JoinHostPort(hostIP, strconv.Itoa(port)))
+	content, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if strings.Contains(string(content), want) {
+			logging.Info("Reusing existing Garage config at %s", path)
+			return nil
+		}
+		logging.Warn("Regenerating %s: the S3 API is not bound on %s", path, net.JoinHostPort(hostIP, strconv.Itoa(port)))
+	case errors.Is(err, fs.ErrNotExist):
+		// First deploy: write it below.
+	default:
+		return fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	return p.writeGarageConfig(path)
+}
+
 // ensureContainer creates the Garage container, or reuses it when it already
-// runs the pinned image.
-func (p *Phase) ensureContainer(ctx context.Context, runtime, hostIP string, port int, dataDir, cfgPath string) error {
+// runs the pinned image on the host network.
+func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath string) error {
 	image := p.cfg.GarageImage()
 
-	// Single inspect call returns both fields, replacing three round-trips.
-	if out, err := p.output(ctx, runtime, "inspect", "-f", "{{.Config.Image}}|{{.State.Running}}", containerName); err == nil {
-		fields := strings.SplitN(strings.TrimSpace(out), "|", 2)
+	// Single inspect call returns the fields we need, replacing three
+	// round-trips.
+	if out, err := p.output(ctx, runtime, "inspect", "-f", "{{.Config.Image}}|{{.State.Running}}|{{.HostConfig.NetworkMode}}", containerName); err == nil {
+		fields := strings.SplitN(strings.TrimSpace(out), "|", 3)
 		current := strings.TrimSpace(fields[0])
 		running := ""
-		if len(fields) == 2 {
+		netMode := ""
+		if len(fields) > 1 {
 			running = strings.TrimSpace(fields[1])
 		}
-		if current == image {
+		if len(fields) > 2 {
+			netMode = strings.TrimSpace(fields[2])
+		}
+		if current == image && netMode == "host" {
 			if running == "true" {
 				logging.Info("Garage container %s is already running.", containerName)
 				return nil
@@ -201,20 +225,34 @@ func (p *Phase) ensureContainer(ctx context.Context, runtime, hostIP string, por
 			}
 			return nil
 		}
-		logging.Info("Garage image changed (%q -> %q); recreating container...", current, image)
+		if current == image {
+			logging.Info("Garage container %s uses %q networking; recreating it on the host network so the cluster can reach the S3 API", containerName, netMode)
+		} else {
+			logging.Info("Garage image changed (%q -> %q); recreating container...", current, image)
+		}
 		if _, err := p.output(ctx, runtime, "rm", "-f", containerName); err != nil {
 			return fmt.Errorf("failed to remove old Garage container: %w", err)
 		}
 	}
 
 	logging.Info("Creating Garage container from %s...", image)
-	args := []string{
+	if _, err := p.output(ctx, runtime, p.garageRunArgs(image, dataDir, cfgPath)...); err != nil {
+		return fmt.Errorf("failed to create Garage container: %w", err)
+	}
+	return nil
+}
+
+// garageRunArgs builds the `docker run` arguments. Garage runs on the host
+// network: garage.toml binds the S3 API on the hypervisor's internal bridge
+// address directly (never the WAN), so the store is reachable from the lab's
+// guests without relying on Docker's port-publishing DNAT across the libvirt
+// bridge, which the first backup drill proved does not work.
+func (p *Phase) garageRunArgs(image, dataDir, cfgPath string) []string {
+	return []string{
 		"run", "-d",
 		"--name", containerName,
 		"--restart", "unless-stopped",
-		// Publish the S3 API only on the hypervisor's internal address; the
-		// store must never be reachable from the WAN.
-		"-p", fmt.Sprintf("%s:%d:%d", hostIP, port, port),
+		"--network", "host",
 		"-v", fmt.Sprintf("%s:%s", dataDir, garageDataDir),
 		"-v", fmt.Sprintf("%s:%s:ro", cfgPath, garageConfigPath),
 		"-e", "GARAGE_DEFAULT_ACCESS_KEY=" + p.cfg.BackupAccessKey(),
@@ -223,10 +261,6 @@ func (p *Phase) ensureContainer(ctx context.Context, runtime, hostIP string, por
 		image,
 		"/garage", "server", "--single-node", "--default-bucket",
 	}
-	if _, err := p.output(ctx, runtime, args...); err != nil {
-		return fmt.Errorf("failed to create Garage container: %w", err)
-	}
-	return nil
 }
 
 // waitForS3 blocks until the S3 API answers (any HTTP status means it listens).

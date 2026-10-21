@@ -565,6 +565,14 @@ into a throwaway MariaDB instance, and validates that the WordPress schema was
 recovered (`wp_posts`, `wp_options`, `wp_users`). It records the restore time
 and duration as metrics.
 
+The store runs on the host network and binds the S3 API directly on the
+hypervisor's internal address (never the WAN); the other Garage APIs stay on
+loopback. Do not switch it back to Docker port publishing: the backup CronJob
+runs inside the cluster, and a published port is not reachable from the libvirt
+guests in the CI lab. `cms-ha verify` checks the endpoint from `internal-master1`
+(expects Garage's anonymous `403`) so a store that only answers on the
+hypervisor fails the deploy instead of the nightly backup.
+
 **Alerts.** Both jobs publish metrics through the node-exporter textfile
 collector:
 

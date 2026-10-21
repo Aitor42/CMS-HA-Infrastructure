@@ -126,6 +126,7 @@ func (v *Verifier) phase10(ctx context.Context) CheckResult {
 		func() e2eOutcome { return v.checkCMSFrontends(ctx) },
 		func() e2eOutcome { return v.checkLoadBalancers(ctx, vhost, lbIPs) },
 		func() e2eOutcome { return v.checkMariaDB(ctx) },
+		func() e2eOutcome { return v.checkBackupStore(ctx) },
 		func() e2eOutcome { return v.checkMonitoringProbes(ctx, promBase) },
 		func() e2eOutcome { return v.checkGrafanaProvisioning(ctx, monitorIP) },
 	}
@@ -520,6 +521,41 @@ func (v *Verifier) checkMariaDB(ctx context.Context) e2eOutcome {
 
 	o.pass = true
 	o.detail = fmt.Sprintf("NodePort %d open, wp_posts=%d, wp_options=%d, write round-trip ok", port, posts, options)
+	return o
+}
+
+// checkBackupStore proves the off-DRBD S3 store is reachable from the cluster,
+// not just from the hypervisor. The backup and restore CronJobs run inside the
+// cluster, so a Garage instance that only answers on the host itself passes the
+// backup phase's health check while every backup fails with "connection
+// refused" (which is exactly what the first run of the restore drill caught).
+func (v *Verifier) checkBackupStore(ctx context.Context) e2eOutcome {
+	o := e2eOutcome{label: "Backup store"}
+	if !v.cfg.BackupEnabled() {
+		o.pass = true
+		o.detail = "disabled"
+		return o
+	}
+	master, ok := firstMaster(v.cfg)
+	if !ok {
+		o.detail = "no master node with an address is configured"
+		return o
+	}
+	endpoint := v.cfg.BackupS3Endpoint()
+	// Garage answers an anonymous request with 403 Forbidden: reaching the S3
+	// API (and getting an answer from it) is the proof we want.
+	cmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -m 5 %s/", endpoint)
+	out, errOut, code, err := v.ssh.RunCommand(ctx, master.IP, cmd)
+	if err != nil || code != 0 {
+		o.detail = fmt.Sprintf("%s cannot reach %s (exit %d): %v %s", master.Name, endpoint, code, err, strings.TrimSpace(errOut))
+		return o
+	}
+	if status := strings.TrimSpace(out); status != "403" {
+		o.detail = fmt.Sprintf("%s got HTTP %q from %s (expected 403 from the S3 API)", master.Name, status, endpoint)
+		return o
+	}
+	o.pass = true
+	o.detail = fmt.Sprintf("%s reaches the S3 API at %s", master.Name, endpoint)
 	return o
 }
 

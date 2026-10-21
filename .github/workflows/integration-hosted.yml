@@ -392,11 +392,16 @@ jobs:
             echo "==== backup store (garage, off-DRBD) ===="
             docker ps -a --filter "name=cms-garage" \
               --format "{{.Names}} {{.Image}} {{.Status}}" 2>&1 || true
+            docker inspect -f 'network={{.HostConfig.NetworkMode}} ports={{json .HostConfig.PortBindings}}' \
+              cms-garage 2>&1 || true
             docker logs --tail 30 cms-garage 2>&1 || true
             sudo ls -ld /var/lib/cms-garage 2>&1 || true
             sudo ls -l /var/lib/cms-garage 2>&1 || true
             curl -s -o /dev/null -w "garage s3 endpoint: %{http_code}\n" -m 5 \
               http://192.168.10.254:3900/ 2>&1 || true
+            # Explains why Docker port publishing was not reachable from the
+            # guests (Garage now binds the internal address on the host network).
+            sysctl net.bridge.bridge-nf-call-iptables 2>&1 || true
 
             echo "==== neighbours on virbr-int ===="
             ip neigh show dev virbr-int 2>/dev/null || true

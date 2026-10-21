@@ -153,10 +153,22 @@ func TestBackupManifests(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read garage template: %v", err)
 		}
-		for _, want := range []string{"{{RPC_SECRET}}", "{{S3_PORT}}", "api_bind_addr", "data_dir"} {
+		for _, want := range []string{
+			"{{RPC_SECRET}}",
+			"{{S3_PORT}}",
+			"{{S3_BIND_ADDR}}",
+			`api_bind_addr = "{{S3_BIND_ADDR}}:{{S3_PORT}}"`,
+			"data_dir",
+		} {
 			if !strings.Contains(string(content), want) {
 				t.Errorf("garage.toml.tmpl is missing %q", want)
 			}
+		}
+		// The container runs on the host network, so a wildcard bind would
+		// expose the store on the WAN and a loopback-only bind would make it
+		// unreachable from the cluster.
+		if strings.Contains(string(content), `"[::]`) {
+			t.Error("garage.toml.tmpl binds a wildcard address; the store must bind the internal bridge")
 		}
 	})
 }

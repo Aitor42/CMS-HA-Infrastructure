@@ -60,10 +60,15 @@ hypervisor (`backup` phase), on a data volume under `backup.data_dir`
 (default `/var/lib/cms-garage`).
 
 - **Store:** Garage v2.4.1 (`dxflrs/garage`), single-node/`--default-bucket`,
-  S3 API published only on the hypervisor's internal address
-  (`192.168.10.254:3900`), never on the WAN. Deployed by
-  `internal/phases/backup/backup.go`; its `garage.toml` (with freshly generated
-  RPC/admin secrets) is written once and reused on later deploys.
+  running on the **host network** and bound to the hypervisor's internal
+  address (`192.168.10.254:3900`), never on the WAN; the RPC, web and admin
+  APIs stay on loopback. Host networking is deliberate: Docker's port
+  publishing is not reachable from the libvirt guests in the CI lab (the
+  backup CronJob got `connection refused` while the hypervisor itself could
+  reach the store), so the S3 API binds the bridge address directly. Deployed
+  by `internal/phases/backup/backup.go`; its `garage.toml` (with freshly
+  generated RPC/admin secrets) is written once and reused on later deploys
+  (a config from before host networking is regenerated).
 - **Dump + upload** (`mariadb-backup-cronjob.yaml`, daily 02:00):
   `mysqldump` writes a gzip dump to the local staging PVC, then an `rclone`
   container uploads it to the bucket and drops objects older than
