@@ -619,9 +619,10 @@ real:
   `cms_backup_restore_last_success_timestamp_seconds` series. A drill job that
   fails is reported with the Job, Pod and container logs.
 - **TLS renewal**: runs the production `cms-tls-renew.sh` on the backup
-  balancer with `RENEW_WITHIN=8760h`, so the CA is really contacted over mTLS
-  and the certificate is really rotated; it then checks that nginx is active and
-  the balancer answers HTTPS.
+  balancer with `RENEW_FORCE=1`, so the CA is really contacted over mTLS and
+  the certificate is really rotated (step rejects an `--expires-in` above the
+  certificate lifetime, so forcing is the deterministic path); it then checks
+  that nginx is active and the balancer answers HTTPS.
 - **Alert hygiene**: asserts that no alert is firing on the healthy lab, which
   catches rules that are permanently noisy or a stale backup/restore metric.
 

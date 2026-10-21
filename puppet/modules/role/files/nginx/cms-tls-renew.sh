@@ -16,10 +16,16 @@ CA_URL="https://ca.internal.local:8443"
 ROOT_CA=/usr/local/share/ca-certificates/cms_root_ca.crt
 CA_NAME="CMS Local CA"
 # Ask the CA for a renewal once fewer than this remains; the CA enforces the
-# actual minimum against the provisioner's configured durations. The e2e
-# renewal drill overrides it with a value longer than the certificate lifetime
-# so the CA is really contacted, without changing the production schedule.
-RENEW_WITHIN="${RENEW_WITHIN:-720h}"
+# actual minimum against the provisioner's configured durations.
+RENEW_WITHIN="720h"
+# The e2e renewal drill sets RENEW_FORCE=1 to rotate the certificate on demand.
+# step refuses an --expires-in value above the certificate lifetime ("must be
+# within (lower than) the certificate validity period"), so forcing is the only
+# deterministic way to exercise the CA path without waiting 60 days.
+RENEW_ARGS=(--expires-in "$RENEW_WITHIN")
+if [ "${RENEW_FORCE:-0}" = "1" ]; then
+  RENEW_ARGS=(--force)
+fi
 
 log() { echo "cms-tls-renew: $*"; }
 
@@ -38,7 +44,7 @@ if ! openssl x509 -in "$CERT" -noout -issuer 2>/dev/null | grep -q "$CA_NAME"; t
   exit 0
 fi
 
-out="$(step ca renew --expires-in "$RENEW_WITHIN" \
+out="$(step ca renew "${RENEW_ARGS[@]}" \
   --exec "systemctl reload nginx" \
   --ca-url "$CA_URL" --root "$ROOT_CA" \
   "$CERT" "$KEY" 2>&1)" && status=0 || status=$?

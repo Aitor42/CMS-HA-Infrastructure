@@ -155,9 +155,10 @@ func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool)
 	}
 
 	logging.Info("Drill: renewing the TLS certificate on %s", lb.Name)
-	// 8760h is longer than any configured lifetime, so `step ca renew` always
-	// considers the certificate due and performs the real mTLS renewal.
-	out, errOut, code, err := pool.RunCommand(ctx, lb.IP, "RENEW_WITHIN=8760h /usr/local/bin/cms-tls-renew.sh")
+	// RENEW_FORCE=1 makes the production script call `step ca renew --force`:
+	// step rejects an --expires-in above the certificate lifetime, so this is
+	// the only deterministic way to contact the CA and rotate the certificate.
+	out, errOut, code, err := pool.RunCommand(ctx, lb.IP, "RENEW_FORCE=1 /usr/local/bin/cms-tls-renew.sh")
 	combined := strings.TrimSpace(out + "\n" + errOut)
 	if err != nil || code != 0 {
 		return fmt.Errorf("TLS renewal failed on %s (exit %d): %v\n%s", lb.Name, code, err, combined)
