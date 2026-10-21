@@ -240,7 +240,7 @@ backup:
   garage_version: "v2.4.1"
   # Hypervisor directory for Garage data + metadata (outside the DRBD device).
   data_dir: "/var/lib/cms-garage"
-  # S3 API port, published on the hypervisor's internal address only.
+  # S3 API port, bound on the hypervisor's internal address only (host network).
   s3_port: 3900
   s3_region: "garage"
   bucket: "cms-backups"
