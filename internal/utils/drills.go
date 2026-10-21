@@ -141,10 +141,10 @@ func deleteJob(ctx context.Context, pool *ssh.Pool, host, name string) {
 	}
 }
 
-// runTLSRenewalDrill runs the production renewal script on a balancer with a
-// lowered threshold, so the CA is really contacted over mTLS and the
-// certificate is really rotated. The backup balancer is used so the VIP holder
-// keeps serving the current certificate while the drill runs.
+// runTLSRenewalDrill runs the production renewal script on a balancer in forced
+// mode, so the CA is really contacted over mTLS and the certificate is really
+// rotated. The backup balancer is used so the VIP holder keeps serving the
+// current certificate while the drill runs.
 func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool) error {
 	if len(cfg.Nodes.LBs) == 0 {
 		return fmt.Errorf("no load balancer is configured")
@@ -152,6 +152,15 @@ func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool)
 	lb := cfg.Nodes.LBs[len(cfg.Nodes.LBs)-1]
 	if lb.IP == "" {
 		return fmt.Errorf("load balancer %s has no address", lb.Name)
+	}
+
+	// Read the serial first: "the script exited 0" is not proof of a rotation,
+	// because step exits 0 when the certificate is not due. Comparing the
+	// serial proves that the CA issued a new certificate.
+	const serialCmd = "openssl x509 -in /etc/nginx/ssl/cms.crt -noout -serial"
+	before, errOut, code, err := pool.RunCommand(ctx, lb.IP, serialCmd)
+	if err != nil || code != 0 {
+		return fmt.Errorf("could not read the certificate serial on %s (exit %d): %v %s", lb.Name, code, err, strings.TrimSpace(errOut))
 	}
 
 	logging.Info("Drill: renewing the TLS certificate on %s", lb.Name)
@@ -163,8 +172,15 @@ func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool)
 	if err != nil || code != 0 {
 		return fmt.Errorf("TLS renewal failed on %s (exit %d): %v\n%s", lb.Name, code, err, combined)
 	}
-	if !strings.Contains(combined, "certificate renewed") {
+	if strings.Contains(combined, "not renewed") {
 		return fmt.Errorf("TLS renewal on %s did not rotate the certificate:\n%s", lb.Name, combined)
+	}
+	after, errOut, code, err := pool.RunCommand(ctx, lb.IP, serialCmd)
+	if err != nil || code != 0 {
+		return fmt.Errorf("could not read the certificate serial on %s after the renewal (exit %d): %v %s", lb.Name, code, err, strings.TrimSpace(errOut))
+	}
+	if strings.TrimSpace(before) == "" || strings.TrimSpace(before) == strings.TrimSpace(after) {
+		return fmt.Errorf("the certificate serial on %s did not change (%q): the renewal did not rotate the certificate\n%s", lb.Name, strings.TrimSpace(after), combined)
 	}
 	if _, _, code, err := pool.RunCommand(ctx, lb.IP, "systemctl is-active nginx"); err != nil || code != 0 {
 		return fmt.Errorf("nginx is not active on %s after the certificate renewal", lb.Name)

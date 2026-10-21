@@ -50,11 +50,14 @@ out="$(step ca renew "${RENEW_ARGS[@]}" \
   "$CERT" "$KEY" 2>&1)" && status=0 || status=$?
 echo "$out"
 
+# step exits 0 when the certificate is not due, so the "not renewed" check must
+# come first: otherwise the timer would log a renewal that never happened.
+if echo "$out" | grep -qi "not renewed"; then
+  log "certificate not due for renewal yet"
+  exit 0
+fi
+
 if [ "$status" -ne 0 ]; then
-  if echo "$out" | grep -qi "not renewed"; then
-    log "certificate not due for renewal yet"
-    exit 0
-  fi
   log "renewal failed"
   exit "$status"
 fi

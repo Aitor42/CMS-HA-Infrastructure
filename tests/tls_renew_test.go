@@ -38,4 +38,13 @@ func TestTLSRenewScript(t *testing.T) {
 	if strings.Contains(content, "8760h") {
 		t.Error("cms-tls-renew.sh uses an --expires-in above the certificate lifetime")
 	}
+
+	// step exits 0 when the certificate is not due, so "not renewed" must be
+	// handled before the exit-code branch or the timer would report a renewal
+	// that never happened.
+	notRenewed := strings.Index(content, `grep -qi "not renewed"`)
+	statusBranch := strings.Index(content, `if [ "$status" -ne 0 ]`)
+	if notRenewed < 0 || statusBranch < 0 || notRenewed > statusBranch {
+		t.Error("cms-tls-renew.sh must check \"not renewed\" before the exit-code branch")
+	}
 }
