@@ -62,6 +62,8 @@ server {
     ssl_certificate /etc/nginx/ssl/cms.crt;
     ssl_certificate_key /etc/nginx/ssl/cms.key;
 
+    client_max_body_size 32m;
+
     location / {
         proxy_pass http://cms_backend;
         proxy_set_header Host $host;
@@ -81,6 +83,13 @@ server {
   - DB_NAME: `wordpress`
   - DB_USER: `wp_user`
   - DB_HOST: `192.168.10.11:30306`
+- **PHP runtime:** the PHP 8.3 branch is pinned to the Ubuntu revision that
+  carries the fix for CVE-2026-109618 / CVE-2026-109619 (*"php2shell"*), and
+  the web server carries the mitigations the PHP team publishes for those
+  bugs. The request size is bounded at every layer — `client_max_body_size`
+  (nginx), `LimitRequestBody` (Apache) and `post_max_size` (PHP) — so a
+  single request can never ask PHP for more memory than the node has.
+  Details in `docs/SECURITY.md` § 4.
 
 ### Implementation
 
@@ -118,4 +127,14 @@ ssh ubuntu@192.168.10.15 "sudo -H exportfs -v && systemctl is-active nfs-kernel-
 # Verify shared uploads mount on CMS frontends
 ssh ubuntu@192.168.20.101 "mountpoint -q /var/www/html/wp-content/uploads && echo 'CMS1 NFS mounted'"
 ssh ubuntu@192.168.20.102 "mountpoint -q /var/www/html/wp-content/uploads && echo 'CMS2 NFS mounted'"
+
+# Verify the PHP runtime carries the fix for CVE-2026-109618 / CVE-2026-109619.
+# Ubuntu backports the upstream patch, so the Debian revision is what tells a
+# patched node from a vulnerable one (php -v keeps reporting 8.3.6).
+ssh ubuntu@192.168.20.101 "dpkg-query -W -f='\${Version}\n' php8.3-cli"
+ssh ubuntu@192.168.20.102 "dpkg-query -W -f='\${Version}\n' php8.3-cli"
+
+# Verify the mitigations the PHP team publishes for those CVEs are in place
+ssh ubuntu@192.168.20.101 "grep -E 'session.upload_progress.enabled' /etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini"
+ssh ubuntu@192.168.20.101 "grep -E 'php_admin_value memory_limit' /etc/apache2/conf-enabled/php-hardening.conf"
 ```

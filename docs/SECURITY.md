@@ -86,7 +86,56 @@ or newer, which clears GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`).
 
 ---
 
-## 4. Accepted risks
+## 4. PHP runtime patching (CVE-2026-109618 / CVE-2026-109619)
+
+On **2026-10-21** the PHP project published two unauthenticated remote code
+executions in the PHP core, tracked as **CVE-2026-109618** (memory corruption
+when an out-of-memory bailout interrupts a request) and **CVE-2026-109619**
+(stale global state left behind by a fatal error). The pair is known as
+*"php2shell"* and is rated **CVSS 9.2**. Every PHP that answers web requests
+is affected — PHP-FPM, Apache with `mod_php`, `php-cgi`, FrankenPHP and
+LiteSpeed — and the PHP team considers **`mod_php` the highest-risk setup**,
+because a single unauthenticated request can trigger the bug before any
+application code runs.
+
+The CMS frontends are exactly that setup: Apache 2.4 with `mod_php` serving
+WordPress, reachable through the nginx VIP.
+
+### The fix
+
+| Layer | What it does |
+|-------|--------------|
+| **Package (the fix)** | `role::cms_frontend` pins `php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3` to **≥ 8.3.6-0ubuntu0.24.04.13**, the Ubuntu Noble revision that carries `CVE-2026-109618_109619.patch`. Ubuntu backports the upstream patch instead of bumping the upstream version, so a patched node still answers `PHP 8.3.6`: the Debian revision is what tells the two apart. A guarded `apt-get update` (skipping the archive once the floor is satisfied) makes the patched release visible before the packages are resolved. |
+| **PHP ini** | `/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini` sets `session.upload_progress.enabled = Off`. The Apache SAPI reads it at startup, so it is in place *before* the request is parsed — the PHP team asks for exactly this, and not for `ini_set()` (too late) nor for a `.user.ini` (per request). It closes the session path CVE-2026-109619 was confirmed with. |
+| **Apache** | `/etc/apache2/conf-enabled/php-hardening.conf` sets `php_admin_value memory_limit -1` (removes the user-controllable out-of-memory bailout CVE-2026-109618 abuses — `php_admin_value` cannot be overridden by the application nor from `.htaccess`), `php_admin_flag session.upload_progress.enabled Off`, `php_admin_value post_max_size 32M`, `upload_max_filesize 16M` and `LimitRequestBody 33554432`. |
+| **nginx** | `client_max_body_size 32m` bounds the request at the proxy, so the same limit applies at every layer and a single request can never make PHP ask for more memory than the node has. |
+
+Only the package upgrade is the fix; the rest are the mitigations the PHP team
+and CERT-EU publish for the case where a node has not been patched yet.
+
+### Proving it
+
+`cms-ha verify` asks every frontend for its PHP package revision, for whether
+Apache loads `mod_php`, and for the mitigations, and **fails the phase** when
+the revision is older than the floor or a mitigation is missing
+(`internal/utils/verify_functional.go`, `checkPHPSecurityPatch`). The version
+comparison is delegated to `dpkg --compare-versions` on the node itself, so
+the answer follows Debian's own version rules.
+
+### Keeping it patched
+
+The floor lives in three places that have to move together when the next PHP
+security update lands:
+
+| Where | What to change |
+|-------|----------------|
+| `puppet/modules/role/manifests/cms_frontend.pp` | `$php_patched_version` |
+| `internal/utils/verify_functional.go` | `phpPatchedPackage` |
+| `docs/SOFTWARE_BASELINE.md` | the *PHP Engine* row |
+
+---
+
+## 5. Accepted risks
 
 These are known and tracked; each is either a deliberate trade-off or a
 follow-up that needs a live cluster to validate safely.
@@ -106,10 +155,19 @@ follow-up that needs a live cluster to validate safely.
 3. **fence SSH key** on the DRBD masters targets the hypervisor's **operator
    account** (not root) and is scoped to `virsh` lifecycle calls; it is a
    separate trust path from the VM deploy account.
+4. **`memory_limit = -1` on the frontends.** This is the mitigation the PHP
+   team asks for: a finite limit is exactly the out-of-memory bailout
+   CVE-2026-109618 abuses. The request size is bounded at every layer
+   (`client_max_body_size`, `LimitRequestBody`, `post_max_size`), so a request
+   cannot ask for more memory than the node has, and the kernel's own OOM
+   killer remains the last boundary if something does. The alternative — a
+   cgroup limit on `apache2.service` — was not adopted because a cgroup OOM
+   would stop the whole service instead of a single worker, which trades an
+   RCE for an outage on a 768 MB node.
 
 ---
 
-## 5. Configuring
+## 6. Configuring
 
 ```yaml
 ssh:
@@ -123,7 +181,7 @@ the Ansible inventory (`ansible_user` + `ansible_become`) and the SSH pool.
 
 ---
 
-## 6. Secrets management (SOPS / ExternalSecrets)
+## 7. Secrets management (SOPS / ExternalSecrets)
 
 SOPS and the ExternalSecrets operator were evaluated but are **not adopted** in
 the current design:

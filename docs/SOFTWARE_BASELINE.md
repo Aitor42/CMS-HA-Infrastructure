@@ -44,7 +44,7 @@ In a virtualised environment, device firmware selection is critical for compatib
 | **MariaDB** | 10.11.7 (LTS) | CMS relational database (K3s StatefulSet) | DRBD 9 Volume, libc6 | [MariaDB Foundation](https://mariadb.org/) | K3s cluster (replicated) |
 | **WordPress** | 6.5.2 | Content Management System (CMS) | PHP 8.3, Apache2, MySQL/MariaDB | [WordPress.org](https://wordpress.org/) | `main-cms1`, `main-cms2` |
 | **Apache HTTP Server** | 2.4.58 | Web server hosting WordPress | `libapache2-mod-php8.3`, OpenSSL | [Apache HTTP Server](https://httpd.apache.org/) | `main-cms1`, `main-cms2` |
-| **PHP Engine** | 8.3.6 | PHP code interpreter and execution engine | `php-mysql`, `php-curl`, `php-gd`, `php-zip` | [PHP Downloads](https://www.php.net/) | `main-cms1`, `main-cms2` |
+| **PHP Engine** | 8.3.6-0ubuntu0.24.04.13 (`noble-security`) | PHP code interpreter and execution engine | `php-mysql`, `php-curl`, `php-gd`, `php-zip` | [PHP Downloads](https://www.php.net/) | `main-cms1`, `main-cms2` |
 | **DRBD** | 9.2.8 | Synchronous network block-level replication | Linux kernel module `drbd.ko` | [LINBIT DRBD](https://linbit.com/) | `master1`, `master2` |
 | **drbd-utils** | 9.27.0 | DRBD management tools and CLI | `rpcbind`, `keyutils` | [LINBIT GitHub](https://github.com/LINBIT/) | `master1`, `master2` |
 | **Prometheus** | 2.45.3 | Time-series metrics collection engine | Static Go binaries | [Prometheus](https://prometheus.io/) | `internal-monitor` |
@@ -88,3 +88,4 @@ For the baseline to function consistently, the following system libraries and de
 2.  **System Patches**: All client nodes and the Jumpstart server apply the latest security patches from Ubuntu's `noble-security` repository during unattended installation.
 3.  **Virtualisation Firmware (SeaBIOS)**: Ensures non-UEFI VMs boot deterministically using legacy PXE bootstrap code (`pxelinux.0`) without requiring Secure Boot certificate management.
 4.  **Dependency Security**: `golang.org/x/crypto` is held at **≥ 0.56.0** to clear GO-2026-6354 / GO-2026-6355; `govulncheck` and Trivy enforce this in CI (see `docs/SECURITY.md`).
+5.  **PHP Runtime Patching**: The two unauthenticated remote code executions published in the PHP core on 2026-10-21 (CVE-2026-109618 and CVE-2026-109619, *"php2shell"*) are fixed in the PHP 8.3 branch by the Ubuntu revision **8.3.6-0ubuntu0.24.04.13**. Ubuntu backports the upstream patch instead of bumping the upstream version, so a patched node still reports `PHP 8.3.6` — the **Debian revision** is what tells a patched node from a vulnerable one, and it is the version the orchestration pins and the verification enforces (see `docs/SECURITY.md` § 4).

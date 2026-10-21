@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
@@ -179,6 +180,109 @@ func TestParseFrontendProbe(t *testing.T) {
 			t.Error("expected an error without a filesystem type")
 		}
 	})
+}
+
+func TestParsePHPPatchProbe(t *testing.T) {
+	t.Run("patched frontend", func(t *testing.T) {
+		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\nphp_mod_php=yes\n" +
+			"php_mitigation=upload_progress_off\nphp_mitigation=memory_limit_unlimited\n"
+		state, err := parsePHPPatchProbe(out)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.packageVersion != "8.3.6-0ubuntu0.24.04.13" {
+			t.Errorf("got version %q, want 8.3.6-0ubuntu0.24.04.13", state.packageVersion)
+		}
+		if !state.patched {
+			t.Error("the frontend must be reported as patched")
+		}
+		if !state.modPHP {
+			t.Error("Apache must be reported as loading mod_php")
+		}
+		for _, m := range requiredPHPMitigations {
+			if !state.mitigations[m] {
+				t.Errorf("mitigation %q must be reported as in place", m)
+			}
+		}
+	})
+
+	t.Run("vulnerable frontend", func(t *testing.T) {
+		out := "php_package=8.3.6-0ubuntu0.24.04.9\nphp_patched=no\nphp_mod_php=yes\n" +
+			"php_mitigation=upload_progress_off\nphp_mitigation=memory_limit_unlimited\n"
+		state, err := parsePHPPatchProbe(out)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.patched {
+			t.Error("an unpatched frontend must not be reported as patched")
+		}
+		if state.packageVersion != "8.3.6-0ubuntu0.24.04.9" {
+			t.Errorf("got version %q, want the installed one", state.packageVersion)
+		}
+	})
+
+	t.Run("missing mitigation", func(t *testing.T) {
+		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\nphp_mod_php=yes\n" +
+			"php_mitigation=upload_progress_off\nphp_mitigation=memory_limit_missing\n"
+		state, err := parsePHPPatchProbe(out)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.mitigations["memory_limit_unlimited"] {
+			t.Error("a missing mitigation must not be reported as in place")
+		}
+		if !state.mitigations["upload_progress_off"] {
+			t.Error("the mitigation that is in place must be reported")
+		}
+	})
+
+	t.Run("noise on the same stream is ignored", func(t *testing.T) {
+		out := "PHP Deprecated: something in /var/www/html/wp-includes/x.php\n" +
+			"php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\nphp_mod_php=no\n"
+		state, err := parsePHPPatchProbe(out)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if state.modPHP {
+			t.Error("mod_php must not be reported as loaded")
+		}
+	})
+
+	t.Run("no package version", func(t *testing.T) {
+		if _, err := parsePHPPatchProbe("php_patched=yes\nphp_mod_php=yes\n"); err == nil {
+			t.Error("expected an error without a package version")
+		}
+	})
+
+	t.Run("no patched answer", func(t *testing.T) {
+		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_mod_php=yes\n"
+		if _, err := parsePHPPatchProbe(out); err == nil {
+			t.Error("expected an error without the patched answer")
+		}
+	})
+
+	t.Run("no mod_php answer", func(t *testing.T) {
+		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\n"
+		if _, err := parsePHPPatchProbe(out); err == nil {
+			t.Error("expected an error without the mod_php answer")
+		}
+	})
+}
+
+func TestPHPPatchProbeComparesAgainstThePatchedRevision(t *testing.T) {
+	// The probe asks the node itself: dpkg knows Debian's version rules, and
+	// the floor the project pins is the revision that carries the fix.
+	if !strings.Contains(phpPatchProbe, phpPatchedPackage) {
+		t.Errorf("the probe must compare the installed revision against %q", phpPatchedPackage)
+	}
+	if !strings.Contains(phpPatchProbe, "dpkg --compare-versions") {
+		t.Error("the probe must let dpkg compare the versions")
+	}
+	for _, m := range requiredPHPMitigations {
+		if !strings.Contains(phpPatchProbe, m) {
+			t.Errorf("the probe must look for the mitigation %q", m)
+		}
+	}
 }
 
 func TestCountAlertRules(t *testing.T) {

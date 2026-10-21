@@ -37,6 +37,7 @@ it, so CI gates on both.
 | `CMS pages` | `/wp-login.php` returns the credential form, `/feed/` generates an RSS/Atom document from the database, an asset referenced by the home page is served, and plain HTTP redirects to HTTPS |
 | `CMS REST API` | `/wp-json/` lists its namespaces, `/wp-json/wp/v2/posts` returns the post `wp core install` created, and that post's permalink renders as HTML through the VIP |
 | `CMS frontends` | Each frontend's own `wp-cli` finds WordPress installed and counts posts, and the uploads directory is the NFS export instead of local disk |
+| `PHP security patch` | Each frontend runs the PHP revision that carries the fix for CVE-2026-109618 / CVE-2026-109619 and has the mitigations the PHP team publishes for them, so a frontend that missed the package upgrade fails the phase instead of staying exposed |
 | `Load balancers` | Each load balancer answers the site directly, so a broken backup node does not stay hidden behind the VIP |
 | `MariaDB` | The NodePort is reachable and a SQL round-trip reads `wp_posts`/`wp_options` and writes a throwaway table, proving the database accepts writes |
 | `Backup store` | A cluster node reaches the Garage S3 API on the hypervisor (expects `403`), so a host-only store fails here instead of in the nightly backup |

@@ -7,6 +7,14 @@ class role::cms_frontend {
 
   include role::base
 
+  # The Ubuntu Noble revision of the PHP 8.3 branch that carries the fix for
+  # CVE-2026-109618 and CVE-2026-109619 ("php2shell", published 2026-10-21).
+  # Ubuntu backports the upstream patch instead of bumping the upstream
+  # version, so a patched node still answers "PHP 8.3.6": the Debian revision
+  # is what tells a patched node from a vulnerable one. This is the single
+  # place to bump when the next PHP security update lands.
+  $php_patched_version = '8.3.6-0ubuntu0.24.04.13'
+
   # ---------------------------------------------------------------------------
   # PACKAGES — Apache + full PHP stack for WordPress
   # ---------------------------------------------------------------------------
@@ -26,6 +34,120 @@ class role::cms_frontend {
     'nfs-common',
   ]:
     ensure => installed,
+  }
+
+  # ---------------------------------------------------------------------------
+  # PHP SECURITY PATCH — CVE-2026-109618 / CVE-2026-109619 ("php2shell")
+  #
+  # Two unauthenticated remote code executions in the PHP core were published
+  # on 2026-10-21: memory corruption when an out-of-memory bailout interrupts
+  # a request (CVE-2026-109618) and a stale global state left behind by a
+  # fatal error (CVE-2026-109619). Every PHP that answers web requests is
+  # affected, and Apache with mod_php — what these frontends run — is the
+  # setup the PHP team rates as the highest risk: one unauthenticated request
+  # can trigger the bug before any WordPress code runs.
+  #
+  # The metapackages above are only installed, never upgraded, so a node
+  # provisioned before the patch would keep the vulnerable build forever. The
+  # versioned packages below carry the floor instead: every Puppet run moves
+  # them to the patched release (or to a newer one).
+  # ---------------------------------------------------------------------------
+
+  # Refresh the APT cache so the patched release is visible. The guard skips
+  # the refresh once the installed package satisfies the floor, so a converged
+  # node does not reach for the archive on every run. flock serialises the
+  # update with anything else that holds the dpkg lock.
+  exec { 'apt-get-update-cms-frontend':
+    command => '/usr/bin/flock -w 600 /var/lib/dpkg/lock-frontend /usr/bin/apt-get update',
+    unless  => "/bin/bash -c 'v=\$(/usr/bin/dpkg-query -W php8.3-cli 2>/dev/null | /usr/bin/cut -f2); [ -n \"\$v\" ] && /usr/bin/dpkg --compare-versions \"\$v\" ge \"${php_patched_version}\"'",
+  }
+
+  package { ['php8.3-cli', 'php8.3-common', 'libapache2-mod-php8.3']:
+    ensure  => ">= ${php_patched_version}",
+    require => Exec['apt-get-update-cms-frontend'],
+    # mod_php lives inside the Apache process: the new library is only used
+    # after Apache is restarted.
+    notify  => Service['apache2'],
+  }
+
+  # ---------------------------------------------------------------------------
+  # PHP HARDENING — the mitigations both CVEs need, on top of the patch
+  #
+  # The patched package is the fix. These settings remove the request
+  # patterns the two bugs need, so a frontend that missed the package
+  # upgrade is not exploitable through them either.
+  # ---------------------------------------------------------------------------
+
+  # The Apache SAPI reads its ini files at startup, so the setting is in
+  # place before the request is parsed: the PHP team asks for exactly this,
+  # and not for ini_set() (too late) nor for a .user.ini (per request).
+  file { '/etc/php/8.3/apache2/conf.d':
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+  }
+
+  file { '/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => [
+      Package['libapache2-mod-php8.3'],
+      File['/etc/php/8.3/apache2/conf.d'],
+    ],
+    notify  => Service['apache2'],
+    content => @("PHPINIHARDENING")
+      # CMS-HA - PHP hardening for CVE-2026-109618 / CVE-2026-109619
+      #
+      # The patched PHP package is the fix for both bugs. This file closes the
+      # session path that CVE-2026-109619 was confirmed with: the upload
+      # progress tracking is enabled by default and can leave a request's
+      # internal state pointing at freed memory that a later request reads.
+      #
+      # It is read when Apache starts, so it applies before the request is
+      # parsed, which is where the bug lives.
+      session.upload_progress.enabled = Off
+      | PHPINIHARDENING
+  }
+
+  # The same mitigations at the web server, where they cannot be undone by
+  # the application: php_admin_value is not overridable with ini_set() and
+  # not overridable from .htaccess, and the request size is bounded before
+  # PHP ever sees the body.
+  file { '/etc/apache2/conf-available/php-hardening.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => Package['libapache2-mod-php8.3'],
+    notify  => Service['apache2'],
+    content => @("APACHEPHPHARDENING")
+      # CMS-HA - PHP hardening for CVE-2026-109618 / CVE-2026-109619
+      #
+      # - memory_limit=-1 removes the user-controllable out-of-memory bailout
+      #   that CVE-2026-109618 abuses. php_admin_value cannot be overridden by
+      #   the application, so WordPress cannot put a finite limit back.
+      # - session.upload_progress.enabled=Off closes the session path that
+      #   CVE-2026-109619 was confirmed with.
+      # - The request is bounded here and at the proxy, so a single request
+      #   can never make PHP ask for more memory than the node has.
+      <Directory /var/www/html>
+          php_admin_value memory_limit -1
+          php_admin_flag session.upload_progress.enabled Off
+          php_admin_value post_max_size 32M
+          php_admin_value upload_max_filesize 16M
+          LimitRequestBody 33554432
+      </Directory>
+      | APACHEPHPHARDENING
+  }
+
+  exec { 'apache-enable-php-hardening':
+    command => '/usr/sbin/a2enconf php-hardening',
+    unless  => '/usr/bin/test -L /etc/apache2/conf-enabled/php-hardening.conf',
+    require => File['/etc/apache2/conf-available/php-hardening.conf'],
+    notify  => Service['apache2'],
   }
 
   # ---------------------------------------------------------------------------

@@ -40,6 +40,47 @@ const (
 	functionalDBTimeout = 60 * time.Second
 )
 
+const (
+	// phpPatchedPackage is the first Ubuntu Noble revision of the PHP 8.3
+	// branch that carries the fix for CVE-2026-109618 and CVE-2026-109619
+	// ("php2shell"). Ubuntu backports the upstream patch instead of bumping
+	// the upstream version, so a patched node still answers "PHP 8.3.6": the
+	// Debian revision is what tells a patched node from a vulnerable one.
+	phpPatchedPackage = "8.3.6-0ubuntu0.24.04.13"
+
+	// phpHardeningINI is the PHP SAPI configuration the frontends deploy with
+	// the mitigations for those CVEs. The Apache SAPI reads it at startup, so
+	// the setting is in place before the request is parsed.
+	phpHardeningINI = "/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini"
+
+	// phpHardeningApacheConf is the Apache configuration that carries the
+	// mitigations the application cannot override. The path is the enabled
+	// one, so a file that was deployed but never enabled does not pass.
+	phpHardeningApacheConf = "/etc/apache2/conf-enabled/php-hardening.conf"
+)
+
+// requiredPHPMitigations are the mitigations every frontend has to carry on
+// top of the patched package: the session path CVE-2026-109619 was confirmed
+// with, and the out-of-memory bailout CVE-2026-109618 abuses.
+var requiredPHPMitigations = []string{"upload_progress_off", "memory_limit_unlimited"}
+
+// phpPatchProbe asks a frontend for the state that decides whether it is
+// exposed to CVE-2026-109618 / CVE-2026-109619: the installed package
+// revision, whether Apache serves PHP through mod_php (the setup the PHP team
+// rates as the highest risk) and whether the mitigations are in place. The
+// version comparison is left to dpkg on the node itself, so the answer
+// follows Debian's own version rules instead of a reimplementation of them.
+const phpPatchProbe = `ver=$(/usr/bin/dpkg-query -W -f='${Version}' php8.3-cli 2>/dev/null); ` +
+	`printf 'php_package=%s\n' "$ver"; ` +
+	`if [ -n "$ver" ] && /usr/bin/dpkg --compare-versions "$ver" ge "` + phpPatchedPackage + `"; then ` +
+	`printf 'php_patched=yes\n'; else printf 'php_patched=no\n'; fi; ` +
+	`if /usr/sbin/apache2ctl -M 2>/dev/null | /usr/bin/grep -q php_module; then ` +
+	`printf 'php_mod_php=yes\n'; else printf 'php_mod_php=no\n'; fi; ` +
+	`if /usr/bin/grep -Eqi '^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*(off|0)[[:space:]]*$' ` + phpHardeningINI + ` 2>/dev/null; then ` +
+	`printf 'php_mitigation=upload_progress_off\n'; else printf 'php_mitigation=upload_progress_missing\n'; fi; ` +
+	`if /usr/bin/grep -Eqi 'php_admin_value[[:space:]]+memory_limit[[:space:]]+-1' ` + phpHardeningApacheConf + ` 2>/dev/null; then ` +
+	`printf 'php_mitigation=memory_limit_unlimited\n'; else printf 'php_mitigation=memory_limit_missing\n'; fi`
+
 // noRedirectClient stops at the first response: the caller has to see the
 // redirect itself, and a following client would chase the canonical vhost name,
 // turning "plain HTTP hands over to HTTPS" into a DNS lookup of the lab domain.
@@ -124,6 +165,7 @@ func (v *Verifier) phase10(ctx context.Context) CheckResult {
 		func() e2eOutcome { return v.checkCMSPages(ctx, site) },
 		func() e2eOutcome { return v.checkCMSREST(ctx, site) },
 		func() e2eOutcome { return v.checkCMSFrontends(ctx) },
+		func() e2eOutcome { return v.checkPHPSecurityPatch(ctx) },
 		func() e2eOutcome { return v.checkLoadBalancers(ctx, vhost, lbIPs) },
 		func() e2eOutcome { return v.checkMariaDB(ctx) },
 		func() e2eOutcome { return v.checkBackupStore(ctx) },
@@ -386,6 +428,125 @@ func (v *Verifier) checkCMSFrontends(ctx context.Context) e2eOutcome {
 	o.pass = pass
 	o.detail = strings.Join(details, "; ")
 	return o
+}
+
+// phpPatchState is what a frontend reports about its exposure to
+// CVE-2026-109618 / CVE-2026-109619.
+type phpPatchState struct {
+	// packageVersion is the Debian revision of the installed PHP package.
+	packageVersion string
+	// patched reports whether that revision carries the fix.
+	patched bool
+	// modPHP reports whether Apache serves PHP through mod_php.
+	modPHP bool
+	// mitigations holds the mitigations the frontend reported as in place.
+	mitigations map[string]bool
+}
+
+// checkPHPSecurityPatch proves the frontends are not exposed to the two
+// unauthenticated remote code executions published in the PHP core on
+// 2026-10-21 (CVE-2026-109618 and CVE-2026-109619, "php2shell"). Apache with
+// mod_php — what the frontends run — is the setup the PHP team rates as the
+// highest risk: one unauthenticated request can trigger the bug before any
+// WordPress code runs. The fix is a package upgrade, and nothing in the
+// stack would apply it on its own, so the check asks every frontend for the
+// revision it runs and for the mitigations deployed on top of the patch.
+//
+// The version comparison happens on the node with dpkg, so the answer follows
+// Debian's own version rules: Ubuntu backports the upstream patch and keeps
+// the upstream version number, and only the Debian revision tells a patched
+// node from a vulnerable one.
+func (v *Verifier) checkPHPSecurityPatch(ctx context.Context) e2eOutcome {
+	o := e2eOutcome{label: "PHP security patch"}
+	var ips []string
+	for _, cms := range v.cfg.Nodes.CMSFrontends {
+		if cms.IP != "" {
+			ips = append(ips, cms.IP)
+		}
+	}
+	if len(ips) == 0 {
+		o.detail = "no CMS frontend configured"
+		return o
+	}
+
+	res := v.ssh.RunParallel(ctx, ips, phpPatchProbe)
+	pass := true
+	var details []string
+	for _, r := range res {
+		if r.Err != nil || r.ExitCode != 0 {
+			pass = false
+			details = append(details, fmt.Sprintf("%s: probe failed (exit %d) %s", r.Host, r.ExitCode, strings.TrimSpace(r.Output)))
+			continue
+		}
+		state, err := parsePHPPatchProbe(r.Output)
+		if err != nil {
+			pass = false
+			details = append(details, fmt.Sprintf("%s: %v", r.Host, err))
+			continue
+		}
+		var problems []string
+		if !state.patched {
+			problems = append(problems, fmt.Sprintf("php %s is older than the patched %s (CVE-2026-109618/CVE-2026-109619)",
+				state.packageVersion, phpPatchedPackage))
+		}
+		for _, mitigation := range requiredPHPMitigations {
+			if !state.mitigations[mitigation] {
+				problems = append(problems, "missing mitigation "+mitigation)
+			}
+		}
+		if len(problems) > 0 {
+			pass = false
+			details = append(details, fmt.Sprintf("%s: %s", r.Host, strings.Join(problems, ", ")))
+			continue
+		}
+		sapi := "php-fpm"
+		if state.modPHP {
+			sapi = "mod_php"
+		}
+		details = append(details, fmt.Sprintf("%s: php %s patched, %s hardened", r.Host, state.packageVersion, sapi))
+	}
+	o.pass = pass
+	o.detail = strings.Join(details, "; ")
+	return o
+}
+
+// parsePHPPatchProbe reads the labelled lines the PHP probe prints. Labelling
+// keeps a PHP notice or a warning on the same stream from being misread as
+// one of the answers.
+func parsePHPPatchProbe(out string) (phpPatchState, error) {
+	state := phpPatchState{mitigations: map[string]bool{}}
+	var patched, modPHP string
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "php_package="):
+			state.packageVersion = strings.TrimPrefix(line, "php_package=")
+		case strings.HasPrefix(line, "php_patched="):
+			patched = strings.TrimPrefix(line, "php_patched=")
+		case strings.HasPrefix(line, "php_mod_php="):
+			modPHP = strings.TrimPrefix(line, "php_mod_php=")
+		case strings.HasPrefix(line, "php_mitigation="):
+			state.mitigations[strings.TrimPrefix(line, "php_mitigation=")] = true
+		}
+	}
+	if state.packageVersion == "" {
+		return state, fmt.Errorf("the probe reported no PHP package version")
+	}
+	switch patched {
+	case "yes":
+		state.patched = true
+	case "no":
+	default:
+		return state, fmt.Errorf("the probe did not report whether PHP carries the fix")
+	}
+	switch modPHP {
+	case "yes":
+		state.modPHP = true
+	case "no":
+	default:
+		return state, fmt.Errorf("the probe did not report whether Apache loads mod_php")
+	}
+	return state, nil
 }
 
 // checkLoadBalancers asks every load balancer for the site directly. The VIP

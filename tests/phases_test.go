@@ -143,6 +143,56 @@ func repoFile(t *testing.T, rel string) string {
 	return filepath.Join(root, rel)
 }
 
+func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
+	// The "php2shell" remote code executions (CVE-2026-109618 and
+	// CVE-2026-109619, published 2026-10-21) are fixed by a PHP package
+	// upgrade that nothing else in the stack would apply on its own, and the
+	// mitigations the PHP team asks for are a web server configuration. Both
+	// have to live in the manifest, so a frontend that missed them is
+	// exposed even though the site keeps answering.
+	cmsManifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/cms_frontend.pp"))
+	if err != nil {
+		t.Fatalf("failed to read cms_frontend.pp: %v", err)
+	}
+	cmsContent := string(cmsManifest)
+	for _, expected := range []string{
+		// The patched Ubuntu revision of the PHP 8.3 branch. Ubuntu backports
+		// the upstream fix, so the upstream version stays 8.3.6.
+		"8.3.6-0ubuntu0.24.04.13",
+		"php8.3-cli",
+		"php8.3-common",
+		"libapache2-mod-php8.3",
+		`">= ${php_patched_version}"`,
+		// The mitigations: the session path CVE-2026-109619 was confirmed
+		// with, and the out-of-memory bailout CVE-2026-109618 abuses.
+		"session.upload_progress.enabled",
+		"php_admin_value memory_limit -1",
+		"post_max_size",
+		"LimitRequestBody",
+		"/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini",
+		"/etc/apache2/conf-available/php-hardening.conf",
+	} {
+		if !strings.Contains(cmsContent, expected) {
+			t.Errorf("expected cms_frontend.pp to contain %q", expected)
+		}
+	}
+
+	// The request size is bounded at the proxy as well: the frontends answer
+	// the internet directly too, so the limit cannot live in one layer only.
+	for _, path := range []string{
+		"puppet/modules/role/files/nginx/cms-lb.conf",
+		"templates/nginx/cms-lb.conf",
+	} {
+		conf, err := os.ReadFile(repoFile(t, path))
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", path, err)
+		}
+		if !strings.Contains(string(conf), "client_max_body_size") {
+			t.Errorf("expected %s to bound the request size", path)
+		}
+	}
+}
+
 func TestPhases_NFSStorageManifests(t *testing.T) {
 	// Verify role::storage manifest exists and contains critical configurations
 	storageManifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/storage.pp"))
