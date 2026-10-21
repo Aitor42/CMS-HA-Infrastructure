@@ -148,6 +148,45 @@ func TestTemplates_EmbeddedMonitoringConfigs(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("alert-rules.yml reads the metrics the exporters expose", func(t *testing.T) {
+		data, err := cms.TemplatesFS.ReadFile("templates/monitoring/alert-rules.yml")
+		if err != nil {
+			t.Fatalf("failed to read alert-rules.yml: %v", err)
+		}
+		rules := string(data)
+
+		// `up{job=...}` is the scrape health of the exporter, not of the
+		// service it monitors: nginx_up/mysql_up/apache_up stay 1 while the
+		// daemon is down. Assert the service metric is part of each alert.
+		for _, want := range []string{
+			"mysql_up == 0 or up{job=\"mysql\"} == 0",
+			"nginx_up == 0 or up{job=\"nginx\"} == 0",
+			"apache_up == 0 or up{job=\"apache\"} == 0",
+		} {
+			if !strings.Contains(rules, want) {
+				t.Errorf("alert-rules.yml does not check the service health metric: %q", want)
+			}
+		}
+
+		// blackbox exports probe_duration_seconds as a gauge (there is no
+		// _bucket series), and covers the frontend probes with a second job.
+		if strings.Contains(rules, "probe_duration_seconds_bucket") {
+			t.Error("alert-rules.yml uses the nonexistent probe_duration_seconds_bucket series")
+		}
+		if !strings.Contains(rules, `probe_duration_seconds{job=~"blackbox.*"}`) {
+			t.Error("ProbeLatencyHigh does not cover every blackbox job")
+		}
+		if !strings.Contains(rules, `probe_success{job=~"blackbox.*"}`) {
+			t.Error("BlackboxProbeFailed does not cover every blackbox job")
+		}
+		if !strings.Contains(rules, "probe_http_status_code") {
+			t.Error("the 5xx alert must use a status code the exporters actually expose")
+		}
+		if strings.Contains(rules, `nginx_http_requests_total{status`) {
+			t.Error("nginx_http_requests_total has no status label; the 5xx rate cannot be derived from it")
+		}
+	})
 }
 
 func TestTemplates_NoDuplicatedMonitoringConfig(t *testing.T) {

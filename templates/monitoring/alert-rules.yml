@@ -22,11 +22,13 @@ groups:
             The node_exporter target {{ $labels.instance }} has been
             unreachable for more than 2 minutes.
 
-      # Fires when a blackbox HTTP probe fails for over 2 minutes: the load
+      # Fires when a blackbox probe fails for over 2 minutes: the load
       # balancer, a CMS frontend, or the network path to them is down. This is
       # end-to-end reachability, unlike 'up' which only checks the exporter.
+      # Both jobs are covered: `blackbox` (HTTP through the VIP) and
+      # `blackbox-frontends` (TCP to each frontend).
       - alert: BlackboxProbeFailed
-        expr: probe_success{job="blackbox"} == 0
+        expr: probe_success{job=~"blackbox.*"} == 0
         for: 2m
         labels:
           severity: critical
@@ -36,13 +38,13 @@ groups:
             The blackbox probe of {{ $labels.instance }} has been failing for
             more than 2 minutes.
 
-      # Fires when the blackbox HTTP probe succeeds but is slow: the endpoints
+      # Fires when a blackbox probe succeeds but is slow: the endpoints
       # answer, yet latency is well above the SLO, usually because a backend is
       # degraded or the LB keeps a slow upstream in rotation.
       - alert: ProbeLatencyHigh
         expr: >-
-          histogram_quantile(0.95,
-            sum by (instance, le) (rate(probe_duration_seconds_bucket{job="blackbox"}[5m]))) > 2
+          quantile_over_time(0.95,
+            probe_duration_seconds{job=~"blackbox.*"}[5m]) > 2
         for: 5m
         labels:
           severity: warning
@@ -104,45 +106,46 @@ groups:
       # MariaDB is the single backend database; losing it is an immediate
       # data-path failure, so we alert after just 1 minute.
       - alert: MariaDBDown
-        expr: up{job="mysql"} == 0
+        expr: mysql_up == 0 or up{job="mysql"} == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "MariaDB exporter {{ $labels.instance }} is down"
+          summary: "MariaDB is down on {{ $labels.instance }}"
           description: >-
-            The mysqld_exporter target {{ $labels.instance }} has been
-            unreachable for more than 1 minute. Check the MariaDB service
-            and the exporter process.
+            MariaDB is not answering on {{ $labels.instance }} (mysql_up is 0)
+            or the mysqld_exporter target is unreachable, for more than
+            1 minute. Check the MariaDB service and the exporter process.
 
       # Nginx is the single entry point for all external traffic; if it
       # goes down the site is fully unavailable.
       - alert: NginxDown
-        expr: up{job="nginx"} == 0
+        expr: nginx_up == 0 or up{job="nginx"} == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "Nginx exporter {{ $labels.instance }} is down"
+          summary: "Nginx is down on {{ $labels.instance }}"
           description: >-
-            The nginx_exporter target {{ $labels.instance }} has been
-            unreachable for more than 1 minute. Check the Nginx service
-            and the exporter process on the load balancer.
+            Nginx is not answering on {{ $labels.instance }} (nginx_up is 0)
+            or the nginx_exporter target is unreachable, for more than
+            1 minute. Check the Nginx service and the exporter process on the
+            load balancer.
 
       # Apache backends are behind the load balancer and can tolerate
       # short outages (the LB will route to the healthy backend), so we
       # use a longer 2-minute window and warning severity.
       - alert: ApacheDown
-        expr: up{job="apache"} == 0
+        expr: apache_up == 0 or up{job="apache"} == 0
         for: 2m
         labels:
           severity: warning
         annotations:
-          summary: "Apache exporter {{ $labels.instance }} is down"
+          summary: "Apache is down on {{ $labels.instance }}"
           description: >-
-            The apache_exporter target {{ $labels.instance }} has been
-            unreachable for more than 2 minutes. The CMS backend on this
-            node may be offline.
+            Apache is not answering on {{ $labels.instance }} (apache_up is 0)
+            or the apache_exporter target is unreachable, for more than
+            2 minutes. The CMS backend on this node may be offline.
 
       # A kubelet being unreachable for 3 minutes usually means the K3s
       # node has left the cluster or the kubelet process crashed.
@@ -157,21 +160,21 @@ groups:
             The kubelet on {{ $labels.instance }} has been unreachable for
             more than 3 minutes. The node may have left the K3s cluster.
 
-      # A sustained rate of 5xx responses above 5 % signals a backend
-      # problem that is affecting real user traffic.
-      - alert: HighHTTP5xxRate
-        expr: >-
-          (rate(nginx_http_requests_total{status=~"5.."}[5m])
-           / rate(nginx_http_requests_total[5m])) * 100 > 5
-        for: 5m
+      # The nginx exporter only exposes stub_status counters, which carry no
+      # per-status breakdown (there is no `status` label to compute a real 5xx
+      # rate from). The blackbox probe does record the status it receives, so
+      # alert on the end-to-end signal that actually exists.
+      - alert: HTTP5xxResponses
+        expr: probe_http_status_code{job="blackbox"} >= 500
+        for: 2m
         labels:
           severity: warning
         annotations:
-          summary: "High HTTP 5xx error rate on {{ $labels.instance }}"
+          summary: "The front door is returning HTTP 5xx on {{ $labels.instance }}"
           description: >-
-            More than 5 % of HTTP responses from Nginx on
-            {{ $labels.instance }} returned a 5xx status code over the
-            last 5 minutes (current rate: {{ $value | printf "%.1f" }}%).
+            The blackbox probe received a 5xx status from
+            {{ $labels.instance }} for more than 2 minutes (current status:
+            {{ $value }}).
 
       # Generic catch-all: any Prometheus scrape target that stays down
       # for 5 minutes. Useful for exporters we might add in the future.
