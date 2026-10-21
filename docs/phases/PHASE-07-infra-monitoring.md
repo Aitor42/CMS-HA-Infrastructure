@@ -58,12 +58,13 @@ scrape_configs:
 
 ### Grafana Provisioning
 
-- **Datasource:** Prometheus configured automatically via `/etc/grafana/provisioning/datasources/`
-- **Dashboard:** Node Exporter Full (ID 1860) downloaded and imported automatically
+- **Datasource:** Prometheus, provisioned from `/etc/grafana/provisioning/datasources/`.
+- **Dashboards:** *Node Exporter Overview* and *HA Overview*, provisioned from `role::monitor`; the HA Overview is the home dashboard.
 
-### Associated Scripts
+### Implementation
 
-- `scripts/08_setup_monitoring.sh` — Installation of node_exporter, Prometheus, and Grafana
+- `internal/phases/monitoring` (`cms-ha phase setup-monitoring`) — verifies the exporters, mints the Prometheus token, deploys the alert rules and checks the services.
+- `puppet/modules/role` (`role::monitor`) — keeps the exporters and configuration converged.
 
 ### Verification
 

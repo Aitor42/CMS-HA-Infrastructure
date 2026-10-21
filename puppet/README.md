@@ -1,111 +1,87 @@
-# Puppet Configuration Management — CMS High-Availability Infrastructure
+# Puppet — Node Configuration
 
-This directory contains the full Puppet codebase that declares the **desired state**
-of every node in the infrastructure. Once a Puppet agent is registered, it
-re-applies its catalogue every 30 minutes automatically.
+`puppet/` declares the desired state of every node: packages, services,
+configuration files, exporters and firewall rules. Once an agent is registered,
+it re-applies its catalogue every 30 minutes.
 
-## Directory Structure
+## Layout
 
 ```
 puppet/
-├── manifests/
-│   └── site.pp                  # Node classifier — maps hostnames to roles
-└── modules/
-    └── role/
-        ├── manifests/            # Role classes (desired state per node type)
-        │   ├── base.pp           # Applied to ALL nodes (node_exporter, chrony, UFW, swap, /etc/hosts)
-        │   ├── router.pp         # ufw-router: IP forwarding, UFW perimeter + forwarding rules
-        │   ├── loadbalancer.pp   # main-lb1/main-lb2: Nginx, SSL cert, keepalived VIP, UFW rules
-        │   ├── cms_frontend.pp   # main-cms*: Apache, PHP, WordPress, WP-CLI, UFW rules
-        │   ├── monitor.pp        # internal-monitor: Prometheus, Grafana + provisioning, UFW rules
-        │   ├── k3s_master.pp     # internal-master*: K3s deps, UFW rules (API, etcd, DRBD, Flannel)
-        │   ├── k3s_worker.pp     # internal-worker*: K3s deps, UFW rules (kubelet, Flannel)
-        │   └── hotdesk.pp        # main-hotdesk*: XFCE desktop, LightDM, NetworkManager
-        └── files/                # Static config files served by Puppet fileserver
-            ├── nginx/
-            │   └── cms-lb.conf           # Nginx upstream pool + SSL reverse proxy
-            ├── apache/
-            │   ├── wordpress.conf        # Apache VirtualHost for WordPress
-            │   └── wordpress.htaccess    # WordPress URL rewriting rules
-            ├── prometheus/
-            │   └── prometheus.yml        # Prometheus scrape targets (all exporters)
-            └── grafana/
-                ├── datasource.yaml       # Grafana datasource (Prometheus)
-                └── dashboard-provider.yaml  # Grafana dashboard provider config
+├── manifests/site.pp              # maps hostnames to role classes
+└── modules/role/
+    ├── manifests/                 # one class per node type
+    │   ├── base.pp                # all nodes: node_exporter, chrony, UFW, swap, /etc/hosts
+    │   ├── router.pp              # ufw-router
+    │   ├── jumpstart.pp           # jumpstart: Puppet Server, Cobbler, DNS, NFS
+    │   ├── loadbalancer.pp        # main-lb*: Nginx, keepalived, TLS
+    │   ├── cms_frontend.pp        # main-cms*: Apache, PHP, WordPress, WP-CLI
+    │   ├── monitor.pp             # internal-monitor: Prometheus, Grafana
+    │   ├── k3s_master.pp          # internal-master*: K3s deps, UFW
+    │   ├── k3s_worker.pp          # internal-worker*: K3s deps, UFW
+    │   ├── storage.pp             # internal-storage: NFS uploads
+    │   └── hotdesk.pp             # main-hotdesk*: XFCE, LightDM
+    └── files/                     # static files served by the fileserver
 ```
 
-## Role Assignment (site.pp)
+## Role Assignment
 
-| Hostname pattern | Role class | Key services managed |
-|---|---|---|
-| `ufw-router` | `role::router` | ip_forward, UFW perimeter, inter-zone routing |
-| `internal-monitor` | `role::monitor` | Prometheus, Grafana, UFW |
-| `internal-master*` | `role::k3s_master` | K3s prereqs, UFW (API/etcd/DRBD/Flannel) |
-| `internal-worker*` | `role::k3s_worker` | K3s prereqs, UFW (kubelet/Flannel) |
-| `main-lb*` | `role::loadbalancer` | Nginx, SSL cert, keepalived VIP, UFW |
-| `main-cms*` | `role::cms_frontend` | Apache, PHP, WordPress, WP-CLI, UFW |
+| Hostname | Role class | Key services |
+|:---------|:-----------|:-------------|
+| `jumpstart` | `role::jumpstart` | Puppet Server, Cobbler, DNS, NTP, NFS |
+| `ufw-router` | `role::router` | IP forwarding, UFW perimeter, inter-zone routing |
+| `internal-monitor` | `role::monitor` | Prometheus, Grafana, Alertmanager |
+| `internal-master*` | `role::k3s_master` | K3s prerequisites, UFW (API/etcd/DRBD/Flannel) |
+| `internal-worker*` | `role::k3s_worker` | K3s prerequisites, UFW (kubelet/Flannel) |
+| `internal-storage` | `role::storage` | NFS export for WordPress uploads |
+| `main-lb*` | `role::loadbalancer` | Nginx, step-ca certificate, keepalived VIP |
+| `main-cms*` | `role::cms_frontend` | Apache, PHP, WordPress, WP-CLI |
 | `main-hotdesk*` | `role::hotdesk` | XFCE desktop, LightDM |
-| `*` (default) | `role::base` | node_exporter, chrony, /etc/hosts, swap, UFW base |
+| `*` (default) | `role::base` | node_exporter, chrony, `/etc/hosts`, swap, UFW base |
 
-Every role **includes `role::base`** as its first statement, so base config is
-always applied regardless of the node's specific role.
+Every role includes `role::base` first, so the base configuration is applied
+regardless of the node type.
 
-## What Puppet Manages vs. What Bash Scripts Handle
+## What Puppet manages
 
-### Managed entirely by Puppet (declarative, idempotent, auto-applied every 30 min)
-- Package installation and service state for all roles
-- All config files (Nginx, Apache, Prometheus, Grafana provisioning, chrony)
-- WordPress download, `wp-config.php` credentials, WP-CLI, `wp core install`
-- Self-signed SSL certificate generation (on first run only)
-- UFW default policies and all per-role firewall rules
-- `/etc/hosts` cluster-wide name resolution
-- Swap file creation and activation
+- Package installation and service state for every role.
+- Configuration files (Nginx, Apache, Prometheus, Alertmanager, Grafana provisioning, chrony).
+- WordPress, `wp-config.php`, WP-CLI and `wp core install`.
+- Certificates issued by the internal CA and their renewal timers.
+- UFW policies and per-role rules.
+- `/etc/hosts`, swap and the DRBD/keepalived textfile metrics.
 
-### Handled by bash scripts (bootstrap steps Puppet cannot do)
-| Script | Reason |
-|---|---|
-| `00_init_vms.sh` | Creates VMs on the KVM hypervisor — outside the VMs themselves |
-| `01_setup_cobbler.sh` | Bootstraps Cobbler before any agents exist |
-| `04_setup_puppet.sh` | Installs Puppet Server itself (chicken-and-egg) |
-| `06_setup_kubernetes.sh` | K3s requires ordered token exchange between masters |
-| `05_setup_drbd.sh` | DRBD needs cross-node promote/demote coordination |
-| NAT rules in `09_setup_ufw.sh` | WAN interface name is detected at runtime from MAC |
+## What the orchestrator does
+
+Steps Puppet cannot own: VM and network creation, Cobbler bootstrap, the Puppet
+Server install (chicken-and-egg), K3s token exchange, DRBD promote/demote, and
+the NAT rules whose WAN interface is detected at runtime.
 
 ## Deployment Flow
 
-```
-00_init_vms.sh          # Create VMs + networks
-    ↓
-01_setup_cobbler.sh     # PXE provision OS on all nodes
-    ↓
-04_setup_puppet.sh      # Install Puppet Server + agents
-                        # Sync puppet/ code to jumpstart codedir  ← THIS DIRECTORY
-                        # Initial `puppet agent -t` on all nodes  ← FULL DESIRED STATE APPLIED
-    ↓
-06_setup_kubernetes.sh  # K3s cluster bootstrap (token exchange)
-    ↓
-05_setup_drbd.sh        # DRBD block replication setup
-    ↓
-07_setup_nginx_wordpress.sh  # puppet agent -t (Nginx + WordPress convergence)
-08_setup_monitoring.sh  # puppet agent -t (Prometheus + Grafana convergence)
-09_setup_ufw.sh         # puppet agent -t + NAT rules injection
+```text
+cms-ha phase init-vms          # VMs + networks
+cms-ha phase setup-cobbler     # PXE installs the OS
+cms-ha phase setup-puppet      # Puppet Server + agents, first full catalogue
+cms-ha phase setup-drbd        # DRBD replication
+cms-ha phase setup-kubernetes  # K3s + MariaDB
+cms-ha phase setup-nginx       # Nginx, keepalived, WordPress
+cms-ha phase setup-monitoring  # Prometheus + Grafana
+cms-ha phase setup-ufw         # firewall + NAT
 ```
 
 ## Manual Operations
 
 ```bash
-# Force immediate Puppet run on a node (non-root deploy account + sudo)
+# Force a Puppet run on a node (non-root deploy account + sudo)
 ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent -t'
 
-# Check Puppet agent status
-ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent --configprint runinterval'
-
-# Dry run (show what would change without applying)
+# Dry run (show what would change)
 ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent -t --noop'
 
-# View last Puppet run report
-ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet report last'
+# Check the run interval
+ssh ubuntu@<NODE_IP> 'sudo /opt/puppetlabs/bin/puppet agent --configprint runinterval'
 
-# List all signed certificates (from jumpstart)
+# List signed certificates (from jumpstart)
 ssh ubuntu@192.168.10.10 'sudo puppetserver ca list --all'
 ```

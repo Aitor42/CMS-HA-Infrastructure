@@ -30,9 +30,10 @@ Each node has UFW configured with:
 | **main-lb1/2** | 22, 80, 443, 9100, 9113, 112 | SSH, HTTP, HTTPS, node_exporter, nginx_exporter, VRRP (keepalived) |
 | **main-cms1/2** | 22, 80, 9100, 9117 | SSH, Apache, node_exporter, apache_exporter |
 
-### Associated Scripts
+### Implementation
 
-- `scripts/09_setup_ufw.sh` — Nodal firewalling section (second part of the script)
+- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — applies the node firewall rules.
+- `puppet/modules/role` (`role::ufw`) — keeps the rules converged.
 
 ### Verification
 

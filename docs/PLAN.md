@@ -7,7 +7,7 @@
 3. [Technology Stack](#technology-stack)
 4. [Deployment Phases](#deployment-phases)
 5. [Network Diagram](#network-diagram)
-6. [Variables & Configuration](#variables--configuration)
+6. [Addressing Reference](#addressing-reference)
 
 ---
 
@@ -32,7 +32,7 @@ This project covers the **fully automated design, implementation, and provisioni
 
 The network is segmented into two subnets (`internal` and `main`) connected by a UFW router/firewall. The Jumpstart node (Cobbler + Puppet Server) has dual-homed presence in both networks to provision all nodes.
 
-The entire deployment is executed from a **single entry point**: `./cms-ha deploy` (the legacy `deploy_all.sh` shell suite is deprecated and kept for reference only — see [`scripts/README.md`](../scripts/README.md)).
+The entire deployment is executed from a **single entry point**: `./cms-ha deploy`.
 
 ---
 
@@ -81,7 +81,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 | ... | ... | ... | ... | ... | ... | ... |
 | main-hotdesk8 | 192.168.20.208 | main | Hot-desk workstation (dynamic) | 768 MB | 10 GB | 52:54:00:10:02:d0 |
 
-**Total:** 1 router + 1 jumpstart + 6 internal nodes + 4 fixed main nodes + N hot-desks (default 1 to 3, dynamically scalable up to 8).
+**Total:** 1 router + 1 jumpstart + 7 internal nodes + 4 fixed main nodes + N hot-desks (default 3, scalable up to 8).
 
 ---
 
@@ -89,7 +89,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 | Technology | Version | Role in the Project |
 |:-----------|:--------|:--------------------|
-| **Go CLI (`cms-ha`)**| 1.22+ | Unified CLI orchestrator, connection pooling & concurrency manager |
+| **Go CLI (`cms-ha`)**| 1.26+ | Unified CLI orchestrator, connection pooling & concurrency manager |
 | **Cobbler** | 3.3.x | Zero-touch bare-metal provisioning (PXE + autoinstall) |
 | **Puppet** | 8.x | Idempotent configuration management (server + agents) |
 | **Nginx** | 1.24.x | Reverse proxy load balancing with health checks |
@@ -122,30 +122,29 @@ The project structure is split between the **Project Milestones** (which corresp
 | **07** | Infrastructure Monitoring | Prometheus & node_exporter metrics scraping | [Phase 07](phases/PHASE-07-infra-monitoring.md) |
 | **08** | Service Monitoring | Nginx, Apache, MariaDB exporters & Grafana | [Phase 08](phases/PHASE-08-service-monitoring.md) |
 | **09** | Hot-desk Workstations | Automated workstation VM provisioning | [Phase 09](phases/PHASE-09-hotdesk-workstations.md) |
-| **10** | TrafficMix and End-to-End Tests | Automated load testing & verification checks | [Phase 10](phases/PHASE-10-traffic-testing.md) |
+| **10** | Traffic, End-to-End Tests and Jumpstart Shutdown | k6 load profile, functional checks, survival test | [Phase 10](phases/PHASE-10-traffic-testing.md) |
 | **11** | Final Documentation | Project manuals, baseline & diagram validation | [Phase 11](phases/PHASE-11-final-documentation.md) |
 
-### 2. Dual Technical Execution Sequence
+### 2. Technical Execution Sequence
 
-The deployment is executed end-to-end by the Go CLI (`cms-ha deploy`); the **Bash Script (v1)** column is the deprecated equivalent, kept for reference only (see [`scripts/README.md`](../scripts/README.md)). The dependency ordering is identical:
+The deployment is executed end-to-end by the Go CLI (`cms-ha deploy`):
 
-| Phase | Go CLI (v2) | Bash Script (v1) | Description | Milestone Mapping |
-|:---:|:---|:---|:---|:---:|
-| **00a** | `cms-ha phase init-vms --jumpstart-only` | `00_init_vms.sh --jumpstart-only` | Virtual networks creation and Jumpstart node provisioning | Phase 00 |
-| **01** | `cms-ha phase setup-cobbler` | `01_setup_cobbler.sh` | Cobbler configuration (PXE, DHCP, TFTP, DNS) on Jumpstart | Phase 01 |
-| **01.5**| `cms-ha phase register-nodes` | `02_register_cobbler_nodes.sh` | Registration of all target nodes and MAC bindings in Cobbler | Phase 01 |
-| **00b** | `cms-ha vm install-batches` | `00_init_vms.sh --nodes-only` | Unattended PXE installation of all client nodes | Phase 00 |
-| **01.8**| `cms-ha phase repair-ssh` | `03_repair_ssh_puppet.sh` | Post-install SSH key sync & Puppet CA certificate repair | Phase 01 |
-| **01.9**| `cms-ha phase bootstrap-router` | *(inline `bootstrap_router` in `deploy_all.sh`)* | Router gateway bring-up: static addresses, IP forwarding and NAT so every node can reach the internet | Phase 04, Phase 06 |
-| **02** | `cms-ha phase setup-puppet` | `04_setup_puppet.sh` | Parallel Puppet catalog execution (worker pool) | Phase 01, Phase 09 |
-| **03** | `cms-ha phase setup-drbd` | `05_setup_drbd.sh` | DRBD HA block storage replication setup on master nodes | Phase 03 |
-| **03.5** | `cms-ha phase setup-backup` | *(new, no legacy script)* | Off-DRBD Garage S3 backup store on the hypervisor (container) | Phase 03 |
-| **04** | `cms-ha phase setup-kubernetes` | `06_setup_kubernetes.sh` | K3s HA clustering & MariaDB deployment on DRBD storage | Phase 03 |
-| **05** | `cms-ha phase setup-nginx-wordpress` | `07_setup_nginx_wordpress.sh` | Nginx Load Balancer, NFS shared storage & WordPress frontends | Phase 05 |
-| **06** | `cms-ha phase setup-monitoring` | `08_setup_monitoring.sh` | Prometheus monitoring, exporters, Grafana & alerts | Phase 07, Phase 08 |
-| **07** | `cms-ha phase setup-ufw` | `09_setup_ufw.sh` | Perimeter routing (router) & per-node firewall policies | Phase 04, Phase 06 |
-| **08** | `cms-ha phase setup-ca` | `10_setup_internal_ca.sh` | Step-CA PKI deployment, TLS cert issuance and trust sync | Phase 04 |
-| **09** | `cms-ha traffic` | `11_traffic_mix.sh` | HTTP traffic generation & end-to-end load testing | Phase 10 |
+| Step | Command | Description | Milestone |
+|:---:|:--------|:------------|:---:|
+| 1 | `cms-ha phase init-vms --jumpstart-only` | Networks and jumpstart VM | Phase 00 |
+| 2 | `cms-ha phase setup-cobbler` | Cobbler (PXE, DHCP, TFTP, DNS) on jumpstart | Phase 01 |
+| 3 | `cms-ha phase register-nodes` | Node, MAC and static IP registration | Phase 01 |
+| 4 | `cms-ha vm install-batches` | Unattended PXE installation of the clients | Phase 00 |
+| 5 | `cms-ha phase repair-ssh` | SSH key sync and Puppet CA repair | Phase 01 |
+| 6 | `cms-ha phase bootstrap-router` | Gateway addresses, IP forwarding and NAT | Phase 04, 06 |
+| 7 | `cms-ha phase setup-puppet` | Parallel Puppet convergence of every node | Phase 01, 09 |
+| 8 | `cms-ha phase setup-drbd` | DRBD replication on the masters | Phase 03 |
+| 9 | `cms-ha phase setup-backup` | Garage S3 backup store on the hypervisor | Phase 03 |
+| 10 | `cms-ha phase setup-kubernetes` | K3s cluster and MariaDB on DRBD | Phase 03 |
+| 11 | `cms-ha phase setup-nginx-wordpress` | Nginx, keepalived, NFS and WordPress | Phase 05 |
+| 12 | `cms-ha phase setup-monitoring` | Prometheus, Grafana and alert rules | Phase 07, 08 |
+| 13 | `cms-ha phase setup-ufw` | Perimeter and per-node firewall | Phase 04, 06 |
+| 14 | `cms-ha phase setup-ca` | step-ca PKI and cluster-wide TLS trust | Phase 04 |
 
 ---
 
@@ -211,57 +210,56 @@ graph TB
 
 ---
 
-## Variables and Configuration
+## Addressing Reference
 
-Configurable parameters used throughout the deployment scripts:
+The lab addresses below come from `config.yaml` (`network` and `nodes`), the
+single source of truth.
 
-### Network Addressing
+### Networks
 
-| Variable | Value | Description |
-|:---------|:------|:------------|
-| `INTERNAL_NET` | `192.168.10.0/24` | `internal` network CIDR (bridge `virbr-int`) |
-| `MAIN_NET` | `192.168.20.0/24` | `main` network CIDR (bridge `virbr-main`) |
-| `GW_INTERNAL` | `192.168.10.1` | `internal` gateway (router eth1) |
-| `GW_MAIN` | `192.168.20.1` | `main` gateway (router eth2) |
-| `DNS_SERVER` | `192.168.10.10` | DNS server (BIND9/Cobbler on jumpstart, `internal`) |
-| `JUMPSTART_IP_MAIN` | `192.168.20.10` | Jumpstart's second interface on `main` |
+| Item | Value | Description |
+|:-----|:------|:------------|
+| `internal` CIDR | `192.168.10.0/24` | K3s, storage and monitoring (bridge `virbr-int`) |
+| `main` CIDR | `192.168.20.0/24` | Load balancers, CMS frontends and hot-desks (bridge `virbr-main`) |
+| `internal` gateway | `192.168.10.1` | Router `eth1` |
+| `main` gateway | `192.168.20.1` | Router `eth2` |
+| DNS server | `192.168.10.10` | BIND9/Cobbler on jumpstart |
+| Jumpstart (`main`) | `192.168.20.10` | Second jumpstart interface |
 
-In the v2 Go CLI these values come from `config.yaml` (`network.internal` / `network.main`); the variable names above are those used by the deprecated Bash scripts.
+### Nodes
 
-### Core Nodes
-
-| Variable | Value | Description |
-|:---------|:------|:------------|
-| `JUMPSTART_IP` | `192.168.10.10` | Jumpstart node (Cobbler + Puppet) |
-| `MASTER1_IP` | `192.168.10.11` | First K3s master node (DRBD Primary) |
-| `MASTER2_IP` | `192.168.10.12` | Second K3s master node (DRBD Secondary) |
-| `MASTER3_IP` | `192.168.10.16` | Third K3s server (etcd quorum, no DRBD) |
-| `WORKER1_IP` | `192.168.10.13` | First K3s worker node |
-| `WORKER2_IP` | `192.168.10.14` | Second K3s worker node |
-| `STORAGE_IP` | `192.168.10.15` | Storage node |
-| `MONITOR_IP` | `192.168.10.20` | Monitoring node (Prometheus + Grafana) |
-| `LB1_IP` | `192.168.20.103` | Nginx load balancer 1 (keepalived MASTER) |
-| `LB2_IP` | `192.168.20.104` | Nginx load balancer 2 (keepalived BACKUP) |
-| `LB_VIP` | `192.168.20.100` | Floating keepalived VIP (clients + router DNAT target) |
-| `CMS1_IP` | `192.168.20.101` | CMS frontend 1 |
-| `CMS2_IP` | `192.168.20.102` | CMS frontend 2 |
-| `ROUTER_IP` | `192.168.10.1` | Router internal interface |
+| Item | Value | Description |
+|:-----|:------|:------------|
+| jumpstart | `192.168.10.10` | Cobbler + Puppet Server + CA |
+| master1 | `192.168.10.11` | K3s server + DRBD Primary |
+| master2 | `192.168.10.12` | K3s server + DRBD Secondary |
+| master3 | `192.168.10.16` | K3s server (etcd quorum, no DRBD) |
+| worker1 | `192.168.10.13` | K3s worker |
+| worker2 | `192.168.10.14` | K3s worker |
+| storage | `192.168.10.15` | NFS uploads |
+| monitor | `192.168.10.20` | Prometheus + Grafana + Alertmanager |
+| lb1 | `192.168.20.103` | Nginx (keepalived MASTER) |
+| lb2 | `192.168.20.104` | Nginx (keepalived BACKUP) |
+| VIP | `192.168.20.100` | Floating keepalived address (DNAT target) |
+| cms1 | `192.168.20.101` | WordPress + Apache |
+| cms2 | `192.168.20.102` | WordPress + Apache |
+| router | `192.168.10.1` | Internal router interface |
 
 ### Services
 
-| Variable | Value | Description |
-|:---------|:------|:------------|
-| `CMS_DOMAIN` | `cms.fake-enterprise.com` | CMS domain (resolved by internal DNS) |
-| `GRAFANA_PORT` | `3000` | Grafana dashboard port |
-| `PROMETHEUS_PORT` | `9090` | Prometheus API port |
-| `NODE_EXPORTER_PORT` | `9100` | node_exporter port on each node |
-| `DRBD_PORT` | `7788` | DRBD synchronisation port |
-| `K3S_API_PORT` | `6443` | Kubernetes API server port |
-| `MARIADB_PORT` | `30306` | MariaDB NodePort (in-cluster service listens on 3306) |
+| Item | Value | Description |
+|:-----|:------|:------------|
+| CMS domain | `cms.fake-enterprise.com` | Resolved by internal DNS |
+| Grafana | `3000` | Dashboard port |
+| Prometheus | `9090` | API port |
+| node_exporter | `9100` | Metrics port on each node |
+| DRBD | `7788` | Replication port |
+| K3s API | `6443` | Kubernetes API port |
+| MariaDB | `30306` | NodePort (the service listens on 3306) |
 
 ### Virtualisation
 
-| Variable | Value | Description |
-|:---------|:------|:------------|
-| `VM_DIR` | `$HOME/vm_storage` | VM disk image storage directory |
-| `OS_VARIANT` | `ubuntu24.04` | OS variant for `virt-install` |
+| Item | Value | Description |
+|:-----|:------|:------------|
+| VM storage | `$HOME/vm_storage` | Disk image directory |
+| OS variant | `ubuntu24.04` | `virt-install` variant |

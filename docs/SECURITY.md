@@ -80,10 +80,9 @@ runs:
 
 gosec results are also uploaded as SARIF to GitHub code scanning.
 
-Dependency fixes are applied when the scans find reachable issues, e.g.
-`golang.org/x/crypto` was bumped to **v0.56.0** to clear
-GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`). `go.mod` therefore
-requires Go **1.26**.
+Dependencies are kept current: `golang.org/x/crypto` is pinned at **v0.56.0**
+or newer, which clears GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`).
+`go.mod` requires Go **1.26**.
 
 ---
 

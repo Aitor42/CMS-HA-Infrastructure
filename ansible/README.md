@@ -1,35 +1,20 @@
-# Ansible — Infrastructure Provisioning (create & declare)
+# Ansible — Infrastructure Provisioning
 
-This directory is the **only** path that *creates and declares* infrastructure
-(libvirt networks, disks and VM domains). It replaces both Terraform and the
-Go/virsh **creation** path.
+`ansible/` declares the infrastructure: libvirt networks, disks and VM domains,
+generated from `config.yaml`. It is the Infrastructure-as-Code path; the Go
+`cms-ha phase init-vms` remains as a fallback until `provision.yml` has been
+validated end-to-end on a real hypervisor.
 
 Ansible is **not** used for runtime operations or fencing. Start/stop/shrink,
-state queries and STONITH stay on the thin `libvirt`/`virsh` primitive inside
-the Go orchestrator, so a failure in Python or the collections can never block
-a fence (split-brain protection). See the *Boundary: Ansible vs Puppet vs Go*
-section below for the rationale.
-
-## Migration status
-
-The repository is in the **coexistence window** of the migration:
-
-- ✅ Ansible (this directory) is the declared IaC path and is fully wired,
-  generated from `config.yaml` and covered by a parity test + CI lint.
-- ⏳ The Go/virsh **creation** path (`cms-ha phase init-vms`) is intentionally
-  still present so the current deploy pipeline keeps working. It carries a
-  "migration status" banner in `internal/phases/initvms/initvms.go`.
-
-Cut-over (removing the Go creation path and pointing `cms-ha deploy` at
-`provision.yml`) is deliberately deferred until `provision.yml` has been run
-end-to-end against a real hypervisor. Until then, prefer:
+state queries and STONITH stay on the libvirt primitive inside the Go
+orchestrator, so a failure in Python or the collections can never block a fence.
 
 ```bash
 make provision                       # Ansible creates networks + VMs
 ./cms-ha deploy --skip-vm-create     # service phases only
 ```
 
-New creation logic must go in the Ansible roles, never in the Go phase.
+New creation logic goes in the Ansible roles, not in the Go phase.
 
 ## Boundary: Ansible vs Puppet vs Go
 
@@ -94,7 +79,7 @@ ansible-playbook playbooks/provision.yml \
 
 or via an `ansible-vault`-encrypted `group_vars/all/vault.yml`.
 
-## Parity & tests
+## Parity & Tests
 
 `config.yaml` ↔ inventory parity is enforced by a unit test
 (`tests/ansible_test.go`): every node in `config.yaml` must appear in the

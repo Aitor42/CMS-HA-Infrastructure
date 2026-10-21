@@ -15,7 +15,7 @@
 Redundancy is implemented at multiple levels:
 
 1. **Network level (L2):** STP (Spanning Tree Protocol) enabled on the virtual bridges (`stp="on"` in the XML definition of the libvirt networks).
-2. **Service level:** Dual K3s master (HA), dual CMS frontends, DRBD replication between master nodes.
+2. **Service level:** Three K3s masters (etcd quorum), dual CMS frontends, DRBD replication between master nodes.
 3. **Application level:** Nginx LB distributes traffic between the 2 frontends; K3s automatically redistributes pods upon worker node failure.
 
 ### STP Configuration in Virtual Networks

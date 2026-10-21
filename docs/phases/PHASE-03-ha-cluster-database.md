@@ -35,7 +35,7 @@
   - Only the promoted primary master (`internal-master1` by default) mounts the DRBD volume.
 - **Dynamic Node Pinning (Kubernetes + DRBD):** 
   - To prevent MariaDB from running on nodes without the mounted DRBD storage, `nodeSelector: drbd-status: primary` is configured in `mariadb-statefulset.yaml`.
-  - The script `06_setup_kubernetes.sh` automatically labels `internal-master1` with `drbd-status=primary`.
+  - The Kubernetes phase labels `internal-master1` with `drbd-status=primary`.
   - The local failover script (`/usr/local/bin/drbd-failover.sh`) dynamically reassigns this label during promotion and demotion, causing Kubernetes to automatically move the MariaDB pod to the active master node.
   - The pod tolerates node loss for only 60 s (`node.kubernetes.io/not-ready` / `unreachable` `NoExecute` tolerations with `tolerationSeconds: 60`). Kubernetes' default is 300 s, which would leave WordPress without a database for five minutes after a master failure even though the watchdog has already fenced the peer and promoted the survivor. The window is deliberately longer than the 40 s `node-monitor-grace-period`, so a transient blip does not evict the database.
 - **Automated Failover Watchdog (`drbd-failover-watchdog.service`):**
@@ -128,11 +128,11 @@ kubernetes/
 
 The monitoring phase binds Prometheus to a dedicated read-only `ClusterRole` (`prometheus-metrics-reader`: nodes, pods, services, endpoints, namespaces, `/metrics`), not `cluster-admin`. The bearer token issued for scraping is valid for **1 year** and is rotatable by re-running the monitoring phase; failures during token rotation are warnings, not silent failures.
 
-### Associated Scripts & Daemons
+### Associated Code & Daemons
 
-- `scripts/06_setup_kubernetes.sh` / `internal/phases/kubernetes/kubernetes.go` — K3s installation, node labeling, and MariaDB deployment.
-- `scripts/05_setup_drbd.sh` / `internal/phases/drbd/drbd.go` — DRBD configuration, initial Primary bootstrap, failover utility (`/usr/local/bin/drbd-failover.sh`), and watchdog service (`/etc/systemd/system/drbd-failover-watchdog.service`).
-- `scripts/utils/test_failover.sh` — Automated chaos engineering test suite validating unattended master, frontend, and worker node failover.
+- `internal/phases/kubernetes` (`cms-ha phase setup-kubernetes`) — K3s installation, node labeling and MariaDB deployment.
+- `internal/phases/drbd` (`cms-ha phase setup-drbd`) — DRBD configuration, initial Primary bootstrap, failover utility (`/usr/local/bin/drbd-failover.sh`) and watchdog service (`/etc/systemd/system/drbd-failover-watchdog.service`).
+- `cms-ha test failover` — chaos suite validating unattended master, frontend, worker and balancer failover.
 
 ### Verification
 

@@ -82,12 +82,11 @@ server {
   - DB_USER: `wp_user`
   - DB_HOST: `192.168.10.11:30306`
 
-### Associated Scripts
+### Implementation
 
-- `scripts/07_setup_nginx_wordpress.sh` — legacy installer (Nginx, self-signed
-  certificate, LB config, WordPress). Superseded by the Go pipeline:
-  `nginx` phase + `role::loadbalancer` (keepalived, step-ca-issued TLS) and the
-  `pki` phase (certificate issuance).
+- `internal/phases/nginx` (`cms-ha phase setup-nginx-wordpress`) — Nginx, keepalived and the WordPress frontends.
+- `internal/phases/pki` (`cms-ha phase setup-ca`) — issues the balancer certificates from the internal CA.
+- `puppet/modules/role` (`role::loadbalancer`, `role::cms`) — desired state of the balancers and frontends.
 
 ### Verification
 

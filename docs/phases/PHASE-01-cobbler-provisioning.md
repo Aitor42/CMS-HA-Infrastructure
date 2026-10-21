@@ -39,10 +39,10 @@ Below is a screenshot of the automated network installation process (PXE) manage
 
 ![PXE Installation](../pxe-installation.png)
 
-### Associated Scripts
+### Implementation
 
-- `scripts/01_setup_cobbler.sh` — Installation and configuration of Cobbler on the jumpstart node
-- `scripts/02_register_cobbler_nodes.sh` — Registers all nodes in Cobbler
+- `internal/phases/cobbler` (`cms-ha phase setup-cobbler`) — installs and configures Cobbler, DHCP, TFTP, DNS and NFS on the jumpstart node.
+- `internal/phases/register` (`cms-ha phase register-nodes`) — registers every node, its MAC address and static IP in Cobbler.
 
 ### Verification
 

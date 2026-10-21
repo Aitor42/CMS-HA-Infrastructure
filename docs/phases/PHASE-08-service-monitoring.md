@@ -37,7 +37,7 @@ scrape_configs:
 
 ### mysqld_exporter
 
-Credentials are **not** stored in Puppet code or repository files. The manifest installs `/usr/local/sbin/cms-ha-configure-mysqld-exporter.py`, a helper that writes the client config from a root-protected runtime fact (`/etc/cms-ha/runtime-secrets.json`, provisioned by `04_setup_puppet.sh` with `0600` permissions):
+Credentials are **not** stored in Puppet code or repository files. The manifest installs `/usr/local/sbin/cms-ha-configure-mysqld-exporter.py`, a helper that writes the client config from a root-protected runtime fact (`/etc/cms-ha/runtime-secrets.json`, provisioned by the Puppet phase with `0600` permissions):
 
 ```ini
 [client]
@@ -86,15 +86,10 @@ Requires the `mod_status` module enabled in Apache:
 - `apache_accesses_total` — Total HTTP accesses
 - `apache_sent_kilobytes_total` — Outbound traffic in KB
 
-### Grafana Dashboards
+### Implementation
 
-- **MySQL Overview** — Queries/s, connections, replication topology
-- **Nginx Overview** — Requests/s, active connections, upstream backend health
-- **Apache Overview** — Worker utilization, traffic, error rates
-
-### Associated Scripts
-
-- `scripts/08_setup_monitoring.sh` — Installation and setup of service-specific exporters
+- `internal/phases/monitoring` (`cms-ha phase setup-monitoring`) — verifies the service exporters, deploys the alert rules and checks Prometheus/Grafana.
+- `puppet/modules/role` (`role::monitor`) — keeps the exporter units and configuration converged.
 
 ### Verification
 

@@ -2,9 +2,9 @@
 
 ## Objectives to Achieve
 
-- [x] Rules: Restrict internet access exclusively to the load balancer (LB).
-- [x] Rules: Allow outbound internet access from the `main` subnet and permit `internal` communication.
-- [x] Rules: Restrict the `internal` subnet to communicate outbound only with `main`.
+- [x] Publish only HTTP/S on the LB VIP to the WAN.
+- [x] Allow `main` and `internal` outbound access through NAT.
+- [x] Allow inter-zone traffic while keeping the WAN out of both subnets.
 - [x] Verify subnet isolation.
 
 ---
@@ -55,11 +55,12 @@ COMMIT
 | main (eth2) → Internet (eth0) | WAN | ALLOW | Main subnet outbound access |
 | main (eth2) → internal (eth1) | internal | ALLOW | Main to internal access |
 | internal (eth1) → main (eth2) | main | ALLOW | Internal to main access |
-| internal (eth1) → Internet (eth0) | WAN | DENY (implicit) | Block internal network from internet |
+| internal (eth1) → Internet (eth0) | WAN | ALLOW (NAT) | Package and Puppet downloads |
 
-### Associated Scripts
+### Implementation
 
-- `scripts/09_setup_ufw.sh` — Configuration of perimeter and nodal firewalls
+- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — applies the perimeter and node firewall rules.
+- `internal/phases/router` (`cms-ha phase bootstrap-router`) — sets the gateway addresses, IP forwarding and NAT.
 
 ### Verification
 

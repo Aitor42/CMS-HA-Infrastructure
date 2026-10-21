@@ -4,7 +4,7 @@
 
 - [x] Segment the network into `internal` and `main` subnets.
 - [x] Design network layout defining L3 addresses and VLANs.
-- [x] Place the 6 static nodes in `internal` and the 3 static nodes in `main`.
+- [x] Place the 7 internal service nodes and the 4 main service nodes.
 
 ---
 
@@ -20,7 +20,7 @@
 
 ### IP Address Inventory
 
-**Internal Network — `internal` (6 nodes):**
+**Internal Network — `internal` (7 nodes):**
 
 | Hostname | IP | MAC | Role | RAM |
 |:---------|:---|:---|:-----|:----|
@@ -50,11 +50,11 @@
 | jumpstart | 192.168.10.10 / 192.168.20.10 | Cobbler + Puppet (both networks) |
 | ufw-router | 192.168.10.1 / 192.168.20.1 / DHCP | Perimeter firewall / router |
 
-### Associated Scripts
+### Implementation
 
-- `scripts/00_init_vms.sh` — Creates the virtual networks (bridges) and all VMs
-- `scripts/start_all_vms.sh` — Starts existing VMs (resume after `shrink_vm_ram.sh`)
-- `scripts/utils/shrink_vm_ram.sh` — Powers off VMs and adjusts RAM to resource-constrained environment limits
+- `internal/phases/vms` (`cms-ha phase init-vms`) — creates the libvirt networks and VM domains from `config.yaml`.
+- `cms-ha vm install-batches` — installs the clients in batches and shrinks their RAM afterwards.
+- `cms-ha vm start` / `cms-ha vm shrink` — powers the guests on and applies the production memory profile.
 
 ### Verification
 

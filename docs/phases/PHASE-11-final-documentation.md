@@ -45,10 +45,7 @@ Documented in [`docs/NETWORK_DIAGRAM.md`](../NETWORK_DIAGRAM.md):
 ### Repository Tagging
 
 ```bash
-# Tag the final release:
-git add -A
-git commit -m "docs: final documentation and software baseline"
-git tag -a v2.1 -m "Final Release - Fake Enterprise CMS Infrastructure"
+git tag -a v2.1 -m "CMS HA Infrastructure v2.1"
 ```
 
 ### Final Repository Structure

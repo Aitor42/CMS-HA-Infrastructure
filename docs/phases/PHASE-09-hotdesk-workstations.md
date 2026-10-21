@@ -23,7 +23,7 @@
 
 ### Provisioning
 
-The hot-desk VMs are created automatically in `00_init_vms.sh` and provisioned via PXE/Cobbler using the `ubuntu-24.04-x86_64` profile. Puppet applies the `role::hotdesk` class to install basic utilities.
+The hot-desk VMs are created by the `init-vms` phase (or Ansible) and provisioned via PXE/Cobbler using the `ubuntu-24.04-x86_64` profile. Puppet applies the `role::hotdesk` class to install basic utilities.
 
 ### Connectivity
 

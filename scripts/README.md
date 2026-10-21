@@ -34,12 +34,12 @@ Everything these scripts did is now implemented by the **v2** path:
 | `scripts/10_setup_internal_ca.sh` | `cms-ha phase setup-pki` |
 | `scripts/11_traffic_mix.sh` | `cms-ha traffic` (k6) |
 | `scripts/start_all_vms.sh` | `cms-ha vm start` |
-| `scripts/utils/init_mariadb_db.sh` | `kubernetes/jobs/init-db-job.yaml` (`kubectl apply -k`) |
-| `scripts/utils/install_by_batches.sh` | `ansible/playbooks/provision.yml` · `cms-ha install-batches` |
-| `scripts/utils/recreate_failed.sh` | `cms-ha cleanup` · `cms-ha recreate` |
-| `scripts/utils/repair_paused_kubernetes.sh` | `cms-ha cleanup` |
+| `scripts/utils/init_mariadb_db.sh` | `cms-ha phase setup-kubernetes` (re-applies the init Job) |
+| `scripts/utils/install_by_batches.sh` | `ansible/playbooks/provision.yml` · `cms-ha vm install-batches` |
+| `scripts/utils/recreate_failed.sh` | `cms-ha vm recreate` |
+| `scripts/utils/repair_paused_kubernetes.sh` | `cms-ha repair k8s` |
 | `scripts/utils/shrink_vm_ram.sh` | `cms-ha vm shrink` |
-| `scripts/utils/sync_vm_clocks.sh` | `cms-ha vm clocks` · chrony (`role::base`) |
+| `scripts/utils/sync_vm_clocks.sh` | `cms-ha repair clocks` · chrony (`role::base`) |
 | `scripts/utils/test_failover.sh` | `cms-ha test failover` |
 | `scripts/utils/verify_all.sh` | `cms-ha verify` |
 

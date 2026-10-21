@@ -171,7 +171,7 @@ graph TD
     end
 
     subgraph CONFIG_MGMT["⚙ Configuration Management"]
-        STEP02["Step 02 · Puppet Server + Agent convergence<br/>cms-ha phase setup-puppet<br/>(includes hot-desk provisioning)"]
+        STEP02["Step 02 · Puppet Server + Agent convergence<br/>cms-ha phase setup-puppet<br/>(converges every node, including hot-desks)"]
     end
 
     subgraph HA_INFRA["🔧 HA Infrastructure"]
@@ -218,6 +218,6 @@ graph TD
 - `cms-ha deploy` runs this whole sequence in one shot; the individual `cms-ha phase …` commands shown above are the equivalent for re-running a single phase.
 - The initial deployment requires launching the **Jumpstart node (Phase 00a)** first, as it serves as the provisioning server for all other clients.
 - **Phase 00b** is performed **sequentially in batches** (`cms-ha vm install-batches`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
-- The `cms-ha deploy --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
+- `cms-ha deploy --skip-vm-create` drops the two VM-creation steps and starts with Cobbler; the remaining phases are idempotent and run on the already-installed VMs.
 - **Phase 01.9** comes before Puppet on purpose: every later phase installs packages from the internet, and the nodes only get there once the router owns its gateway addresses, has `net.ipv4.ip_forward=1` and MASQUERADEs both lab networks out of the WAN uplink.
 - Configuration phases (Puppet, DRBD, K3s, Nginx, UFW, Monitoring, and Internal CA) are **strictly sequential** due to mutual service dependencies.
