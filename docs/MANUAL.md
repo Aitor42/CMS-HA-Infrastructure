@@ -629,7 +629,9 @@ real:
 - **TLS renewal**: runs the production `cms-tls-renew.sh` on the backup
   balancer with `RENEW_FORCE=1`, so the CA is really contacted over mTLS and
   the certificate is really rotated (step rejects an `--expires-in` above the
-  certificate lifetime, so forcing is the deterministic path); it then checks
+  certificate lifetime, so forcing is the deterministic path). The drill
+  compares the certificate **serial** before and after the run, because a
+  script that silently reports "not due" would otherwise pass; it then checks
   that nginx is active and the balancer answers HTTPS.
 - **Alert hygiene**: asserts that no alert is firing on the healthy lab, which
   catches rules that are permanently noisy or a stale backup/restore metric.

@@ -451,7 +451,7 @@ main-hotdesk3        192.168.20.203  running    OK
 | K3sNodeNotReady | critical | Kubelet unreachable > 3 min |
 | HTTP5xxResponses | warning | The blackbox probe receives a 5xx for > 2 min |
 | PrometheusTargetMissing | warning | Any scrape target down > 5 min |
-| BackupMissing | warning | No successful offsite backup > 26 h |
+| BackupMissing | critical | No successful offsite backup > 26 h |
 | BackupRestoreTestFailing | warning | Restore drill failing > 48 h |
 | EtcdNoQuorum | critical | Fewer than 2 of 3 etcd members reachable / no leader |
 | DRBDPeerDown | critical | DRBD replication link down > 2 min |
