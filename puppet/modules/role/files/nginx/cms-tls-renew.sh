@@ -16,8 +16,10 @@ CA_URL="https://ca.internal.local:8443"
 ROOT_CA=/usr/local/share/ca-certificates/cms_root_ca.crt
 CA_NAME="CMS Local CA"
 # Ask the CA for a renewal once fewer than this remains; the CA enforces the
-# actual minimum against the provisioner's configured durations.
-RENEW_WITHIN="720h"
+# actual minimum against the provisioner's configured durations. The e2e
+# renewal drill overrides it with a value longer than the certificate lifetime
+# so the CA is really contacted, without changing the production schedule.
+RENEW_WITHIN="${RENEW_WITHIN:-720h}"
 
 log() { echo "cms-tls-renew: $*"; }
 

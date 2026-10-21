@@ -160,6 +160,11 @@ test-failover-norestore: build ## Run failover tests without restoring
 	@echo "▶ Running failover tests (skip-restore mode)..."
 	./$(BINARY) -c $(CONFIG) test failover --skip-restore
 
+.PHONY: test-drills
+test-drills: build ## Run the operational drills (backup/restore, TLS renewal, alert hygiene)
+	@echo "▶ Running operational drills..."
+	./$(BINARY) -c $(CONFIG) test drills
+
 .PHONY: integration
 integration: build ## End-to-end integration test on a real KVM host (deploy + verify + failover)
 	@echo "▶ Running end-to-end integration test..."
@@ -169,6 +174,11 @@ integration: build ## End-to-end integration test on a real KVM host (deploy + v
 integration-traffic: build ## Integration test including the k6 load profile (TRAFFIC_DURATION=45 TRAFFIC_VUS=3)
 	@echo "▶ Running end-to-end integration test with the k6 load profile..."
 	tests/integration/run.sh --with-traffic
+
+.PHONY: integration-drills
+integration-drills: build ## Integration test including traffic and the operational drills
+	@echo "▶ Running end-to-end integration test with traffic and drills..."
+	tests/integration/run.sh --with-traffic --with-drills
 
 .PHONY: integration-resume
 integration-resume: build ## Resume the end-to-end integration test from the deploy checkpoint

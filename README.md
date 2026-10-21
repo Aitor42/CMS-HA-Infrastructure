@@ -445,11 +445,11 @@ main-hotdesk3        192.168.20.203  running    OK
 | DiskSpaceCritical | critical | Filesystem < 10% free > 1 min |
 | DiskSpaceWarning | warning | Filesystem < 20% free > 5 min |
 | HighMemoryUsage | warning | Memory usage > 85% > 5 min |
-| MariaDBDown | critical | MariaDB exporter unreachable > 1 min |
-| NginxDown | critical | Nginx exporter unreachable > 1 min |
-| ApacheDown | warning | Apache exporter unreachable > 2 min |
+| MariaDBDown | critical | MariaDB down or its exporter unreachable > 1 min |
+| NginxDown | critical | Nginx down or its exporter unreachable > 1 min |
+| ApacheDown | warning | Apache down or its exporter unreachable > 2 min |
 | K3sNodeNotReady | critical | Kubelet unreachable > 3 min |
-| HighHTTP5xxRate | warning | HTTP 5xx rate > 5% over 5 min |
+| HTTP5xxResponses | warning | The blackbox probe receives a 5xx for > 2 min |
 | PrometheusTargetMissing | warning | Any scrape target down > 5 min |
 | BackupMissing | warning | No successful offsite backup > 26 h |
 | BackupRestoreTestFailing | warning | Restore drill failing > 48 h |
@@ -503,15 +503,18 @@ Automated failover tests validate the HA design under real failure conditions:
 | DRBD Master Power Cut | Primary master destroyed (no shutdown) | Same failover with stale `Primary` metadata left on the dead node: the survivor promotes, and the restarted node stands down as Secondary instead of becoming a second writer |
 | CMS Frontend Failover | WordPress node shutdown | Nginx routes traffic to surviving frontend with zero downtime |
 | K3s Worker Failover | Worker node shutdown | Pods reschedule to remaining worker |
+| Load Balancer VIP Failover | Shutdown of the balancer holding the VIP | keepalived moves the floating address to the survivor, which serves HTTPS; after the node returns exactly one balancer owns the VIP again |
 
 ---
 
 ## End-to-End Integration Test
 
 `tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
-a real KVM host: **build → `deploy` → `verify` → `test failover`**, plus an
-optional **k6 load profile** (`--with-traffic`, or `make integration-traffic`)
-between verify and failover. It is the job
+a real KVM host: **build → `deploy` → `verify` → `test drills` → `test failover`**,
+plus an optional **k6 load profile** (`--with-traffic`, or `make integration-traffic`)
+between verify and the drills. The drills (`--with-drills`) run the real backup
+and restore CronJobs, renew the balancer certificate over mTLS and assert that no
+alert is firing on the healthy lab. It is the job
 that `.github/workflows/integration.yml` runs on a **self-hosted runner labelled
 `kvm`**, triggered by hand (`workflow_dispatch`), because it needs libvirt and
 `/dev/kvm`.

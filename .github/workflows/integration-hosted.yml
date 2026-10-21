@@ -328,7 +328,7 @@ jobs:
             sleep 30
           done
 
-      - name: Run the integration test (deploy + verify + failover + traffic)
+      - name: Run the integration test (deploy + verify + traffic + drills + failover)
         if: ${{ inputs.stage == 'full' }}
         env:
           SKIP_CHAOS: ${{ inputs.skip_chaos }}
@@ -343,7 +343,9 @@ jobs:
           TRAFFIC_VUS: "3"
         run: |
           set -o pipefail
-          ARGS=(--with-traffic)
+          # The drills exercise the CronJobs and the certificate timer that a
+          # deploy + verify never runs; they are functional gates, not chaos.
+          ARGS=(--with-traffic --with-drills)
           if [ "$SKIP_CHAOS" = "true" ]; then
             ARGS+=(--skip-chaos)
           fi

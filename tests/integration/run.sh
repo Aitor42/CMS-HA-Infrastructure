@@ -10,7 +10,7 @@
 # topology has already been provisioned (SKIP_VM_CREATE=1).
 #
 # Usage:
-#   tests/integration/run.sh [--resume] [--skip-deploy] [--skip-chaos] [--with-traffic] [--dry-run]
+#   tests/integration/run.sh [--resume] [--skip-deploy] [--skip-chaos] [--with-traffic] [--with-drills] [--dry-run]
 #
 # Environment:
 #   CONFIG           configuration file             (default: config.yaml)
@@ -38,6 +38,7 @@ RESUME=0
 SKIP_DEPLOY=0
 SKIP_CHAOS=0
 WITH_TRAFFIC=0
+WITH_DRILLS=0
 DRY_RUN=0
 
 usage() {
@@ -50,6 +51,7 @@ while [ $# -gt 0 ]; do
     --skip-deploy)  SKIP_DEPLOY=1 ;;
     --skip-chaos)   SKIP_CHAOS=1 ;;
     --with-traffic) WITH_TRAFFIC=1 ;;
+    --with-drills)  WITH_DRILLS=1 ;;
     --dry-run)      DRY_RUN=1 ;;
     -h|--help)      usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -147,6 +149,19 @@ if [ "$EXIT_CODE" -eq 0 ] && [ "$WITH_TRAFFIC" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; 
     log "Traffic test passed"
   else
     fail "traffic test failed"
+    EXIT_CODE=1
+  fi
+fi
+
+# ── Drills: backup/restore, TLS renewal, alert hygiene ─────────────────────
+# These paths have their own timers/CronJobs, so a green deploy never proves
+# them. Each drill runs the production job/script and gates on its result.
+if [ "$EXIT_CODE" -eq 0 ] && [ "$WITH_DRILLS" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
+  log "Running the operational drills (backup/restore, TLS renewal, alert hygiene)"
+  if ./cms-ha -c "$CONFIG" test drills 2>&1 | tee "$ARTIFACTS_DIR/drills.log"; then
+    log "Operational drills passed"
+  else
+    fail "operational drills failed"
     EXIT_CODE=1
   fi
 fi

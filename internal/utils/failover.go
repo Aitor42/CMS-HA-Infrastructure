@@ -68,13 +68,19 @@ func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 	if !f.testK3sWorkerFailover(ctx, opts) {
 		failed++
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !f.testLBFailover(ctx, opts) {
+		failed++
+	}
 	// Distinguish "all scenarios ran" from "interrupted halfway through" so
 	// callers never mistake a cancelled run for a successful one.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if failed > 0 {
-		return fmt.Errorf("%d of 4 failover scenarios failed", failed)
+		return fmt.Errorf("%d of 5 failover scenarios failed", failed)
 	}
 	return nil
 }
@@ -395,6 +401,153 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	duration := time.Since(start)
 	f.printSummary("K3s Worker Failover", pass, duration)
 	return pass
+}
+
+// testLBFailover stops the balancer that currently owns the keepalived VIP and
+// asserts that the survivor takes it over. The earlier scenarios only prove
+// that both balancers answer individually; none of them proves the floating
+// address moves, which is the whole point of having two of them.
+func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) bool {
+	logging.Info("Scenario 5: Load Balancer VIP Failover")
+	start := time.Now()
+	pass := true
+
+	if len(f.cfg.Nodes.LBs) < 2 {
+		logging.Warn("Skipping LB failover test: requires at least 2 balancer nodes")
+		f.printSkipped("Load Balancer VIP Failover")
+		return true
+	}
+
+	vip := f.cfg.LBVIP()
+	if vip == "" {
+		logging.Warn("Skipping LB failover test: network.main.vip is not configured")
+		f.printSkipped("Load Balancer VIP Failover")
+		return true
+	}
+
+	var holders []*config.NodeDetail
+	for i := range f.cfg.Nodes.LBs {
+		lb := &f.cfg.Nodes.LBs[i]
+		if lb.IP != "" && f.lbHoldsVIP(ctx, lb.IP, vip) {
+			holders = append(holders, lb)
+		}
+	}
+	if len(holders) != 1 {
+		// Zero holders means the front door is already down; two holders is a
+		// VRRP split. Neither is a failover the test caused, so report it
+		// instead of shutting a balancer down on top of a broken VIP.
+		logging.Warn("Expected exactly one balancer to hold the VIP %s before the test, found %d", vip, len(holders))
+		f.logLBState(ctx, "VIP ownership is not 1-of-2 before the LB failover")
+		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
+		return false
+	}
+	holder := holders[0]
+	var survivor *config.NodeDetail
+	for i := range f.cfg.Nodes.LBs {
+		lb := &f.cfg.Nodes.LBs[i]
+		if lb.IP != "" && lb.Name != holder.Name {
+			survivor = lb
+			break
+		}
+	}
+	if survivor == nil {
+		logging.Warn("Skipping LB failover test: no second balancer with an address")
+		f.printSkipped("Load Balancer VIP Failover")
+		return true
+	}
+	// Never stop the VIP holder if the survivor is not ready to take over: the
+	// test would turn a degraded cluster into a full outage.
+	if _, _, code, err := f.ssh.RunCommand(ctx, survivor.IP, "systemctl is-active --quiet keepalived"); err != nil || code != 0 {
+		logging.Warn("%s cannot take over the VIP (keepalived is not active or the host is unreachable)", survivor.Name)
+		f.logLBState(ctx, "the surviving balancer is not ready before the LB failover")
+		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
+		return false
+	}
+
+	logging.Info("Stopping %s, which currently owns %s", holder.Name, vip)
+	if err := f.shutdownForTest(ctx, holder.Name); err != nil {
+		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
+		logging.Error("%v", err)
+		return false
+	}
+
+	// The survivor must both acquire the address and serve the CMS through it.
+	// Waiting on the address alone would pass while nginx is still down, and
+	// waiting on HTTPS alone could be answered by a stale connection.
+	if !waitFor(ctx, 90*time.Second, 2*time.Second, func() bool {
+		return f.lbHoldsVIP(ctx, survivor.IP, vip) &&
+			checkLBReachability(ctx, vip, f.cfg.TrafficVHost())
+	}) {
+		pass = false
+		logging.Warn("%s did not take over the VIP %s after %s was shut down", survivor.Name, vip, holder.Name)
+		f.logLBState(ctx, "VIP did not move to the surviving balancer")
+	}
+
+	if !opts.SkipRestore {
+		if err := f.libvirt.Start(ctx, holder.Name); err != nil {
+			pass = false
+			logging.Error("failed to restore %s: %v", holder.Name, err)
+		}
+		f.waitForSSH(ctx, holder.IP, 120*time.Second)
+	}
+
+	// After the reboot exactly one balancer must own the VIP again. keepalived
+	// preempts back to the higher-priority node, so give it time to settle.
+	if !waitFor(ctx, 120*time.Second, 5*time.Second, func() bool {
+		return f.countVIPHolders(ctx, vip) == 1 &&
+			checkLBReachability(ctx, vip, f.cfg.TrafficVHost())
+	}) {
+		pass = false
+		logging.Warn("VIP %s is not owned by exactly one balancer after %s recovered", vip, holder.Name)
+		f.logLBState(ctx, "VIP ownership did not settle after the balancer recovered")
+	}
+
+	duration := time.Since(start)
+	f.printSummary("Load Balancer VIP Failover", pass, duration)
+	return pass
+}
+
+// lbHoldsVIP reports whether host currently has the floating address.
+func (f *FailoverTester) lbHoldsVIP(ctx context.Context, host, vip string) bool {
+	out, _, code, err := f.ssh.RunCommand(ctx, host, "ip -4 -o addr show")
+	if err != nil || code != 0 {
+		return false
+	}
+	for _, field := range strings.Fields(out) {
+		if strings.HasPrefix(field, vip+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// countVIPHolders returns how many balancers currently own the VIP.
+func (f *FailoverTester) countVIPHolders(ctx context.Context, vip string) int {
+	holders := 0
+	for _, lb := range f.cfg.Nodes.LBs {
+		if lb.IP != "" && f.lbHoldsVIP(ctx, lb.IP, vip) {
+			holders++
+		}
+	}
+	return holders
+}
+
+// logLBState dumps the balancers' addresses and keepalived state when a VIP
+// assertion fails; otherwise the log only says that a wait expired.
+func (f *FailoverTester) logLBState(ctx context.Context, reason string) {
+	const cmd = "ip -4 -o addr show; " +
+		"systemctl is-active nginx keepalived 2>&1; " +
+		"journalctl -u keepalived --no-pager -n 20 2>&1"
+	for _, lb := range f.cfg.Nodes.LBs {
+		if lb.IP == "" {
+			continue
+		}
+		out, _, _, err := f.ssh.RunCommand(ctx, lb.IP, cmd)
+		if err != nil {
+			continue
+		}
+		logging.Warn("%s — %s\n%s", reason, lb.Name, strings.TrimSpace(out))
+	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

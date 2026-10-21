@@ -603,6 +603,30 @@ To back up application files on either frontend node:
 tar -czf wp-files-backup.tar.gz --exclude='wp-content/uploads' /var/www/html/
 ```
 
+### 6.3 Operational Drills
+
+The deploy and verify phases prove that the cluster is serving, but they never
+run the paths that only fire on a timer. `cms-ha test drills` exercises them for
+real:
+
+```bash
+./cms-ha test drills
+```
+
+- **Backup and restore**: creates one-off Jobs from the `mariadb-backup` and
+  `mariadb-restore-test` CronJobs, waits for both, and asserts that Prometheus
+  received fresh `cms_backup_last_success_timestamp_seconds` and
+  `cms_backup_restore_last_success_timestamp_seconds` series. A drill job that
+  fails is reported with the Job, Pod and container logs.
+- **TLS renewal**: runs the production `cms-tls-renew.sh` on the backup
+  balancer with `RENEW_WITHIN=8760h`, so the CA is really contacted over mTLS
+  and the certificate is really rotated; it then checks that nginx is active and
+  the balancer answers HTTPS.
+- **Alert hygiene**: asserts that no alert is firing on the healthy lab, which
+  catches rules that are permanently noisy or a stale backup/restore metric.
+
+The integration pipeline enables it with `--with-drills` after the traffic test.
+
 ---
 
 ## 7. Failover and Disaster Recovery
@@ -646,7 +670,7 @@ Run the chaos engineering test suite to validate HA behaviour:
 # Legacy v1:
 bash scripts/utils/test_failover.sh
 ```
-This tests DRBD master failover, CMS frontend failover, and K3s worker failover with timing metrics. Scenarios that cannot run (fewer than 2 masters, 2 frontends, or 2 workers) are reported as **`SKIP`** — they are no longer counted as failures. Every scenario first verifies that the node actually reached `shut off`; a shutdown that never completes is reported as a failure, so an interrupted test can never be mistaken for a PASS. Cancelled runs return an error instead of a silent success.
+This tests DRBD master failover (graceful and power-cut), CMS frontend failover, K3s worker failover, and load-balancer VIP failover with timing metrics. The VIP scenario stops whichever balancer currently owns the floating address, asserts that the survivor takes it over and serves HTTPS, then restarts the node and waits until exactly one balancer owns the VIP again. Scenarios that cannot run (fewer than 2 masters, 2 frontends, 2 workers or 2 balancers) are reported as **`SKIP`** — they are no longer counted as failures. Every scenario first verifies that the node actually reached `shut off`; a shutdown that never completes is reported as a failure, so an interrupted test can never be mistaken for a PASS. Cancelled runs return an error instead of a silent success.
 
 ---
 
