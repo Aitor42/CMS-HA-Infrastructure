@@ -2,6 +2,8 @@ package tests
 
 import (
 	"bytes"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/cmd/cms-ha/root"
@@ -104,18 +106,30 @@ func TestCLI_VMSubcommands(t *testing.T) {
 
 func TestCLI_HelpExecution(t *testing.T) {
 	rootCmd := root.GetRootCmd()
+	// GetRootCmd returns the process-wide command; restore it so a later test
+	// does not inherit the buffer or the `--help` argument set here.
+	t.Cleanup(func() {
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(os.Stdout)
+		rootCmd.SetErr(os.Stderr)
+	})
+
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
 	rootCmd.SetArgs([]string{"--help"})
 
-	err := rootCmd.Execute()
-	if err != nil {
+	if err := rootCmd.Execute(); err != nil {
 		t.Fatalf("expected --help to succeed, got: %v", err)
 	}
 
 	out := buf.String()
-	if len(out) == 0 {
-		t.Errorf("expected help output to be non-empty")
+	if out == "" {
+		t.Fatal("expected help output to be non-empty")
+	}
+	for _, command := range []string{"deploy", "verify", "traffic", "cleanup", "phase"} {
+		if !strings.Contains(out, command) {
+			t.Errorf("help output does not list the %q command", command)
+		}
 	}
 }
