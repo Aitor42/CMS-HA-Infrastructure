@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -339,22 +340,42 @@ EOF_PUPPET
 	return nil
 }
 
+// catalogConcurrency resolves the first-catalog concurrency: the
+// PUPPET_CONCURRENCY environment variable wins, then deploy.puppet_concurrency,
+// and finally an automatic value derived from the host's CPU count (4 to 8).
+// The measured work was ~1,255s across 12 nodes with a limit of 4, so the
+// scheduling tail (376s vs a 314s ideal) is what a wider window removes.
+func (p *Phase) catalogConcurrency() (int, string) {
+	if envC := strings.TrimSpace(os.Getenv("PUPPET_CONCURRENCY")); envC != "" {
+		if c, err := strconv.Atoi(envC); err == nil && c > 0 {
+			return c, "PUPPET_CONCURRENCY"
+		}
+		logging.Warn("Ignoring invalid PUPPET_CONCURRENCY=%q (expected a positive integer)", envC)
+	}
+	if c := p.cfg.Deploy.PuppetConcurrency; c > 0 {
+		return c, "config"
+	}
+	c := runtime.NumCPU() / 2
+	if c < 4 {
+		c = 4
+	}
+	if c > 8 {
+		c = 8
+	}
+	return c, "auto"
+}
+
 func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) error {
 	var errs []string
 	var mu sync.Mutex
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
 
-	concurrency := 4
-	if envC := os.Getenv("PUPPET_CONCURRENCY"); envC != "" {
-		if c, err := strconv.Atoi(envC); err == nil && c > 0 {
-			concurrency = c
-		}
-	}
+	concurrency, source := p.catalogConcurrency()
 	if concurrency > len(nodes) {
 		concurrency = len(nodes)
 	}
 
-	logging.Info("Running first catalog in parallel across %d nodes (concurrency limit: %d)...", len(nodes), concurrency)
+	logging.Info("Running first catalog in parallel across %d nodes (concurrency limit: %d, source: %s)...", len(nodes), concurrency, source)
 
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup

@@ -264,6 +264,13 @@ type DeployConfig struct {
 	// count: anything above it is a second round of installs, and anything
 	// below it leaves cores idle for no benefit.
 	InstallBatchSize int `yaml:"install_batch_size"`
+	// PuppetConcurrency caps how many nodes run their first Puppet catalog at
+	// the same time. Zero (the default) derives it from the host's CPU count
+	// (4 base, at most 8), and the PUPPET_CONCURRENCY environment variable
+	// overrides both. Each agent spends most of its catalog applying resources
+	// inside its own guest, so raising it mostly parallelises guest work while
+	// the puppetserver serialises the compile step.
+	PuppetConcurrency int `yaml:"puppet_concurrency"`
 }
 
 // DRBDConfig controls the DRBD cms_data resource, in particular STONITH
@@ -581,6 +588,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Deploy.InstallBatchSize < 0 {
 		return fmt.Errorf("deploy.install_batch_size must not be negative (got %d)", c.Deploy.InstallBatchSize)
+	}
+	if c.Deploy.PuppetConcurrency < 0 {
+		return fmt.Errorf("deploy.puppet_concurrency must not be negative (got %d)", c.Deploy.PuppetConcurrency)
 	}
 	if _, _, err := net.ParseCIDR(c.Network.Internal.CIDR); err != nil {
 		return fmt.Errorf("network.internal.cidr is not a valid CIDR: %w", err)

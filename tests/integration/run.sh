@@ -16,9 +16,12 @@
 #   CONFIG           configuration file             (default: config.yaml)
 #   STATE_FILE       deployment checkpoint          (default: deploy.state)
 #   ARTIFACTS_DIR    where logs/state are collected (default: integration-artifacts)
+#   TIMINGS_FILE     per-phase timing report         (default: $ARTIFACTS_DIR/timings.json)
 #   SKIP_VM_CREATE   1 = the lab's networks and VMs are already provisioned, so
 #                     deploy runs with --skip-vm-create (Step 3 of the manual).
 #                     Set by workflows that provision (Step 1/2) beforehand.
+#                     It also starts the deploy at 03-repair-ssh, because the
+#                     provisioning steps already ran Cobbler and registration.
 #   TRAFFIC_DURATION seconds of k6 load with --with-traffic (default: 45)
 #   TRAFFIC_VUS      k6 virtual users with --with-traffic    (default: 3)
 # ---------------------------------------------------------------------------
@@ -30,6 +33,7 @@ cd "$ROOT_DIR"
 CONFIG="${CONFIG:-config.yaml}"
 STATE_FILE="${STATE_FILE:-deploy.state}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-integration-artifacts}"
+TIMINGS_FILE="${TIMINGS_FILE:-$ARTIFACTS_DIR/timings.json}"
 SKIP_VM_CREATE="${SKIP_VM_CREATE:-0}"
 TRAFFIC_DURATION="${TRAFFIC_DURATION:-45}"
 TRAFFIC_VUS="${TRAFFIC_VUS:-3}"
@@ -42,7 +46,7 @@ WITH_DRILLS=0
 DRY_RUN=0
 
 usage() {
-  sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -105,10 +109,18 @@ if [ "$SKIP_DEPLOY" -eq 0 ]; then
   fi
   if [ "$SKIP_VM_CREATE" = "1" ]; then
     # The VM/networks phases were already run by the provisioning step, so take
-    # the manual's Step 3 path instead of revalidating them.
+    # the manual's Step 3 path instead of revalidating them. Cobbler and the
+    # node registration also already ran, so start at 03-repair-ssh: re-running
+    # them would rebuild the 3.9 GB mirror and re-register every system for no
+    # benefit (measured: 1m26s on the hosted runner).
     log "Deploying into an already provisioned lab (--skip-vm-create)"
     DEPLOY_ARGS+=(--skip-vm-create)
+    if [ "$RESUME" -eq 0 ]; then
+      DEPLOY_ARGS+=(--from-phase 03-repair-ssh)
+    fi
   fi
+
+  DEPLOY_ARGS+=(--timings-file "$TIMINGS_FILE")
 
   if ./cms-ha -c "$CONFIG" deploy --state-file "$STATE_FILE" "${DEPLOY_ARGS[@]}"; then
     log "Deployment succeeded"

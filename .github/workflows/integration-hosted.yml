@@ -96,7 +96,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "stable"
+          go-version-file: go.mod
           cache: true
 
       - name: Install the hypervisor stack
@@ -312,20 +312,14 @@ jobs:
           # The batches phase leaves every guest shut off until the last one is
           # installed, then boots the whole topology at once (that is what keeps
           # an idle batch from competing for RAM with the next batch's
-          # installers). All thirteen guests therefore boot right here: give
-          # them ten minutes instead of sampling once.
-          for attempt in $(seq 1 20); do
-            if ./cms-ha -c "$CONFIG" status ssh \
-                2>&1 | tee -a "$ARTIFACTS_DIR/04-status-ssh.log"; then
-              break
-            fi
-            if [ "$attempt" = 20 ]; then
-              echo "::error::the lab did not come up within 10 minutes of provisioning"
-              exit 1
-            fi
-            echo "::warning::status ssh attempt $attempt failed; retrying in 30s"
-            sleep 30
-          done
+          # installers). All thirteen guests therefore boot right here.
+          #
+          # `--wait` polls every node concurrently and returns as soon as the
+          # last one accepts a session. The old loop sampled the whole table
+          # once and then slept 30s, so it spent up to 87.5s to do 27.5s of work
+          # (measured on run 39580835333).
+          ./cms-ha -c "$CONFIG" status ssh --wait 10m \
+            2>&1 | tee "$ARTIFACTS_DIR/04-status-ssh.log"
 
       - name: Run the integration test (deploy + verify + traffic + drills + failover)
         if: ${{ inputs.stage == 'full' }}

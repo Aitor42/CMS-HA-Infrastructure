@@ -96,6 +96,15 @@ func TestUtils_CheckSSH_Concurrent(t *testing.T) {
 	_ = utils.CheckSSH(ctx, cfg, s, l)
 }
 
+func TestUtils_WaitForAllSSH_NoNodes(t *testing.T) {
+	// A partial config with no named nodes must fail fast instead of blocking
+	// for the whole budget.
+	err := utils.WaitForAllSSH(t.Context(), &config.Config{}, newTestPool(t), time.Second)
+	if err == nil {
+		t.Fatal("expected an error when no node has an IP address")
+	}
+}
+
 func TestUtils_VerifyAll_Concurrent(t *testing.T) {
 	cfg := &config.Config{
 		Nodes: config.NodesConfig{
@@ -110,7 +119,10 @@ func TestUtils_VerifyAll_Concurrent(t *testing.T) {
 	l := libvirt.NewClient("test:///default")
 
 	v := utils.NewVerifier(cfg, s, l)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Some checks honour the context and only return when it expires, so this
+	// budget is the test's wall time. It only has to outlive the fan-out, not
+	// any real check: the dummy IPs make every probe fail immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	// VerifyAll runs every check concurrently. The dummy IPs make it fail, but

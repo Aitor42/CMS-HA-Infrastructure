@@ -123,11 +123,27 @@ func (p *Phase) Run(ctx context.Context) error {
 	// reaches quorum. The token travels through --token-file instead of the
 	// command line: argv of the remote shell would expose it to every local
 	// user via /proc/*/cmdline.
+	//
+	// The joins run concurrently: they are independent members of the same
+	// embedded etcd cluster (k3s adds them as learners and promotes them once
+	// caught up). Measured on the hosted run, joining the two extra servers in
+	// series cost 43.8s + 32.8s; the quorum check below is what proves the
+	// parallel join actually converged.
+	serverJoinTasks := make(map[string]func(context.Context, *ssh.Pool) error, len(joiningServers))
 	for _, m := range joiningServers {
-		logging.Info("Installing K3s on %s (server join)...", m.Name)
-		joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, joinTokenPath, m.IP)
-		if err := runChecked(ctx, p.pool, m.IP, joinCmd, "join K3s "+m.Name); err != nil {
-			return err
+		if m.IP == "" {
+			continue
+		}
+		m := m
+		serverJoinTasks[m.IP] = func(ctx context.Context, pool *ssh.Pool) error {
+			logging.Info("Installing K3s on %s (server join)...", m.Name)
+			joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, joinTokenPath, m.IP)
+			return runChecked(ctx, pool, m.IP, joinCmd, "join K3s "+m.Name)
+		}
+	}
+	for _, r := range p.pool.RunParallelFunc(ctx, serverJoinTasks) {
+		if r.Err != nil {
+			return r.Err
 		}
 	}
 

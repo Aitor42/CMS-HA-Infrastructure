@@ -240,7 +240,16 @@ pki:
 
 deploy:
   ssh_timeout: 600s
-  stagger_delay: 5s
+  # The phases run against separate guests (or are already ordered by their own
+  # dependencies), so the 5s pause only added 55s to the hosted run (measured:
+  # 11 gaps of 5s). Keep it in config.yaml for slow interactive hosts; CI does
+  # not need it.
+  stagger_delay: 0s
+  # Puppet catalogs are mostly guest-side work (apt, files, services). The
+  # measured initial catalog took 376s for ~1,255s of work at concurrency 4;
+  # 6 packs the same work into fewer waves without saturating the 4 vCPU
+  # puppetserver. Override per run with PUPPET_CONCURRENCY.
+  puppet_concurrency: 6
   # A hosted runner has 4 vCPU for the whole lab. Each installer saturates
   # about one vCPU, so a batch of five pays two rounds of ~8 minutes while the
   # same twelve guests in batches of four pay three rounds in total. It is also

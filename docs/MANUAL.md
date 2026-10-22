@@ -112,6 +112,8 @@ Run the command that automates the creation and installation of client nodes in 
 *   **Memory shrinking:** after a batch finishes installing, its RAM is reduced to the production profile (768 MB – 2048 MB) and the batch stays shut down until the last one finishes. Re-apply later with `./cms-ha vm shrink`.
 *   **Boot order:** `./cms-ha vm fix-boot-order` makes rebooted VMs boot from disk instead of PXE.
 *   **Install timeout:** `deploy.node_install_timeout` (default `15m`) is a stall guard per batch; the hosted 4-vCPU lab uses `25m`.
+*   **Puppet catalog width:** `deploy.puppet_concurrency` caps how many nodes run their first catalog at once. `0` (default) derives it from the host CPU count (4–8); `PUPPET_CONCURRENCY` overrides both. Most of a catalog is guest-side work, so a wider window trims the tail without saturating the puppetserver.
+*   **Stagger:** `deploy.stagger_delay` pauses between phases. It defaults to `5s` for slow interactive hosts; CI sets `0s` because the phases already run against separate guests.
 *   **Installed system vs installer:** the live installer answers on port 22 but refuses the deployment key. A node that goes silent after its installer answered has a wedged shutdown; the batch restarts it and, because boot order is already disk-first, it returns to the installed system.
 
 The following screenshot shows the automated PXE network installation process via Cobbler:
@@ -133,6 +135,10 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 ./cms-ha deploy --from-phase drbd-setup     # start at a named phase
 ./cms-ha deploy --state-file /var/tmp/deploy.state
 
+# Record per-phase and per-sub-step durations (JSON) for before/after
+# comparisons. It is written even when a phase fails:
+./cms-ha deploy --timings-file integration-artifacts/timings.json
+
 # (Or Makefile: make deploy-resume)
 ```
 
@@ -142,7 +148,7 @@ unknown value is rejected with the list of valid phases.
 
 **Orchestration in short:**
 1. The jumpstart node converges first, so Puppet Server, DNS, Cobbler, DHCP and TFTP are up before any client runs.
-2. Clients converge in parallel (semaphore of 4) with automatic Puppet SSL repair; each node converges once, in phase 04.
+2. Clients converge in parallel with automatic Puppet SSL repair; the window is `deploy.puppet_concurrency` (auto: 4–8 by CPU count, or `PUPPET_CONCURRENCY`). Each node converges once, in phase 04.
 3. `bootstrap-router` gives the router static addresses, IP forwarding and NAT before clients download packages.
 4. DRBD is promoted and mounted on `internal-master1`; K3s then labels that node `drbd-status=primary` so `mariadb-0` can mount the volume.
 5. The CMS frontends converge sequentially (the first one creates the WordPress schema); monitoring, UFW and the CA fan out in parallel.

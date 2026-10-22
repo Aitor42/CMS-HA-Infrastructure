@@ -356,7 +356,8 @@ Example output from a fully converged environment:
 ### SSH Connectivity Matrix
 
 ```bash
-./cms-ha status ssh
+./cms-ha status ssh              # one probe per node
+./cms-ha status ssh --wait 10m   # wait until every node accepts SSH, then print
 ```
 
 ```text

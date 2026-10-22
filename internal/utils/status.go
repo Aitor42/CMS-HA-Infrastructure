@@ -13,6 +13,35 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// WaitForAllSSH blocks until every configured node with an IP accepts an SSH
+// session, or the timeout expires. It replaces retry loops made of `status ssh`
+// plus a fixed sleep: the wait ends as soon as the lab is up instead of on the
+// next poll boundary.
+func WaitForAllSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, timeout time.Duration) error {
+	var hosts []string
+	seen := make(map[string]bool)
+	for _, n := range cfg.AllNodes() {
+		if n.Name == "" || n.IP == "" || seen[n.IP] {
+			continue
+		}
+		seen[n.IP] = true
+		hosts = append(hosts, n.IP)
+	}
+	if len(hosts) == 0 {
+		return fmt.Errorf("no nodes with an IP address are configured")
+	}
+
+	timer := logging.PhaseStart(fmt.Sprintf("Wait for SSH on %d nodes", len(hosts)))
+	defer timer.End()
+
+	logging.Info("Waiting up to %s for SSH on every node...", timeout)
+	if err := s.WaitForAllSSH(ctx, hosts, timeout); err != nil {
+		return err
+	}
+	logging.Success("SSH is available on all %d nodes", len(hosts))
+	return nil
+}
+
 // CheckSSH checks SSH connectivity for all VMs and prints a table.
 func CheckSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, l *libvirt.Client) error {
 	timer := logging.PhaseStart("Check SSH Status")

@@ -17,6 +17,27 @@ import (
 	"github.com/pkg/sftp"
 )
 
+const (
+	cobblerISO     = "/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
+	cobblerMirror  = "/var/www/cobbler/distro_mirror/ubuntu-24.04"
+	cobblerDistro  = "ubuntu-24.04-x86_64"
+	cobblerProfile = "ubuntu-24.04-x86_64"
+	// cobblerMirrorStamp records the size:mtime of the ISO the mirror was built
+	// from. It is what makes the mirror rebuild idempotent: the stamp and the
+	// casper patch marker both have to match to skip the 52.8s rsync + md5sum.
+	cobblerMirrorStamp = "/var/lib/cobbler/isos/.cms-mirror-stamp"
+)
+
+// cobblerVars expands the placeholders used by the remote scripts below. It
+// avoids fmt.Sprintf so shell formats such as stat's '%s:%Y' stay literal.
+var cobblerVars = strings.NewReplacer(
+	"{{iso}}", cobblerISO,
+	"{{mirror}}", cobblerMirror,
+	"{{stamp}}", cobblerMirrorStamp,
+	"{{distro}}", cobblerDistro,
+	"{{profile}}", cobblerProfile,
+)
+
 // Phase installs and configures the Cobbler provisioning server.
 type Phase struct {
 	cfg  *config.Config
@@ -99,7 +120,7 @@ func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
 		return fmt.Errorf("could not find an Ubuntu ISO > 1GB in %s", p.cfg.VM.StorageDir)
 	}
 
-	remotePath := "/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
+	remotePath := cobblerISO
 
 	_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("[ -f %s ] && [ $(stat -c%%s %s 2>/dev/null || echo 0) -gt 1000000000 ]", remotePath, remotePath))
 	if code == 0 {
@@ -247,29 +268,107 @@ done`,
 		return fmt.Errorf("cobblerd failed to start: %w", err)
 	}
 
-	postSteps := []string{
-		`set -e
+	if err := p.publishAuthorizedKeys(ctx, jumpIP); err != nil {
+		return fmt.Errorf("publish authorized keys: %w", err)
+	}
+
+	mirrorFresh, objectsReady, err := p.mirrorState(ctx, jumpIP)
+	if err != nil {
+		return err
+	}
+	if mirrorFresh && objectsReady {
+		// Steady state: the ISO has not changed since the mirror was built and
+		// both objects exist. Re-rsyncing 3.9 GB and running md5sum -c cost
+		// 52.8s on the hosted run for no change at all.
+		logging.Success("Cobbler distro mirror and profile are current; skipping rebuild")
+		return nil
+	}
+
+	if !mirrorFresh {
+		logging.Info("Cobbler distro mirror is missing or stale; rebuilding from the ISO...")
+		if err := p.ensureMirror(ctx, jumpIP); err != nil {
+			return fmt.Errorf("rebuild distro mirror: %w", err)
+		}
+	} else {
+		logging.Info("Cobbler distro mirror is current; recreating the distro/profile only...")
+	}
+	if err := p.ensureProfile(ctx, jumpIP); err != nil {
+		return fmt.Errorf("create Cobbler distro/profile: %w", err)
+	}
+	if err := p.syncCobbler(ctx, jumpIP); err != nil {
+		return fmt.Errorf("sync Cobbler: %w", err)
+	}
+
+	return nil
+}
+
+// publishAuthorizedKeys serves the jumpstart's public keys through Cobbler's
+// Apache so the PXE installers can inject them into the deployed account.
+func (p *Phase) publishAuthorizedKeys(ctx context.Context, jumpIP string) error {
+	logging.Info("Publishing node authorized keys through Cobbler...")
+	script := cobblerVars.Replace(`set -e
 mkdir -p /var/www/cobbler/pub
 [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_ed25519
 { cat /root/.ssh/id_ed25519.pub; cat /root/.ssh/authorized_keys 2>/dev/null || true; } | awk '!seen[$0]++' > /var/www/cobbler/pub/authorized_keys
-chmod 644 /var/www/cobbler/pub/authorized_keys`,
+chmod 644 /var/www/cobbler/pub/authorized_keys`)
+	_, err := p.pool.RunScript(ctx, jumpIP, script)
+	return err
+}
 
-		`set -e
-ISO_FILE="/var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso"
+// mirrorState reports whether the distro mirror matches the ISO it was built
+// from and whether the Cobbler distro/profile objects exist. Both checks are
+// one SSH round-trip and no large reads: the stamp is the ISO's size:mtime, not
+// a checksum, so it costs nothing to compare on every run.
+func (p *Phase) mirrorState(ctx context.Context, jumpIP string) (mirrorFresh, objectsReady bool, err error) {
+	script := cobblerVars.Replace(`set -e
+ISO="{{iso}}"
+MIRROR="{{mirror}}"
+STAMP="{{stamp}}"
+fresh=0
+if [ -f "$ISO" ] && [ -f "$STAMP" ] && [ -f "$MIRROR/casper/.tcp-patched" ] \
+   && [ "$(cat "$STAMP")" = "$(stat -c '%s:%Y' "$ISO")" ]; then
+    fresh=1
+fi
+objects=0
+if cobbler distro report --name="{{distro}}" >/dev/null 2>&1 \
+   && cobbler profile report --name="{{profile}}" >/dev/null 2>&1; then
+    objects=1
+fi
+echo "mirror=$fresh objects=$objects"`)
+
+	out, stderr, code, runErr := p.pool.RunCommand(ctx, jumpIP, script)
+	if runErr != nil || code != 0 {
+		return false, false, fmt.Errorf("inspect Cobbler mirror state (exit %d): %v %s", code, runErr, strings.TrimSpace(stderr))
+	}
+	return strings.Contains(out, "mirror=1"), strings.Contains(out, "objects=1"), nil
+}
+
+// ensureMirror rebuilds the distro mirror from the ISO and patches the casper
+// initrd. It only runs when mirrorState reports the mirror missing or stale.
+func (p *Phase) ensureMirror(ctx context.Context, jumpIP string) error {
+	script := cobblerVars.Replace(`set -e
+ISO_FILE="{{iso}}"
+MIRROR="{{mirror}}"
+STAMP="{{stamp}}"
 MOUNT_POINT="/mnt/ubuntu-24.04"
+trap 'umount "$MOUNT_POINT" 2>/dev/null || true' EXIT
+[ -f "$ISO_FILE" ] || { echo "ISO not found: $ISO_FILE" >&2; exit 1; }
+
+# Systems reference the profile, so they have to go before it can be removed;
+# 02-register-nodes recreates them. This path only runs when the mirror is
+# missing or stale, so the removal is not part of the steady-state deploy.
 cobbler system list 2>/dev/null | awk '{print $1}' | while read -r sys; do
     [ -n "$sys" ] && cobbler system remove --name="$sys" &>/dev/null || true
 done
-cobbler profile remove --name="ubuntu-24.04-x86_64" 2>/dev/null || true
-cobbler distro  remove --name="ubuntu-24.04-x86_64" 2>/dev/null || true
+cobbler profile remove --name="{{profile}}" 2>/dev/null || true
+cobbler distro remove --name="{{distro}}" 2>/dev/null || true
 
-mkdir -p "$MOUNT_POINT"
+mkdir -p "$MOUNT_POINT" "$MIRROR"
 if [ -f "$ISO_FILE" ]; then
     # mount/rsync failures must abort: an incomplete mirror breaks
     # 'cobbler distro add' or produces a PXE installer that never boots.
     mount -o loop "$ISO_FILE" "$MOUNT_POINT"
-    mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
-    rsync -a "${MOUNT_POINT}/" /var/www/cobbler/distro_mirror/ubuntu-24.04/
+    rsync -a "${MOUNT_POINT}/" "$MIRROR/"
     umount "$MOUNT_POINT"
 fi
 
@@ -279,31 +378,50 @@ fi
 # the mirror (md5sum -c) and appends a cpio segment to casper/initrd that
 # forces the mount over TCP (ro,tcp); a failure here must abort the phase.
 install -m 0755 /tmp/casper_initrd_tcp.sh /usr/local/bin/casper_initrd_tcp.sh
-/usr/local/bin/casper_initrd_tcp.sh /var/www/cobbler/distro_mirror/ubuntu-24.04
+/usr/local/bin/casper_initrd_tcp.sh "$MIRROR"
 
-cobbler distro add --name="ubuntu-24.04-x86_64" --kernel="/var/www/cobbler/distro_mirror/ubuntu-24.04/casper/vmlinuz" --initrd="/var/www/cobbler/distro_mirror/ubuntu-24.04/casper/initrd" --breed=ubuntu`,
+# Stamp after the patch succeeded, so a failed run is rebuilt next time.
+stat -c '%s:%Y' "$ISO_FILE" > "$STAMP"`)
+	_, err := p.pool.RunScript(ctx, jumpIP, script)
+	return err
+}
 
-		`set -e
+// ensureProfile installs the autoinstall template and creates or updates the
+// Cobbler distro/profile. It is idempotent: an existing profile is edited
+// instead of removed and recreated.
+func (p *Phase) ensureProfile(ctx context.Context, jumpIP string) error {
+	script := cobblerVars.Replace(`set -e
 mkdir -p /etc/cobbler/autoinstall_templates /var/lib/cobbler/templates
 cp /tmp/tpl_autoinstall.yaml /etc/cobbler/autoinstall_templates/ubuntu-24.04-autoinstall.yaml
 cp /etc/cobbler/autoinstall_templates/ubuntu-24.04-autoinstall.yaml /var/lib/cobbler/templates/ubuntu-24.04-autoinstall.yaml
 
-cobbler profile add --name="ubuntu-24.04-x86_64" --distro="ubuntu-24.04-x86_64" --autoinstall="ubuntu-24.04-autoinstall.yaml" --autoinstall-meta="hostname=default"`,
+if ! cobbler distro report --name="{{distro}}" >/dev/null 2>&1; then
+    cobbler distro add --name="{{distro}}" \
+        --kernel="{{mirror}}/casper/vmlinuz" \
+        --initrd="{{mirror}}/casper/initrd" \
+        --breed=ubuntu
+fi
 
-		`set -e
+if cobbler profile report --name="{{profile}}" >/dev/null 2>&1; then
+    cobbler profile edit --name="{{profile}}" \
+        --distro="{{distro}}" \
+        --autoinstall="ubuntu-24.04-autoinstall.yaml"
+else
+    cobbler profile add --name="{{profile}}" \
+        --distro="{{distro}}" \
+        --autoinstall="ubuntu-24.04-autoinstall.yaml" \
+        --autoinstall-meta="hostname=default"
+fi`)
+	_, err := p.pool.RunScript(ctx, jumpIP, script)
+	return err
+}
+
+func (p *Phase) syncCobbler(ctx context.Context, jumpIP string) error {
+	logging.Info("Synchronizing Cobbler...")
+	_, err := p.pool.RunScript(ctx, jumpIP, `set -e
 cobbler mkloaders 2>/dev/null || true
-cobbler sync`,
-	}
-
-	for i, step := range postSteps {
-		logging.Info("Executing post-install step %d/%d...", i+1, len(postSteps))
-		_, err := p.pool.RunScript(ctx, jumpIP, step)
-		if err != nil {
-			return fmt.Errorf("post-install step %d failed: %w", i+1, err)
-		}
-	}
-
-	return nil
+cobbler sync`)
+	return err
 }
 
 func (p *Phase) verifyCobbler(ctx context.Context, jumpIP string) error {
