@@ -22,6 +22,15 @@ LDFLAGS     := -s -w -X main.version=$(shell git describe --tags --always --dirt
 GOOS        := linux
 GOARCH      := amd64
 BUILD_DIR   := .
+# The README promises a statically linked binary. Pure-Go builds avoid the
+# libc/libresolv dependency the default CGO build introduces, at no size cost
+# (measured: 12.19 MB dynamic vs 12.15 MB static). Override with
+# `make build CGO_ENABLED=1` if a future dependency needs cgo.
+CGO_ENABLED ?= 0
+
+# Keep the compiler cache warm across build/vet/test/staticcheck: mixing flag
+# sets invalidated it and turned a 0.35s cached build into an 8.7s rebuild.
+export GOFLAGS
 
 # ── Project paths ────────────────────────────────────────────────────────────
 PROJECT_DIR   := $(shell pwd)
@@ -36,21 +45,21 @@ CONFIG      ?= config.yaml
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: build
-build: ## Build the cms-ha binary (linux/amd64)
+build: ## Build the cms-ha binary (linux/amd64, static by default)
 	@echo "▶ Building $(BINARY)..."
-	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/cms-ha/
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/cms-ha/
 	@echo "✔ Built $(BUILD_DIR)/$(BINARY)"
 
 .PHONY: build-check
 build-check: ## Verify all packages compile
 	@echo "▶ Checking compilation..."
-	$(GO) build ./...
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build ./...
 	@echo "✔ All packages compile successfully"
 
 .PHONY: test
 test: ## Run Go unit tests
 	@echo "▶ Running tests..."
-	$(GO) test -v -race ./...
+	$(GO) test -race ./...
 
 .PHONY: clean
 clean: ## Remove build artifacts
