@@ -317,6 +317,28 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	})
 
+	// Validate is split into helpers; the split must not reorder the checks,
+	// because callers rely on the first broken field being the one reported.
+	t.Run("deploy error precedes network error", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.StorageDir = ""
+		cfg.Network.Internal.CIDR = "not-a-cidr"
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "vm.storage_dir") {
+			t.Fatalf("Validate() = %v, want the vm.storage_dir error first", err)
+		}
+	})
+
+	t.Run("network error precedes topology error", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.CIDR = "not-a-cidr"
+		cfg.Nodes.Router.IP = ""
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "network.internal.cidr") {
+			t.Fatalf("Validate() = %v, want the network.internal.cidr error first", err)
+		}
+	})
+
 	t.Run("missing internal CIDR", func(t *testing.T) {
 		cfg := validCfg()
 		cfg.Network.Internal.CIDR = ""

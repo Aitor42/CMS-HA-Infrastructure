@@ -599,7 +599,32 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 }
 
 // Validate performs structural and semantic checks on the configuration.
+//
+// The checks are grouped into contiguous helpers so each one stays readable;
+// Validate calls them in the original order because error precedence is part
+// of the command's contract: the first broken field is the one reported.
 func (c *Config) Validate() error {
+	if err := c.validateDeploy(); err != nil {
+		return err
+	}
+	if err := c.validateNetworks(); err != nil {
+		return err
+	}
+	if err := c.validateTopology(); err != nil {
+		return err
+	}
+	if err := c.validateServices(); err != nil {
+		return err
+	}
+	if err := c.validateNodes(); err != nil {
+		return err
+	}
+	return c.validateInterpolatedValues()
+}
+
+// validateDeploy checks the host paths and the knobs that steer the
+// orchestrator before it touches any guest.
+func (c *Config) validateDeploy() error {
 	if c.VM.StorageDir == "" {
 		return fmt.Errorf("vm.storage_dir is required")
 	}
@@ -617,12 +642,23 @@ func (c *Config) Validate() error {
 	if c.Deploy.PuppetConcurrency < 0 {
 		return fmt.Errorf("deploy.puppet_concurrency must not be negative (got %d)", c.Deploy.PuppetConcurrency)
 	}
+	return nil
+}
+
+// validateNetworks checks the CIDRs both subnets are built from.
+func (c *Config) validateNetworks() error {
 	if _, _, err := net.ParseCIDR(c.Network.Internal.CIDR); err != nil {
 		return fmt.Errorf("network.internal.cidr is not a valid CIDR: %w", err)
 	}
 	if _, _, err := net.ParseCIDR(c.Network.Main.CIDR); err != nil {
 		return fmt.Errorf("network.main.cidr is not a valid CIDR: %w", err)
 	}
+	return nil
+}
+
+// validateTopology checks the node counts and the floating address that make
+// the deployment HA.
+func (c *Config) validateTopology() error {
 	if c.Nodes.Router.IP == "" {
 		return fmt.Errorf("nodes.router.ip is required")
 	}
@@ -648,6 +684,16 @@ func (c *Config) Validate() error {
 	if len(c.Nodes.LBs) < 2 {
 		return fmt.Errorf("at least 2 load balancer nodes are required for HA (got %d)", len(c.Nodes.LBs))
 	}
+	if err := c.validateMainVIP(); err != nil {
+		return err
+	}
+	if len(c.Nodes.CMSFrontends) < 1 {
+		return fmt.Errorf("at least 1 CMS frontend node is required")
+	}
+	return nil
+}
+
+func (c *Config) validateMainVIP() error {
 	if c.Network.Main.VIP == "" {
 		return fmt.Errorf("network.main.vip is required (keepalived floating address)")
 	}
@@ -659,9 +705,22 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("network.main.vip %s collides with node %s", c.Network.Main.VIP, n.Name)
 		}
 	}
-	if len(c.Nodes.CMSFrontends) < 1 {
-		return fmt.Errorf("at least 1 CMS frontend node is required")
+	return nil
+}
+
+// validateServices checks the PKI, backup and traffic settings that later
+// phases interpolate into remote commands.
+func (c *Config) validateServices() error {
+	if err := c.validatePKI(); err != nil {
+		return err
 	}
+	if err := c.validateBackup(); err != nil {
+		return err
+	}
+	return c.validateTraffic()
+}
+
+func (c *Config) validatePKI() error {
 	// A certificate whose total lifetime is shorter than the minimum validity
 	// asserted by verify would fail as soon as it is issued.
 	if c.PKI.CertMinValidDays > 0 && c.PKI.CertLifetimeHours > 0 &&
@@ -674,6 +733,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("pki.cert_dns_names entry is not a valid DNS name: %q", dns)
 		}
 	}
+	return nil
+}
+
+func (c *Config) validateBackup() error {
 	if c.Backup.Engine != "" && c.Backup.Engine != "garage" {
 		return fmt.Errorf("backup.engine %q is not supported (supported: garage)", c.Backup.Engine)
 	}
@@ -688,6 +751,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("backup schedule %q contains unsupported characters", sched)
 		}
 	}
+	return nil
+}
+
+func (c *Config) validateTraffic() error {
 	if v := strings.TrimSpace(c.Traffic.K6Version); v == "latest" {
 		return fmt.Errorf("traffic.k6_version must be pinned to a specific tag (got %q)", v)
 	}
@@ -696,10 +763,23 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("traffic.prometheus_rw_url must be an http(s) URL: %q", rw)
 		}
 	}
+	return nil
+}
 
+// validateNodes checks the generated hotdesk range and the shape of every
+// node identifier that ends up in an SSH command or Cobbler script.
+func (c *Config) validateNodes() error {
+	if err := c.validateHotdesks(); err != nil {
+		return err
+	}
+	return c.validateNodeFields()
+}
+
+func (c *Config) validateHotdesks() error {
 	// Hotdesk IPs are generated as <network>.<octet>: detect overflow before
-	// the node sweep below so this clearer message wins (generation happens
-	// inside AllNodes and would otherwise surface as "invalid IPv4 .256").
+	// the node sweep in validateNodeFields so this clearer message wins
+	// (generation happens inside AllNodes and would otherwise surface as
+	// "invalid IPv4 .256").
 	if c.Nodes.Hotdesks.Count > 0 {
 		base := c.Nodes.Hotdesks.BaseIPOctet
 		if base == 0 || base == 201 {
@@ -709,7 +789,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("hotdesk range overflows: base octet %d with %d nodes exceeds 254", base, c.Nodes.Hotdesks.Count)
 		}
 	}
+	return nil
+}
 
+func (c *Config) validateNodeFields() error {
 	// These fields are interpolated into remote SSH commands, Cobbler
 	// registration scripts and awk filters: an unvalidated value breaks or
 	// manipulates far-away infrastructure, so their shape must be exact.
@@ -733,7 +816,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("node %s has an invalid WAN MAC address: %q", n.Name, n.MACWAN)
 		}
 	}
+	return nil
+}
 
+// validateInterpolatedValues checks the remaining values that are embedded in
+// shell commands or download URLs without quoting.
+func (c *Config) validateInterpolatedValues() error {
 	// These are interpolated unquoted into the backup shell command: a dot
 	// would be parsed as db.table and any other character would break or
 	// inject into the command, so restrict them to plain SQL identifiers.
