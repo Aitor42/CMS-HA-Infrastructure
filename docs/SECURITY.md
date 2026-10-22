@@ -105,7 +105,7 @@ WordPress, reachable through the nginx VIP.
 
 | Layer | What it does |
 |-------|--------------|
-| **Package (the fix)** | `role::cms_frontend` pins `php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3` to **≥ 8.3.6-0ubuntu0.24.04.13**, the Ubuntu Noble revision that carries `CVE-2026-109618_109619.patch`. Ubuntu backports the upstream patch instead of bumping the upstream version, so a patched node still answers `PHP 8.3.6`: the Debian revision is what tells the two apart. A guarded `apt-get update` (skipping the archive once the floor is satisfied) makes the patched release visible before the packages are resolved. |
+| **Package (the fix)** | `role::cms_frontend` pins `php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3` to **≥ 8.3.6-0ubuntu0.24.04.13**, the Ubuntu Noble revision that carries `CVE-2026-109618_109619.patch`. Ubuntu backports the upstream patch instead of bumping the upstream version, so a patched node still answers `PHP 8.3.6`: the Debian revision is what tells the two apart. A guarded `apt-get update` (skipped once every pinned package satisfies the floor) makes the patched release visible before the packages are resolved. |
 | **PHP ini** | `/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini` sets `session.upload_progress.enabled = Off`. The Apache SAPI reads it at startup, so it is in place *before* the request is parsed — the PHP team asks for exactly this, and not for `ini_set()` (too late) nor for a `.user.ini` (per request). It closes the session path CVE-2026-109619 was confirmed with. |
 | **Apache** | `/etc/apache2/conf-enabled/php-hardening.conf` sets `php_admin_value memory_limit -1` (removes the user-controllable out-of-memory bailout CVE-2026-109618 abuses — `php_admin_value` cannot be overridden by the application nor from `.htaccess`), `php_admin_flag session.upload_progress.enabled Off`, `php_admin_value post_max_size 32M`, `upload_max_filesize 16M` and `LimitRequestBody 33554432`. |
 | **nginx** | `client_max_body_size 32m` bounds the request at the proxy, so the same limit applies at every layer and a single request can never make PHP ask for more memory than the node has. |
@@ -115,17 +115,21 @@ and CERT-EU publish for the case where a node has not been patched yet.
 
 ### Proving it
 
-`cms-ha verify` asks every frontend for its PHP package revision, for whether
-Apache loads `mod_php`, and for the mitigations, and **fails the phase** when
-the revision is older than the floor or a mitigation is missing
-(`internal/utils/verify_functional.go`, `checkPHPSecurityPatch`). The version
-comparison is delegated to `dpkg --compare-versions` on the node itself, so
-the answer follows Debian's own version rules.
+`cms-ha verify` asks every frontend for the installed revision of
+`php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3`, for whether Apache
+loads `mod_php`, and for the mitigations, and **fails the phase** when any
+pinned package is older than the floor or a mitigation is missing
+(`internal/utils/verify_functional.go`, `checkPHPSecurityPatch`). Checking the
+Apache SAPI as well as the CLI matters: a patched CLI alone would leave
+`mod_php` serving the vulnerable library. The version comparison is delegated
+to `dpkg --compare-versions` on the node itself, so the answer follows
+Debian's own version rules.
 
 ### Keeping it patched
 
 The floor lives in three places that have to move together when the next PHP
-security update lands:
+security update lands (`TestPHPPatchFloorIsInSyncWithPuppet` fails if the
+Puppet and Go copies drift):
 
 | Where | What to change |
 |-------|----------------|

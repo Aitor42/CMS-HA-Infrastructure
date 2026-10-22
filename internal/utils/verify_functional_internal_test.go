@@ -1,10 +1,14 @@
 package utils
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/lint"
 )
 
 func TestFirstAssetPath(t *testing.T) {
@@ -182,19 +186,53 @@ func TestParseFrontendProbe(t *testing.T) {
 	})
 }
 
+// phpProbeOutput builds the labelled output the shell probe prints for a host.
+// Every pinned package gets a version and a patch verdict so a test can vary one
+// of them without silently omitting the others.
+func phpProbeOutput(versions map[string]string, patched map[string]bool, modPHP string, mitigations ...string) string {
+	var b strings.Builder
+	for _, pkg := range phpPatchedPackages {
+		verdict := "no"
+		if patched[pkg] {
+			verdict = "yes"
+		}
+		fmt.Fprintf(&b, "php_package=%s|%s\n", pkg, versions[pkg])
+		fmt.Fprintf(&b, "php_patched=%s|%s\n", pkg, verdict)
+	}
+	fmt.Fprintf(&b, "php_mod_php=%s\n", modPHP)
+	for _, m := range mitigations {
+		fmt.Fprintf(&b, "php_mitigation=%s\n", m)
+	}
+	return b.String()
+}
+
+// patchedPHPVersions is the happy path: the same revision for every pinned
+// binary package, exactly what the Puppet role installs.
+func patchedPHPVersions() map[string]string {
+	versions := make(map[string]string, len(phpPatchedPackages))
+	for _, pkg := range phpPatchedPackages {
+		versions[pkg] = phpPatchedPackage
+	}
+	return versions
+}
+
 func TestParsePHPPatchProbe(t *testing.T) {
 	t.Run("patched frontend", func(t *testing.T) {
-		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\nphp_mod_php=yes\n" +
-			"php_mitigation=upload_progress_off\nphp_mitigation=memory_limit_unlimited\n"
-		state, err := parsePHPPatchProbe(out)
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
+		state, err := parsePHPPatchProbe(phpProbeOutput(patchedPHPVersions(), patched, "yes", requiredPHPMitigations...))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if state.packageVersion != "8.3.6-0ubuntu0.24.04.13" {
-			t.Errorf("got version %q, want 8.3.6-0ubuntu0.24.04.13", state.packageVersion)
-		}
-		if !state.patched {
-			t.Error("the frontend must be reported as patched")
+		for _, pkg := range phpPatchedPackages {
+			if got := state.packages[pkg].version; got != phpPatchedPackage {
+				t.Errorf("%s version = %q, want %q", pkg, got, phpPatchedPackage)
+			}
+			if !state.packages[pkg].patched {
+				t.Errorf("%s must be reported as patched", pkg)
+			}
 		}
 		if !state.modPHP {
 			t.Error("Apache must be reported as loading mod_php")
@@ -206,25 +244,41 @@ func TestParsePHPPatchProbe(t *testing.T) {
 		}
 	})
 
-	t.Run("vulnerable frontend", func(t *testing.T) {
-		out := "php_package=8.3.6-0ubuntu0.24.04.9\nphp_patched=no\nphp_mod_php=yes\n" +
-			"php_mitigation=upload_progress_off\nphp_mitigation=memory_limit_unlimited\n"
-		state, err := parsePHPPatchProbe(out)
+	t.Run("patched CLI with vulnerable Apache SAPI", func(t *testing.T) {
+		// The regression this test exists for: dpkg upgrades are per binary
+		// package, so a patched CLI says nothing about the module Apache
+		// actually loads. The probe must report the SAPI separately.
+		versions := patchedPHPVersions()
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
+		const vulnerable = "8.3.6-0ubuntu0.24.04.9"
+		versions["libapache2-mod-php8.3"] = vulnerable
+		patched["libapache2-mod-php8.3"] = false
+
+		state, err := parsePHPPatchProbe(phpProbeOutput(versions, patched, "yes", requiredPHPMitigations...))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if state.patched {
-			t.Error("an unpatched frontend must not be reported as patched")
+		if !state.packages["php8.3-cli"].patched {
+			t.Error("the CLI was patched; only the SAPI should be reported as vulnerable")
 		}
-		if state.packageVersion != "8.3.6-0ubuntu0.24.04.9" {
-			t.Errorf("got version %q, want the installed one", state.packageVersion)
+		if state.packages["libapache2-mod-php8.3"].patched {
+			t.Error("an unpatched libapache2-mod-php8.3 must not be reported as patched")
+		}
+		if got := state.packages["libapache2-mod-php8.3"].version; got != vulnerable {
+			t.Errorf("SAPI version = %q, want %q", got, vulnerable)
 		}
 	})
 
 	t.Run("missing mitigation", func(t *testing.T) {
-		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\nphp_mod_php=yes\n" +
-			"php_mitigation=upload_progress_off\nphp_mitigation=memory_limit_missing\n"
-		state, err := parsePHPPatchProbe(out)
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
+		state, err := parsePHPPatchProbe(phpProbeOutput(patchedPHPVersions(), patched, "yes",
+			"upload_progress_off", "memory_limit_missing"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -237,8 +291,12 @@ func TestParsePHPPatchProbe(t *testing.T) {
 	})
 
 	t.Run("noise on the same stream is ignored", func(t *testing.T) {
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
 		out := "PHP Deprecated: something in /var/www/html/wp-includes/x.php\n" +
-			"php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\nphp_mod_php=no\n"
+			phpProbeOutput(patchedPHPVersions(), patched, "no")
 		state, err := parsePHPPatchProbe(out)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -248,28 +306,51 @@ func TestParsePHPPatchProbe(t *testing.T) {
 		}
 	})
 
-	t.Run("no package version", func(t *testing.T) {
-		if _, err := parsePHPPatchProbe("php_patched=yes\nphp_mod_php=yes\n"); err == nil {
-			t.Error("expected an error without a package version")
+	t.Run("missing package state", func(t *testing.T) {
+		out := "php_package=php8.3-cli|" + phpPatchedPackage + "\nphp_patched=php8.3-cli|yes\n" +
+			"php_package=libapache2-mod-php8.3|" + phpPatchedPackage + "\nphp_patched=libapache2-mod-php8.3|yes\n" +
+			"php_mod_php=yes\n"
+		if _, err := parsePHPPatchProbe(out); err == nil {
+			t.Error("expected an error when a pinned package is missing from the probe")
+		}
+	})
+
+	t.Run("no installed version", func(t *testing.T) {
+		versions := patchedPHPVersions()
+		versions["php8.3-common"] = ""
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
+		if _, err := parsePHPPatchProbe(phpProbeOutput(versions, patched, "yes")); err == nil {
+			t.Error("expected an error when a pinned package reports no version")
 		}
 	})
 
 	t.Run("no patched answer", func(t *testing.T) {
-		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_mod_php=yes\n"
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
+		out := strings.Replace(phpProbeOutput(patchedPHPVersions(), patched, "yes"),
+			"php_patched=php8.3-common|yes\n", "", 1)
 		if _, err := parsePHPPatchProbe(out); err == nil {
-			t.Error("expected an error without the patched answer")
+			t.Error("expected an error when a package has no patch verdict")
 		}
 	})
 
 	t.Run("no mod_php answer", func(t *testing.T) {
-		out := "php_package=8.3.6-0ubuntu0.24.04.13\nphp_patched=yes\n"
-		if _, err := parsePHPPatchProbe(out); err == nil {
+		patched := map[string]bool{}
+		for _, pkg := range phpPatchedPackages {
+			patched[pkg] = true
+		}
+		if _, err := parsePHPPatchProbe(phpProbeOutput(patchedPHPVersions(), patched, "")); err == nil {
 			t.Error("expected an error without the mod_php answer")
 		}
 	})
 }
 
-func TestPHPPatchProbeComparesAgainstThePatchedRevision(t *testing.T) {
+func TestPHPPatchProbeChecksEveryPinnedPackage(t *testing.T) {
 	// The probe asks the node itself: dpkg knows Debian's version rules, and
 	// the floor the project pins is the revision that carries the fix.
 	if !strings.Contains(phpPatchProbe, phpPatchedPackage) {
@@ -277,6 +358,11 @@ func TestPHPPatchProbeComparesAgainstThePatchedRevision(t *testing.T) {
 	}
 	if !strings.Contains(phpPatchProbe, "dpkg --compare-versions") {
 		t.Error("the probe must let dpkg compare the versions")
+	}
+	for _, pkg := range phpPatchedPackages {
+		if !strings.Contains(phpPatchProbe, pkg) {
+			t.Errorf("the probe must report %s, not just the CLI", pkg)
+		}
 	}
 	for _, m := range requiredPHPMitigations {
 		if !strings.Contains(phpPatchProbe, m) {
@@ -398,5 +484,25 @@ func TestCheckHomeDashboard(t *testing.T) {
 	edited.Panels[0].Targets = []dashboards.Target{{RefID: "A", Expr: "up"}}
 	if err := checkHomeDashboard(edited, shipped); err == nil {
 		t.Error("a home dashboard with an edited panel must not pass")
+	}
+}
+
+// TestPHPPatchFloorIsInSyncWithPuppet keeps the two copies of the patched
+// Debian revision together: the Go probe decides whether `cms-ha verify`
+// passes, but Puppet is what actually upgrades the package. A bump in one
+// place without the other would either fail a correctly patched lab or let a
+// vulnerable one pass.
+func TestPHPPatchFloorIsInSyncWithPuppet(t *testing.T) {
+	root, err := lint.FindModuleRoot()
+	if err != nil {
+		t.Fatalf("find module root: %v", err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(root, "puppet/modules/role/manifests/cms_frontend.pp"))
+	if err != nil {
+		t.Fatalf("read cms_frontend.pp: %v", err)
+	}
+	want := "$php_patched_version = '" + phpPatchedPackage + "'"
+	if !strings.Contains(string(manifest), want) {
+		t.Errorf("cms_frontend.pp does not define %s; the Puppet and verify floors have drifted", want)
 	}
 }

@@ -130,9 +130,10 @@ ssh ubuntu@192.168.20.102 "mountpoint -q /var/www/html/wp-content/uploads && ech
 
 # Verify the PHP runtime carries the fix for CVE-2026-109618 / CVE-2026-109619.
 # Ubuntu backports the upstream patch, so the Debian revision is what tells a
-# patched node from a vulnerable one (php -v keeps reporting 8.3.6).
-ssh ubuntu@192.168.20.101 "dpkg-query -W -f='\${Version}\n' php8.3-cli"
-ssh ubuntu@192.168.20.102 "dpkg-query -W -f='\${Version}\n' php8.3-cli"
+# patched node from a vulnerable one (php -v keeps reporting 8.3.6). Check the
+# Apache SAPI too: a patched CLI says nothing about the library mod_php loads.
+ssh ubuntu@192.168.20.101 "dpkg-query -W -f='\${Package} \${Version}\n' php8.3-cli php8.3-common libapache2-mod-php8.3"
+ssh ubuntu@192.168.20.102 "dpkg-query -W -f='\${Package} \${Version}\n' php8.3-cli php8.3-common libapache2-mod-php8.3"
 
 # Verify the mitigations the PHP team publishes for those CVEs are in place
 ssh ubuntu@192.168.20.101 "grep -E 'session.upload_progress.enabled' /etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini"

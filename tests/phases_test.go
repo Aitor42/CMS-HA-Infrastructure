@@ -162,18 +162,26 @@ func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
 		"php8.3-cli",
 		"php8.3-common",
 		"libapache2-mod-php8.3",
-		// No space after the operator: Puppet parses the range with the
-		// Debian version grammar, which rejects ">= 1.2.3" and then passes
-		// the whole string to apt-get as a literal version.
+		// No space after the operator: Puppet parses the value as a Debian
+		// version range and rejects ">= 1.2.3", then hands the whole string
+		// to apt-get as a literal version.
 		`">=${php_patched_version}"`,
+		// The cache refresh must consider every pinned binary package, not
+		// only the CLI: Apache loads libapache2-mod-php8.3.
+		"for p in php8.3-cli php8.3-common libapache2-mod-php8.3; do",
 		// The mitigations: the session path CVE-2026-109619 was confirmed
 		// with, and the out-of-memory bailout CVE-2026-109618 abuses.
 		"session.upload_progress.enabled",
 		"php_admin_value memory_limit -1",
+		"php_admin_flag session.upload_progress.enabled Off",
 		"post_max_size",
 		"LimitRequestBody",
 		"/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini",
 		"/etc/apache2/conf-available/php-hardening.conf",
+		// Deployed is not enough: the verification reads the enabled path,
+		// so the manifest must also run a2enconf.
+		"a2enconf php-hardening",
+		"/etc/apache2/conf-enabled/php-hardening.conf",
 	} {
 		if !strings.Contains(cmsContent, expected) {
 			t.Errorf("expected cms_frontend.pp to contain %q", expected)
@@ -190,8 +198,8 @@ func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", path, err)
 		}
-		if !strings.Contains(string(conf), "client_max_body_size") {
-			t.Errorf("expected %s to bound the request size", path)
+		if !strings.Contains(string(conf), "client_max_body_size 32m") {
+			t.Errorf("expected %s to bound the request size at 32m", path)
 		}
 	}
 }

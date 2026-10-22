@@ -39,14 +39,6 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
   # PHP SECURITY PATCH — CVE-2026-109618 / CVE-2026-109619 ("php2shell")
   #
-  # Two unauthenticated remote code executions in the PHP core were published
-  # on 2026-10-21: memory corruption when an out-of-memory bailout interrupts
-  # a request (CVE-2026-109618) and a stale global state left behind by a
-  # fatal error (CVE-2026-109619). Every PHP that answers web requests is
-  # affected, and Apache with mod_php — what these frontends run — is the
-  # setup the PHP team rates as the highest risk: one unauthenticated request
-  # can trigger the bug before any WordPress code runs.
-  #
   # The metapackages above are only installed, never upgraded, so a node
   # provisioned before the patch would keep the vulnerable build forever. The
   # versioned packages below carry the floor instead: every Puppet run moves
@@ -54,18 +46,19 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
 
   # Refresh the APT cache so the patched release is visible. The guard skips
-  # the refresh once the installed package satisfies the floor, so a converged
-  # node does not reach for the archive on every run. flock serialises the
-  # update with anything else that holds the dpkg lock.
+  # the refresh once every pinned package satisfies the floor, so a converged
+  # node does not reach for the archive on every run. Checking all three
+  # matters: a patched CLI with an outdated libapache2-mod-php8.3 would still
+  # leave Apache serving the vulnerable code. flock keeps concurrent runs of
+  # this exec from overlapping.
   exec { 'apt-get-update-cms-frontend':
     command => '/usr/bin/flock -w 600 /var/lib/dpkg/lock-frontend /usr/bin/apt-get update',
-    unless  => "/bin/bash -c 'v=\$(/usr/bin/dpkg-query -W php8.3-cli 2>/dev/null | /usr/bin/cut -f2); [ -n \"\$v\" ] && /usr/bin/dpkg --compare-versions \"\$v\" ge \"${php_patched_version}\"'",
+    unless  => "/bin/bash -c 'ok=1; for p in php8.3-cli php8.3-common libapache2-mod-php8.3; do v=\$(/usr/bin/dpkg-query -W \"\$p\" 2>/dev/null | /usr/bin/cut -f2); if [ -z \"\$v\" ] || ! /usr/bin/dpkg --compare-versions \"\$v\" ge \"${php_patched_version}\"; then ok=0; fi; done; [ \"\$ok\" = 1 ]'",
   }
 
-  # The version range must not carry a space after the operator: Puppet parses
-  # it with the Debian version grammar, which rejects ">= 1.2.3" ("Unable to
-  # parse '=' as a debian version identifier") and then hands the whole
-  # string to apt-get as a literal version.
+  # No space after the operator: Puppet parses the value as a Debian version
+  # range and only accepts forms such as ">=1.2.3". With the space the parse
+  # fails and the whole string reaches apt-get as a literal version.
   package { ['php8.3-cli', 'php8.3-common', 'libapache2-mod-php8.3']:
     ensure  => ">=${php_patched_version}",
     require => Exec['apt-get-update-cms-frontend'],

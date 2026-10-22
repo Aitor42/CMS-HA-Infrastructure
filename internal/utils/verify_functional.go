@@ -24,7 +24,8 @@ import (
 // behind it works: the WordPress features a visitor or an administrator touches
 // (login form, feed, permalinks, REST API), every load balancer and every
 // frontend on its own - not only whichever node the VIP happened to select -,
-// the database read/write path, and the monitoring stack's own probes.
+// the database read/write path, the PHP runtime the frontends run, and the
+// monitoring stack's own probes.
 //
 // Every check is read-only against the lab except one SQL round-trip on a
 // throwaway table that is dropped immediately, so the phase is safe to run
@@ -64,16 +65,26 @@ const (
 // with, and the out-of-memory bailout CVE-2026-109618 abuses.
 var requiredPHPMitigations = []string{"upload_progress_off", "memory_limit_unlimited"}
 
+// phpPatchedPackages are all the packages pinned to the patched revision. The
+// Apache SAPI is the one that answers web requests, so checking only the CLI
+// (which shares the same source package but is a separate binary package)
+// would let a frontend serve a vulnerable mod_php while verify passed.
+var phpPatchedPackages = []string{"php8.3-cli", "php8.3-common", "libapache2-mod-php8.3"}
+
 // phpPatchProbe asks a frontend for the state that decides whether it is
-// exposed to CVE-2026-109618 / CVE-2026-109619: the installed package
-// revision, whether Apache serves PHP through mod_php (the setup the PHP team
-// rates as the highest risk) and whether the mitigations are in place. The
-// version comparison is left to dpkg on the node itself, so the answer
-// follows Debian's own version rules instead of a reimplementation of them.
-const phpPatchProbe = `ver=$(/usr/bin/dpkg-query -W -f='${Version}' php8.3-cli 2>/dev/null); ` +
-	`printf 'php_package=%s\n' "$ver"; ` +
+// exposed to CVE-2026-109618 / CVE-2026-109619: the installed revision of
+// every PHP package the role pins, whether Apache serves PHP through mod_php
+// (the setup the PHP team rates as the highest risk) and whether the
+// mitigations are in place. The version comparison is left to dpkg on the node
+// itself, so the answer follows Debian's own version rules instead of a
+// reimplementation of them.
+var phpPatchProbe = `for pkg in ` + strings.Join(phpPatchedPackages, " ") + `; do ` +
+	`ver=$(/usr/bin/dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null); ` +
+	`printf 'php_package=%s|%s\n' "$pkg" "$ver"; ` +
 	`if [ -n "$ver" ] && /usr/bin/dpkg --compare-versions "$ver" ge "` + phpPatchedPackage + `"; then ` +
-	`printf 'php_patched=yes\n'; else printf 'php_patched=no\n'; fi; ` +
+	`printf 'php_patched=%s|yes\n' "$pkg"; ` +
+	`else printf 'php_patched=%s|no\n' "$pkg"; fi; ` +
+	`done; ` +
 	`if /usr/sbin/apache2ctl -M 2>/dev/null | /usr/bin/grep -q php_module; then ` +
 	`printf 'php_mod_php=yes\n'; else printf 'php_mod_php=no\n'; fi; ` +
 	`if /usr/bin/grep -Eqi '^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*(off|0)[[:space:]]*$' ` + phpHardeningINI + ` 2>/dev/null; then ` +
@@ -430,13 +441,18 @@ func (v *Verifier) checkCMSFrontends(ctx context.Context) e2eOutcome {
 	return o
 }
 
+// phpPackageState is the installed revision of one PHP binary package.
+type phpPackageState struct {
+	version string
+	patched bool
+}
+
 // phpPatchState is what a frontend reports about its exposure to
 // CVE-2026-109618 / CVE-2026-109619.
 type phpPatchState struct {
-	// packageVersion is the Debian revision of the installed PHP package.
-	packageVersion string
-	// patched reports whether that revision carries the fix.
-	patched bool
+	// packages is keyed by binary package name (php8.3-cli, php8.3-common,
+	// libapache2-mod-php8.3), so a patched CLI cannot mask a vulnerable SAPI.
+	packages map[string]phpPackageState
 	// modPHP reports whether Apache serves PHP through mod_php.
 	modPHP bool
 	// mitigations holds the mitigations the frontend reported as in place.
@@ -445,12 +461,9 @@ type phpPatchState struct {
 
 // checkPHPSecurityPatch proves the frontends are not exposed to the two
 // unauthenticated remote code executions published in the PHP core on
-// 2026-10-21 (CVE-2026-109618 and CVE-2026-109619, "php2shell"). Apache with
-// mod_php — what the frontends run — is the setup the PHP team rates as the
-// highest risk: one unauthenticated request can trigger the bug before any
-// WordPress code runs. The fix is a package upgrade, and nothing in the
-// stack would apply it on its own, so the check asks every frontend for the
-// revision it runs and for the mitigations deployed on top of the patch.
+// 2026-10-21 (CVE-2026-109618 and CVE-2026-109619, "php2shell"): Apache with
+// mod_php is the setup the PHP team rates as the highest risk, and the fix is
+// a package upgrade that nothing in the stack would apply on its own.
 //
 // The version comparison happens on the node with dpkg, so the answer follows
 // Debian's own version rules: Ubuntu backports the upstream patch and keeps
@@ -485,9 +498,12 @@ func (v *Verifier) checkPHPSecurityPatch(ctx context.Context) e2eOutcome {
 			continue
 		}
 		var problems []string
-		if !state.patched {
-			problems = append(problems, fmt.Sprintf("php %s is older than the patched %s (CVE-2026-109618/CVE-2026-109619)",
-				state.packageVersion, phpPatchedPackage))
+		for _, pkg := range phpPatchedPackages {
+			st := state.packages[pkg]
+			if !st.patched {
+				problems = append(problems, fmt.Sprintf("%s %s is older than the patched %s (CVE-2026-109618/CVE-2026-109619)",
+					pkg, st.version, phpPatchedPackage))
+			}
 		}
 		for _, mitigation := range requiredPHPMitigations {
 			if !state.mitigations[mitigation] {
@@ -503,7 +519,8 @@ func (v *Verifier) checkPHPSecurityPatch(ctx context.Context) e2eOutcome {
 		if state.modPHP {
 			sapi = "mod_php"
 		}
-		details = append(details, fmt.Sprintf("%s: php %s patched, %s hardened", r.Host, state.packageVersion, sapi))
+		details = append(details, fmt.Sprintf("%s: php %s patched (%d packages), %s hardened",
+			r.Host, state.packages["php8.3-cli"].version, len(phpPatchedPackages), sapi))
 	}
 	o.pass = pass
 	o.detail = strings.Join(details, "; ")
@@ -514,30 +531,51 @@ func (v *Verifier) checkPHPSecurityPatch(ctx context.Context) e2eOutcome {
 // keeps a PHP notice or a warning on the same stream from being misread as
 // one of the answers.
 func parsePHPPatchProbe(out string) (phpPatchState, error) {
-	state := phpPatchState{mitigations: map[string]bool{}}
-	var patched, modPHP string
+	state := phpPatchState{packages: map[string]phpPackageState{}, mitigations: map[string]bool{}}
+	reportedPatch := map[string]bool{}
+	var modPHP string
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "php_package="):
-			state.packageVersion = strings.TrimPrefix(line, "php_package=")
+			name, version, ok := strings.Cut(strings.TrimPrefix(line, "php_package="), "|")
+			if !ok || name == "" {
+				return state, fmt.Errorf("malformed package line %q", line)
+			}
+			st := state.packages[name]
+			st.version = version
+			state.packages[name] = st
 		case strings.HasPrefix(line, "php_patched="):
-			patched = strings.TrimPrefix(line, "php_patched=")
+			name, patched, ok := strings.Cut(strings.TrimPrefix(line, "php_patched="), "|")
+			if !ok || name == "" {
+				return state, fmt.Errorf("malformed patch line %q", line)
+			}
+			switch patched {
+			case "yes", "no":
+			default:
+				return state, fmt.Errorf("the probe reported an unknown patch state %q for %s", patched, name)
+			}
+			st := state.packages[name]
+			st.patched = patched == "yes"
+			state.packages[name] = st
+			reportedPatch[name] = true
 		case strings.HasPrefix(line, "php_mod_php="):
 			modPHP = strings.TrimPrefix(line, "php_mod_php=")
 		case strings.HasPrefix(line, "php_mitigation="):
 			state.mitigations[strings.TrimPrefix(line, "php_mitigation=")] = true
 		}
 	}
-	if state.packageVersion == "" {
-		return state, fmt.Errorf("the probe reported no PHP package version")
-	}
-	switch patched {
-	case "yes":
-		state.patched = true
-	case "no":
-	default:
-		return state, fmt.Errorf("the probe did not report whether PHP carries the fix")
+	for _, pkg := range phpPatchedPackages {
+		st, ok := state.packages[pkg]
+		if !ok {
+			return state, fmt.Errorf("the probe reported no state for %s", pkg)
+		}
+		if st.version == "" {
+			return state, fmt.Errorf("the probe reported no installed version for %s", pkg)
+		}
+		if !reportedPatch[pkg] {
+			return state, fmt.Errorf("the probe did not report whether %s carries the fix", pkg)
+		}
 	}
 	switch modPHP {
 	case "yes":
