@@ -10,6 +10,7 @@ var (
 	fromPhase    string
 	resume       bool
 	stateFile    string
+	timingsFile  string
 )
 
 var deployCmd = &cobra.Command{
@@ -40,6 +41,8 @@ var deployCmd = &cobra.Command{
 			FromPhase:    fromPhase,
 			Resume:       resume,
 			StateFile:    stateFile,
+			TimingsFile:  timingsFile,
+			ConfigFile:   configPath,
 		}
 
 		return orchestrator.Deploy(cmd.Context(), opts)
@@ -51,5 +54,6 @@ func init() {
 	deployCmd.Flags().StringVar(&fromPhase, "from-phase", "", "Run from this phase onwards (skips earlier phases)")
 	deployCmd.Flags().BoolVar(&resume, "resume", false, "Skip the phases already completed in the checkpoint file")
 	deployCmd.Flags().StringVar(&stateFile, "state-file", deploy.DefaultStateFile, "Checkpoint file recording phase progress")
+	deployCmd.Flags().StringVar(&timingsFile, "timings-file", "", "Write per-phase timing data as JSON to this file")
 	rootCmd.AddCommand(deployCmd)
 }

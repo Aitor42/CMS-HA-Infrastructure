@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -66,6 +67,31 @@ func Debug(msg string, args ...any) {
 	slog.Debug(msg)
 }
 
+// phaseObserver receives the name, start time and duration of every completed
+// phase timer. It is used by the deploy package to persist timings.json.
+var (
+	phaseObserverMu sync.RWMutex
+	phaseObserver   func(name string, start time.Time, duration time.Duration)
+)
+
+// SetPhaseObserver installs a global phase-timer observer. Passing nil removes
+// it. Timers still print their normal output; the observer is an extra sink for
+// structured measurements, not a replacement for the user-facing log.
+func SetPhaseObserver(fn func(name string, start time.Time, duration time.Duration)) {
+	phaseObserverMu.Lock()
+	phaseObserver = fn
+	phaseObserverMu.Unlock()
+}
+
+func notifyPhaseObserver(name string, start time.Time, duration time.Duration) {
+	phaseObserverMu.RLock()
+	observer := phaseObserver
+	phaseObserverMu.RUnlock()
+	if observer != nil {
+		observer(name, start, duration)
+	}
+}
+
 // PhaseTimer measures and prints the duration of a phase.
 type PhaseTimer struct {
 	name  string
@@ -83,7 +109,9 @@ func PhaseStart(name string) *PhaseTimer {
 
 // End finishes the phase timer and prints the duration.
 func (t *PhaseTimer) End() {
-	Success("Completed phase: %s in %s", t.name, FormatDuration(time.Since(t.start)))
+	duration := time.Since(t.start)
+	notifyPhaseObserver(t.name, t.start, duration)
+	Success("Completed phase: %s in %s", t.name, FormatDuration(duration))
 }
 
 // FormatDuration renders a duration in human units with at most two decimal

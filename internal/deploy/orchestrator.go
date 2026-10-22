@@ -47,12 +47,32 @@ type DeployOpts struct {
 	Resume bool
 	// StateFile is the checkpoint path (defaults to DefaultStateFile).
 	StateFile string
+	// TimingsFile, when set, is where the per-phase timing report is written.
+	TimingsFile string
+	// ConfigFile is the configuration path recorded in the timing report.
+	ConfigFile string
 }
 
 // Deploy runs the entire deployment pipeline.
-func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
-	timer := logging.PhaseStart("Full Infrastructure Deployment")
+func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr error) {
+	timer := logging.PhaseStart(topLevelTimer)
 	defer timer.End()
+
+	var timings *timingsRecorder
+	if opts.TimingsFile != "" {
+		timings = newTimingsRecorder(opts.TimingsFile, opts.ConfigFile, o.SSH)
+		defer func() {
+			status := "completed"
+			if retErr != nil {
+				status = "failed"
+			}
+			if err := timings.write(status); err != nil {
+				logging.Warn("could not write timings file %s: %v", opts.TimingsFile, err)
+			} else {
+				logging.Info("Timings written to %s", opts.TimingsFile)
+			}
+		}()
+	}
 
 	statePath := opts.StateFile
 	if statePath == "" {
@@ -96,28 +116,37 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		logging.Info("[%d/%d] Phase: %s — %s", i+1, total, phase.Name(), phase.Description())
 
 		if opts.DryRun {
+			timings.phase(phase.Name(), "dry-run", time.Time{}, 0, nil)
 			logging.Info("[DRY-RUN] Skipping execution of: %s", phase.Name())
 			continue
 		}
 
 		key := phaseKey(phase.Name())
 		if skip[key] {
+			timings.phase(phase.Name(), "skipped", time.Time{}, 0, nil)
 			logging.Info("Phase %s already completed (checkpoint); skipping.", phase.Name())
 			continue
 		}
 
-		if err := phase.Run(ctx); err != nil {
+		phaseStart := time.Now()
+		timings.setCurrent(phase.Name())
+		runErr := phase.Run(ctx)
+		timings.clearCurrent()
+
+		if runErr != nil {
+			timings.phase(phase.Name(), "failed", phaseStart, time.Since(phaseStart), runErr)
 			if state != nil {
 				state.Status = "failed"
-				state.LastError = err.Error()
+				state.LastError = runErr.Error()
 				if serr := state.Save(statePath); serr != nil {
 					logging.Warn("could not persist checkpoint %s: %v", statePath, serr)
 				} else {
 					logging.Warn("Checkpoint saved to %s; resume with `cms-ha deploy --resume`.", statePath)
 				}
 			}
-			return fmt.Errorf("phase %q failed: %w", phase.Name(), err)
+			return fmt.Errorf("phase %q failed: %w", phase.Name(), runErr)
 		}
+		timings.phase(phase.Name(), "ok", phaseStart, time.Since(phaseStart), nil)
 
 		if state != nil {
 			if err := state.MarkCompleted(statePath, key); err != nil {
@@ -126,12 +155,15 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		}
 
 		if o.Cfg.Deploy.StaggerDelay > 0 && i < total-1 {
+			staggerStart := time.Now()
 			logging.Info("Waiting %v before next phase...", o.Cfg.Deploy.StaggerDelay)
 			select {
 			case <-ctx.Done():
+				timings.step("stagger", staggerStart, time.Since(staggerStart))
 				return ctx.Err()
 			case <-time.After(o.Cfg.Deploy.StaggerDelay):
 			}
+			timings.step("stagger", staggerStart, time.Since(staggerStart))
 		}
 	}
 

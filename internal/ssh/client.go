@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -42,6 +43,42 @@ type Pool struct {
 	// by in-flight operations; they are definitively closed in Close(). Closing
 	// here instead would sever sessions of concurrent goroutines.
 	evicted []*ssh.Client
+
+	// Counters exposed through Stats. They are read after a deployment to
+	// populate timings.json and are updated from parallel host tasks.
+	commandCount atomic.Int64
+	retryCount   atomic.Int64
+	bytesSent    atomic.Int64
+}
+
+// Stats is a snapshot of the pool's activity counters.
+type Stats struct {
+	Commands       int64 `json:"commands"`
+	ConnectRetries int64 `json:"connect_retries"`
+	BytesUploaded  int64 `json:"bytes_uploaded"`
+}
+
+// Stats returns the pool's activity counters. They are cumulative for the
+// lifetime of the pool and safe to read while commands are in flight.
+func (p *Pool) Stats() Stats {
+	return Stats{
+		Commands:       p.commandCount.Load(),
+		ConnectRetries: p.retryCount.Load(),
+		BytesUploaded:  p.bytesSent.Load(),
+	}
+}
+
+// countingReader reports every byte read through it to an atomic counter, so
+// uploads of arbitrarily large files (the 3.9 GB ISO) stay O(1) in memory.
+type countingReader struct {
+	reader io.Reader
+	total  *atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	c.total.Add(int64(n))
+	return n, err
 }
 
 // Options configures an SSH connection pool.
@@ -328,6 +365,7 @@ func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.R
 	if dst == nil {
 		return "", -1, fmt.Errorf("stdout writer cannot be nil")
 	}
+	p.commandCount.Add(1)
 	client, err := p.getClient(host)
 	if err != nil {
 		return "", -1, err
@@ -336,6 +374,7 @@ func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.R
 	session, err := client.NewSession()
 	if err != nil {
 		// Stale connection retry once
+		p.retryCount.Add(1)
 		p.invalidateClient(host)
 		client, err = p.getClient(host)
 		if err != nil {
@@ -448,6 +487,7 @@ func (p *Pool) withSFTPClient(ctx context.Context, host string, fn func(sftpClie
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
+		p.retryCount.Add(1)
 		p.invalidateClient(host)
 		client, err = p.getClient(host)
 		if err != nil {
@@ -538,6 +578,7 @@ func (p *Pool) CopyContent(ctx context.Context, host string, content []byte, rem
 // account the bytes are streamed through sudo: `cat` into a sidecar file,
 // `chmod`, then `mv` into place (mirroring the SFTP sidecar+rename strategy).
 func (p *Pool) writeRemoteFile(ctx context.Context, host string, src io.Reader, remotePath string, mode os.FileMode) error {
+	src = &countingReader{reader: src, total: &p.bytesSent}
 	if !p.elevated() {
 		return p.withSFTPClient(ctx, host, func(sftpClient *sftp.Client) error {
 			return writeRemoteFile(sftpClient, src, remotePath, mode)
@@ -702,6 +743,7 @@ func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, e
 
 	sftpClient, err := sftp.NewClient(client)
 	if err != nil {
+		p.retryCount.Add(1)
 		p.invalidateClient(host)
 		client, err = p.getClient(host)
 		if err != nil {
