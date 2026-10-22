@@ -42,26 +42,61 @@ func (p *Phase) Name() string {
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
+
 	caPass := p.cfg.PKI.ProvisionerPassword
 	if caPass == "" {
 		return fmt.Errorf("pki.provisioner_password must be set in config.yaml so CA restarts use the same key password")
 	}
 
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
+	caPort := caPortOrDefault(p.cfg.PKI.CAPort)
+	caDomain := p.cfg.PKI.Domain
+	if caDomain == "" {
+		caDomain = "ca.internal.local"
+	}
 
+	if err := p.installStepTools(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.initCA(ctx, jumpIP, caPass, caPort, caDomain); err != nil {
+		return err
+	}
+	if err := p.installCAService(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.waitForCAHealth(ctx, jumpIP, caPort, "step-ca health check failed"); err != nil {
+		return err
+	}
+	if err := p.raiseProvisionerDurations(ctx, jumpIP, caDomain, caPort); err != nil {
+		return err
+	}
+	if err := p.distributeRootCA(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.issueLoadBalancerCertificates(ctx); err != nil {
+		return err
+	}
+
+	logging.Success("PKI Setup completed successfully.")
+	return nil
+}
+
+// installStepTools installs the pinned step-cli and step-ca releases.
+//
+// The release assets are pinned by pki.step_version / pki.step_ca_version.
+// Downloading whatever "latest" happens to point at made a fresh deploy
+// depend on that day's Smallstep release while the configuration claimed a
+// version, so a future release that changes the CLI surface (or the Debian
+// asset name) would break exactly the hosts that start from scratch.
+//
+// The asset name is not stable across releases: step-cli ships
+// step-cli_<v>-1_<arch>.deb while step-ca has published both
+// step-ca_<v>-1_<arch>.deb and step-ca_<v>_<arch>.deb, so every known shape
+// is tried and the version-independent alias is used only when the version
+// is left empty. A pin that cannot be downloaded is an error, not a reason
+// to install something else.
+func (p *Phase) installStepTools(ctx context.Context, jumpIP string) error {
 	logging.Info("Installing step-cli and step-ca on Jumpstart...")
-	// The release assets are pinned by pki.step_version / pki.step_ca_version.
-	// Downloading whatever "latest" happens to point at made a fresh deploy
-	// depend on that day's Smallstep release while the configuration claimed a
-	// version, so a future release that changes the CLI surface (or the Debian
-	// asset name) would break exactly the hosts that start from scratch.
-	//
-	// The asset name is not stable across releases: step-cli ships
-	// step-cli_<v>-1_<arch>.deb while step-ca has published both
-	// step-ca_<v>-1_<arch>.deb and step-ca_<v>_<arch>.deb, so every known shape
-	// is tried and the version-independent alias is used only when the version
-	// is left empty. A pin that cannot be downloaded is an error, not a reason
-	// to install something else.
 	installCmd := fmt.Sprintf(`set -e
 if ! command -v step >/dev/null 2>&1 || ! command -v step-ca >/dev/null 2>&1; then
 	ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
@@ -85,16 +120,13 @@ fi`,
 	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, installCmd); err != nil || code != 0 {
 		return fmt.Errorf("failed to install step-ca (exit %d): %v", code, err)
 	}
+	return nil
+}
 
+// initCA prepares the step directory, uploads the CA password and runs the
+// idempotent `step ca init` guarded by the root certificate.
+func (p *Phase) initCA(ctx context.Context, jumpIP, caPass string, caPort int, caDomain string) error {
 	logging.Info("Initializing step-ca...")
-	caPort := p.cfg.PKI.CAPort
-	if caPort == 0 {
-		caPort = 8443
-	}
-	caDomain := p.cfg.PKI.Domain
-	if caDomain == "" {
-		caDomain = "ca.internal.local"
-	}
 
 	// Prepare step directory and write password file securely with 0600 permissions
 	if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, "mkdir -p /root/.step && chmod 700 /root/.step"); err != nil {
@@ -116,7 +148,11 @@ fi`,
 	if initCode != 0 {
 		return fmt.Errorf("failed to initialize step-ca (exit %d): %v %s%s", initCode, err, strings.TrimSpace(initOut), strings.TrimSpace(initErr))
 	}
+	return nil
+}
 
+// installCAService writes the systemd unit and enables it.
+func (p *Phase) installCAService(ctx context.Context, jumpIP string) error {
 	logging.Info("Starting step-ca service...")
 	serviceCmd := `cat << 'EOF' > /etc/systemd/system/step-ca.service
 [Unit]
@@ -136,24 +172,29 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, serviceCmd); err != nil || code != 0 {
 		return fmt.Errorf("failed to install/enable step-ca systemd service (exit %d): %v", code, err)
 	}
+	return nil
+}
 
-	logging.Info("Waiting for CA health endpoint...")
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+// waitForCAHealth polls the local health endpoint with the same budget for the
+// first start and for the restart that follows the provisioner update.
+func (p *Phase) waitForCAHealth(ctx context.Context, jumpIP string, caPort int, failure string) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
 		_, _, _, err := p.pool.RunCommand(attemptCtx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("step-ca health check failed: %w", err)
+		return fmt.Errorf("%s: %w", failure, err)
 	}
+	return nil
+}
 
-	// Raise the provisioner's x509 durations so the load-balancer certificate
-	// can outlive the verify threshold. step-ca defaults to a 24h maximum, so
-	// without this the issuance below is rejected outright ("requested duration
-	// ... is more than the authorized maximum certificate duration").
-	//
-	// This has to happen after the service is up: `step ca provisioner update`
-	// is not an offline edit of ca.json, it talks to the CA's admin API, and the
-	// CA only picks the new limits up on restart.
+// raiseProvisionerDurations raises the provisioner's x509 durations so the
+// load-balancer certificate can outlive the verify threshold.
+//
+// This has to happen after the service is up: `step ca provisioner update`
+// is not an offline edit of ca.json, it talks to the CA's admin API, and the
+// CA only picks the new limits up on restart.
+func (p *Phase) raiseProvisionerDurations(ctx context.Context, jumpIP, caDomain string, caPort int) error {
 	certHours := p.cfg.LBTLSCertLifetimeHours()
 	durationsCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca provisioner update admin \
 --x509-min-dur 24h --x509-default-dur %dh --x509-max-dur 8760h \
@@ -166,13 +207,12 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 		return fmt.Errorf("failed to restart step-ca after raising the certificate durations: %w", err)
 	}
 	logging.Info("Waiting for CA health endpoint after reloading the provisioner...")
-	if err := retry.DoContext(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
-		_, _, _, rerr := p.pool.RunCommand(attemptCtx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
-		return rerr
-	}); err != nil {
-		return fmt.Errorf("step-ca health check failed after reloading the provisioner: %w", err)
-	}
+	return p.waitForCAHealth(ctx, jumpIP, caPort, "step-ca health check failed after reloading the provisioner")
+}
 
+// distributeRootCA copies the CA certificate to every other node and refreshes
+// its trust store.
+func (p *Phase) distributeRootCA(ctx context.Context, jumpIP string) error {
 	logging.Info("Distributing root CA cert to all nodes...")
 	caCert, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /root/.step/certs/root_ca.crt")
 	if err != nil {
@@ -189,20 +229,7 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	certBytes := []byte(caCert)
 
-	// Leave a copy where the unprivileged deploy account can read it. The
-	// traffic phase mounts it into the k6 container so the load test verifies
-	// the lab's certificate chain instead of skipping TLS verification.
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		dir := filepath.Join(home, ".cms-ha")
-		certPath := filepath.Join(dir, "cms_root_ca.crt")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			logging.Warn("Could not create %s for the root CA copy: %v", dir, err)
-		} else if err := os.WriteFile(certPath, certBytes, 0o644); err != nil {
-			logging.Warn("Could not save the root CA to %s: %v", certPath, err)
-		} else {
-			logging.Info("Root CA copy for the load test: %s", certPath)
-		}
-	}
+	p.saveLocalRootCA(certBytes)
 	for _, ip := range allIPs {
 		nodeIP := ip
 		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
@@ -222,13 +249,28 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 			return fmt.Errorf("failed to distribute root CA to %s: %w", r.Host, r.Err)
 		}
 	}
-
-	if err := p.issueLoadBalancerCertificates(ctx); err != nil {
-		return err
-	}
-
-	logging.Success("PKI Setup completed successfully.")
 	return nil
+}
+
+// saveLocalRootCA leaves a copy where the unprivileged deploy account can read
+// it. The traffic phase mounts it into the k6 container so the load test
+// verifies the lab's certificate chain instead of skipping TLS verification.
+func (p *Phase) saveLocalRootCA(certBytes []byte) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	dir := filepath.Join(home, ".cms-ha")
+	certPath := filepath.Join(dir, "cms_root_ca.crt")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		logging.Warn("Could not create %s for the root CA copy: %v", dir, err)
+		return
+	}
+	if err := os.WriteFile(certPath, certBytes, 0o644); err != nil {
+		logging.Warn("Could not save the root CA to %s: %v", certPath, err)
+		return
+	}
+	logging.Info("Root CA copy for the load test: %s", certPath)
 }
 
 // issueLoadBalancerCertificates issues the load-balancer certificate on the CA
@@ -253,22 +295,9 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	}
 	subject := dnsNames[0]
 
-	// The primary DNS name (dnsNames[0]) is passed positionally as the subject,
-	// but `step ca certificate` only puts the subject in the CommonName: it is
-	// added to the SAN extension *only* when no --san flag is given at all. With
-	// any --san present the subject has to be listed explicitly, otherwise the
-	// certificate has no DNS SAN and every modern TLS client (which ignores the
-	// CN) rejects it for the very name the balancer is meant to serve.
-	sanFlags := strings.Builder{}
-	for _, san := range p.cfg.LBTLSSANs() {
-		if san == "" {
-			continue
-		}
-		if ip := net.ParseIP(san); ip == nil && !validDNSName(san) {
-			return fmt.Errorf("refusing to use unsafe certificate SAN %q", san)
-		}
-		sanFlags.WriteString(" --san ")
-		sanFlags.WriteString(san)
+	sanFlags, err := p.lbCertSANFlags()
+	if err != nil {
+		return err
 	}
 
 	logging.Info("Issuing load-balancer certificate from the internal CA...")
@@ -276,26 +305,13 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	if caDomain == "" {
 		caDomain = "ca.internal.local"
 	}
-	issueCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca certificate "%s" /tmp/cms-lb.crt /tmp/cms-lb.key \
---ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt \
---provisioner admin --password-file /root/.step/password.txt \
---not-after %dh --force%s`, subject, caDomain, caPortOrDefault(p.cfg.PKI.CAPort), certHours, sanFlags.String())
-
-	if out, errOut, code, err := p.pool.RunCommand(ctx, jumpIP, issueCmd); err != nil || code != 0 {
-		return fmt.Errorf("failed to issue load-balancer certificate (exit %d): %v %s%s",
-			code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
+	if err := p.issueLBCertificate(ctx, jumpIP, subject, caDomain, caPortOrDefault(p.cfg.PKI.CAPort), certHours, sanFlags); err != nil {
+		return err
 	}
 
-	// Read certificate and key in a single session, separated by a marker.
-	bundle, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /tmp/cms-lb.crt; printf '\\n===CMSKEY===\\n'; cat /tmp/cms-lb.key")
+	certPEM, keyPEM, err := p.readIssuedLBCertificate(ctx, jumpIP)
 	if err != nil {
-		return fmt.Errorf("failed to read issued certificate: %w", err)
-	}
-	certPEM, keyPEM, ok := strings.Cut(bundle, "===CMSKEY===")
-	certPEM = strings.TrimSpace(certPEM)
-	keyPEM = strings.TrimSpace(keyPEM)
-	if !ok || certPEM == "" || keyPEM == "" {
-		return fmt.Errorf("issued certificate or key is empty")
+		return err
 	}
 
 	// Wipe the CA-host copies: the key now only lives on the balancers.
@@ -303,6 +319,69 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 		_, _, _, _ = p.pool.RunCommand(ctx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key")
 	}()
 
+	if err := p.installLBCertificate(ctx, lbs, certPEM, keyPEM); err != nil {
+		return err
+	}
+
+	logging.Success("Load-balancer certificate issued by the internal CA and distributed.")
+	return nil
+}
+
+// lbCertSANFlags builds the --san arguments and rejects anything that is not
+// an IP or a syntactically valid DNS name, because the value is interpolated
+// into the remote command.
+//
+// The primary DNS name (dnsNames[0]) is passed positionally as the subject,
+// but `step ca certificate` only puts the subject in the CommonName: it is
+// added to the SAN extension *only* when no --san flag is given at all. With
+// any --san present the subject has to be listed explicitly, otherwise the
+// certificate has no DNS SAN and every modern TLS client (which ignores the
+// CN) rejects it for the very name the balancer is meant to serve.
+func (p *Phase) lbCertSANFlags() (string, error) {
+	sanFlags := strings.Builder{}
+	for _, san := range p.cfg.LBTLSSANs() {
+		if san == "" {
+			continue
+		}
+		if ip := net.ParseIP(san); ip == nil && !validDNSName(san) {
+			return "", fmt.Errorf("refusing to use unsafe certificate SAN %q", san)
+		}
+		sanFlags.WriteString(" --san ")
+		sanFlags.WriteString(san)
+	}
+	return sanFlags.String(), nil
+}
+
+func (p *Phase) issueLBCertificate(ctx context.Context, jumpIP, subject, caDomain string, caPort, certHours int, sanFlags string) error {
+	issueCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca certificate "%s" /tmp/cms-lb.crt /tmp/cms-lb.key \
+--ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt \
+--provisioner admin --password-file /root/.step/password.txt \
+--not-after %dh --force%s`, subject, caDomain, caPort, certHours, sanFlags)
+
+	if out, errOut, code, err := p.pool.RunCommand(ctx, jumpIP, issueCmd); err != nil || code != 0 {
+		return fmt.Errorf("failed to issue load-balancer certificate (exit %d): %v %s%s",
+			code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
+	}
+	return nil
+}
+
+// readIssuedLBCertificate reads the certificate and key in a single session,
+// separated by a marker, so the CA host does not need a second round trip.
+func (p *Phase) readIssuedLBCertificate(ctx context.Context, jumpIP string) (string, string, error) {
+	bundle, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /tmp/cms-lb.crt; printf '\\n===CMSKEY===\\n'; cat /tmp/cms-lb.key")
+	if err != nil {
+		return "", "", fmt.Errorf("failed to read issued certificate: %w", err)
+	}
+	certPEM, keyPEM, ok := strings.Cut(bundle, "===CMSKEY===")
+	certPEM = strings.TrimSpace(certPEM)
+	keyPEM = strings.TrimSpace(keyPEM)
+	if !ok || certPEM == "" || keyPEM == "" {
+		return "", "", fmt.Errorf("issued certificate or key is empty")
+	}
+	return certPEM, keyPEM, nil
+}
+
+func (p *Phase) installLBCertificate(ctx context.Context, lbs []config.NodeDetail, certPEM, keyPEM string) error {
 	for _, lb := range lbs {
 		if lb.IP == "" {
 			continue
@@ -319,8 +398,6 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 				lb.Name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
 		}
 	}
-
-	logging.Success("Load-balancer certificate issued by the internal CA and distributed.")
 	return nil
 }
 
