@@ -17,12 +17,12 @@ import (
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/hypervisor"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
-	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
 )
 
 // Options holds flags for the init-vms phase.
@@ -398,7 +398,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	}
 
 	diskPath := filepath.Join(p.cfg.VM.StorageDir, "jumpstart.qcow2")
-	if err := utils.EnsureDiskPathAvailable(diskPath); err != nil {
+	if err := hypervisor.EnsureDiskPathAvailable(diskPath); err != nil {
 		return err
 	}
 
@@ -598,7 +598,7 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 		if node.Name == "" || node.Name == p.cfg.Nodes.Jumpstart.Name {
 			continue
 		}
-		if err := utils.CreateClientVM(ctx, p.cfg, p.lv, node.Name); err != nil {
+		if err := hypervisor.CreateClientVM(ctx, p.cfg, p.lv, node.Name); err != nil {
 			return fmt.Errorf("failed to create VM %s: %w", node.Name, err)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/hypervisor"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
@@ -53,7 +54,7 @@ func TestUtils_NewVerifier(t *testing.T) {
 
 func TestUtils_FixBootOrderSkippingNonExistent(t *testing.T) {
 	l := libvirt.NewClient("test:///default")
-	err := utils.FixBootOrder(t.Context(), l, []string{"nonexistent-vm-9999"})
+	err := hypervisor.FixBootOrder(t.Context(), l, []string{"nonexistent-vm-9999"})
 	if err != nil {
 		t.Errorf("expected FixBootOrder to safely skip nonexistent VMs, got: %v", err)
 	}
@@ -74,7 +75,7 @@ func TestUtils_RecreateFailedVMsSafe(t *testing.T) {
 	// With the destructive pre-fix behavior this would have attempted to
 	// destroy/qemu-img-recreate the missing domains and could not have
 	// failed cleanly; it must now pass while touching nothing.
-	if err := utils.RecreateFailedVMs(t.Context(), cfg, l); err != nil {
+	if err := hypervisor.RecreateFailedVMs(t.Context(), cfg, l); err != nil {
 		t.Errorf("expected RecreateFailedVMs to skip missing VMs without error, got: %v", err)
 	}
 }
@@ -163,7 +164,7 @@ func TestUtils_StopAllVMs_NoRunningVMs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := utils.StopAllVMs(ctx, cfg, l, utils.StopOptions{Timeout: 1 * time.Second})
+	err := hypervisor.StopAllVMs(ctx, cfg, l, hypervisor.StopOptions{Timeout: 1 * time.Second})
 	if err != nil {
 		t.Errorf("expected StopAllVMs to succeed when no VMs are running, got: %v", err)
 	}
