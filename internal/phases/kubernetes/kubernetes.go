@@ -53,6 +53,38 @@ func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 
+	if err := p.validateConfig(); err != nil {
+		return err
+	}
+
+	master1 := p.cfg.Nodes.Masters[0]
+	if err := p.bootstrapControlPlane(ctx, master1); err != nil {
+		return err
+	}
+	if err := p.joinControlPlane(ctx, master1); err != nil {
+		return err
+	}
+	if err := p.joinWorkers(ctx, master1); err != nil {
+		return err
+	}
+	if err := p.waitForNodesReady(ctx, master1); err != nil {
+		return err
+	}
+	if err := p.waitForEtcdQuorum(ctx, master1); err != nil {
+		return err
+	}
+	p.labelPrimary(ctx, master1)
+	if err := p.deployWorkloads(ctx, master1); err != nil {
+		return err
+	}
+
+	logging.Success("Kubernetes Setup completed successfully.")
+	return nil
+}
+
+// validateConfig rejects the node counts and credentials that would make the
+// rest of the phase fail halfway through a cluster join.
+func (p *Phase) validateConfig() error {
 	if len(p.cfg.Nodes.Masters) < 3 {
 		return fmt.Errorf("k3s HA requires at least 3 master nodes for etcd quorum (got %d)", len(p.cfg.Nodes.Masters))
 	}
@@ -67,10 +99,12 @@ func (p *Phase) Run(ctx context.Context) error {
 			return fmt.Errorf("%s cannot contain line breaks", name)
 		}
 	}
+	return nil
+}
 
-	master1 := p.cfg.Nodes.Masters[0]
-	joiningServers := p.cfg.Nodes.Masters[1:]
-
+// bootstrapControlPlane initialises the first server, waits for its API, reads
+// the join token and puts it on every node that will join.
+func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s on Master 1 (cluster-init)...")
 	initCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP)
 	if err := runChecked(ctx, p.pool, master1.IP, initCmd, "install K3s on master1"); err != nil {
@@ -87,8 +121,16 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Extracting K3s token from Master 1...")
+	token, err := p.readJoinToken(ctx, master1)
+	if err != nil {
+		return err
+	}
+	return p.distributeJoinToken(ctx, token)
+}
+
+func (p *Phase) readJoinToken(ctx context.Context, master1 config.NodeDetail) (string, error) {
 	var token string
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
 		tok, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
 		if err != nil || strings.TrimSpace(tok) == "" {
 			return fmt.Errorf("node-token not ready yet")
@@ -97,38 +139,52 @@ func (p *Phase) Run(ctx context.Context) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get k3s token: %w", err)
+		return "", fmt.Errorf("failed to get k3s token: %w", err)
 	}
+	return token, nil
+}
 
+// distributeJoinToken writes the token through a 0600 file instead of argv so
+// it is not exposed in /proc/*/cmdline on the joining nodes.
+func (p *Phase) distributeJoinToken(ctx context.Context, token string) error {
 	logging.Info("Distributing K3s join token to joining nodes (file 0600, not argv)...")
-	joinTokenPath := "/root/.k3s-join-token"
-	var joiningNodeIPs []string
-	for _, m := range joiningServers {
-		if m.IP != "" {
-			joiningNodeIPs = append(joiningNodeIPs, m.IP)
-		}
-	}
-	for _, w := range p.cfg.Nodes.Workers {
-		if w.IP != "" {
-			joiningNodeIPs = append(joiningNodeIPs, w.IP)
-		}
-	}
-	for _, joinIP := range joiningNodeIPs {
+	const joinTokenPath = "/root/.k3s-join-token"
+	for _, joinIP := range p.joiningNodeIPs() {
 		if err := p.pool.CopyContent(ctx, joinIP, []byte(token), joinTokenPath, 0600); err != nil {
 			return fmt.Errorf("failed to upload k3s token to %s: %w", joinIP, err)
 		}
 	}
+	return nil
+}
 
-	// Join every additional control-plane server so the embedded etcd cluster
-	// reaches quorum. The token travels through --token-file instead of the
-	// command line: argv of the remote shell would expose it to every local
-	// user via /proc/*/cmdline.
-	//
-	// The joins run concurrently: they are independent members of the same
-	// embedded etcd cluster (k3s adds them as learners and promotes them once
-	// caught up). Measured on the hosted run, joining the two extra servers in
-	// series cost 43.8s + 32.8s; the quorum check below is what proves the
-	// parallel join actually converged.
+func (p *Phase) joiningNodeIPs() []string {
+	var ips []string
+	for _, m := range p.cfg.Nodes.Masters[1:] {
+		if m.IP != "" {
+			ips = append(ips, m.IP)
+		}
+	}
+	for _, w := range p.cfg.Nodes.Workers {
+		if w.IP != "" {
+			ips = append(ips, w.IP)
+		}
+	}
+	return ips
+}
+
+// joinControlPlane joins every additional server so the embedded etcd cluster
+// reaches quorum. The token travels through --token-file instead of the command
+// line: argv of the remote shell would expose it to every local user via
+// /proc/*/cmdline.
+//
+// The joins run concurrently: they are independent members of the same embedded
+// etcd cluster (k3s adds them as learners and promotes them once caught up).
+// Measured on the hosted run, joining the two extra servers in series cost
+// 43.8s + 32.8s; the quorum check below is what proves the parallel join
+// actually converged.
+func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail) error {
+	const joinTokenPath = "/root/.k3s-join-token"
+	joiningServers := p.cfg.Nodes.Masters[1:]
 	serverJoinTasks := make(map[string]func(context.Context, ssh.Executor) error, len(joiningServers))
 	for _, m := range joiningServers {
 		if m.IP == "" {
@@ -146,11 +202,16 @@ func (p *Phase) Run(ctx context.Context) error {
 			return r.Err
 		}
 	}
+	return nil
+}
 
+// joinWorkers installs the k3s agent on every worker in parallel. The token is
+// expanded by bash into an exported env var (the assignment literal
+// "$(cat ...)" stays unexpanded in argv), so the value is only visible in the
+// owner-readable /proc/*/environ, never in cmdline.
+func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s Agents on Workers...")
-	// The token is expanded by bash into an exported env var (the assignment
-	// literal "$(cat ...)" stays unexpanded in argv), so the value is only
-	// visible in the owner-readable /proc/*/environ, never in cmdline.
+	const joinTokenPath = "/root/.k3s-join-token"
 	agentJoinCmd := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443 INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\"; curl -sfL https://get.k3s.io | sh -", joinTokenPath, master1.IP)
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
@@ -167,10 +228,13 @@ func (p *Phase) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to join k3s agent on %s (exit code %d): %s", r.Host, r.ExitCode, strings.TrimSpace(r.Output))
 		}
 	}
+	return nil
+}
 
+func (p *Phase) waitForNodesReady(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Waiting for all nodes to be Ready...")
 	expectedCount := fmt.Sprintf("%d", len(p.cfg.Nodes.Masters)+len(p.cfg.Nodes.Workers))
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
 		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep Ready | wc -l")
 		if err != nil {
 			return err
@@ -184,16 +248,17 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("K3s nodes did not all become Ready: %w", err)
 	}
+	return nil
+}
 
-	// The whole point of the third master: etcd must have a real quorum.
-	// Verifying the member count (not just node readiness) catches a server
-	// that joined as an agent or failed to register with etcd. K3s runs etcd
-	// inside the server process rather than as kube-system pods, so members
-	// are counted through the etcd role label (the one behind kubectl's ROLES
-	// column); that also matches how kubeadm clusters report it.
+// waitForEtcdQuorum verifies the member count, not just node readiness. K3s
+// runs etcd inside the server process rather than as kube-system pods, so
+// members are counted through the etcd role label (the one behind kubectl's
+// ROLES column); that also matches how kubeadm clusters report it.
+func (p *Phase) waitForEtcdQuorum(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Verifying embedded etcd quorum (%d members required)...", len(p.cfg.Nodes.Masters))
 	expectedEtcd := strconv.Itoa(len(p.cfg.Nodes.Masters))
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
 		// Count in Go rather than piping into `wc -l`: a kubectl failure there
 		// still exits 0 (the status belongs to wc), so a broken kubeconfig or an
 		// unavailable API server would be reported as "got 0 members" instead of
@@ -213,43 +278,88 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("etcd did not reach quorum with %s members: %w", expectedEtcd, err)
 	}
 	logging.Success("etcd quorum healthy: %s members", expectedEtcd)
+	return nil
+}
 
+// labelPrimary marks master1 as the DRBD primary. The label is informational:
+// losing it must not abort a healthy cluster, so failures are warnings.
+func (p *Phase) labelPrimary(ctx context.Context, master1 config.NodeDetail) {
 	logging.Info("Labeling Master 1 with DRBD primary status...")
-	_, _, _, err = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", master1.FQDN, master1.Name))
+	_, _, _, err := p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", master1.FQDN, master1.Name))
 	if err != nil {
 		logging.Warn("Failed to label node: %v", err)
 	}
+}
 
-	logging.Info("Applying Kubernetes Manifests (kustomize)...")
-	// Extract the kustomize tree (base, backups, jobs, monitoring and the
-	// overlays) to master1, preserving the layout so relative references
-	// (e.g. ../../base) resolve.
-	manifestsDir := "/tmp/k3s-manifests"
-	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("install -d -m 0700 %s", manifestsDir), "create private manifest directory"); err != nil {
+// deployWorkloads uploads the kustomize tree and the generated credentials,
+// applies the roots in dependency order, then waits for MariaDB and the
+// initialization Job.
+func (p *Phase) deployWorkloads(ctx context.Context, master1 config.NodeDetail) error {
+	manifestsDir, cleanup, err := p.prepareManifests(ctx, master1)
+	if err != nil {
 		return err
 	}
-	defer func() {
+	defer cleanup()
+
+	backupsOn, secretPath, backupSecretPath, backupConfigPath, err := p.uploadGeneratedManifests(ctx, master1, manifestsDir)
+	if err != nil {
+		return err
+	}
+	if err := p.applyGeneratedManifests(ctx, master1, manifestsDir, secretPath, backupSecretPath, backupConfigPath, backupsOn); err != nil {
+		return err
+	}
+	if err := p.applyKustomizeRoots(ctx, master1, manifestsDir, backupsOn); err != nil {
+		return err
+	}
+	if backupsOn {
+		p.syncBackupSchedules(ctx, master1)
+	}
+	if err := p.waitForMariaDB(ctx, master1); err != nil {
+		return err
+	}
+	return p.applyInitJob(ctx, master1, manifestsDir)
+}
+
+// prepareManifests extracts the kustomize tree (base, backups, jobs,
+// monitoring and the overlays) to master1, preserving the layout so relative
+// references (e.g. ../../base) resolve.
+func (p *Phase) prepareManifests(ctx context.Context, master1 config.NodeDetail) (string, func(), error) {
+	logging.Info("Applying Kubernetes Manifests (kustomize)...")
+	manifestsDir := "/tmp/k3s-manifests"
+	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("install -d -m 0700 %s", manifestsDir), "create private manifest directory"); err != nil {
+		return "", nil, err
+	}
+	cleanup := func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_, _, _, _ = p.pool.RunCommand(cleanupCtx, master1.IP, fmt.Sprintf("rm -rf %s", manifestsDir))
-	}()
+	}
 
 	if err := copyKustomizeTree(ctx, p.pool, master1.IP, manifestsDir); err != nil {
-		return fmt.Errorf("failed to copy the kustomize tree: %w", err)
+		cleanup()
+		return "", nil, fmt.Errorf("failed to copy the kustomize tree: %w", err)
 	}
 
 	generatedDir := fmt.Sprintf("%s/generated", manifestsDir)
 	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("install -d -m 0700 %s", generatedDir), "create generated manifest directory"); err != nil {
-		return err
+		cleanup()
+		return "", nil, err
 	}
+	return manifestsDir, cleanup, nil
+}
 
+// uploadGeneratedManifests generates the MariaDB and backup credentials from
+// config.yaml and uploads them. All files are generated before the first apply,
+// so a malformed value fails before any object is created.
+func (p *Phase) uploadGeneratedManifests(ctx context.Context, master1 config.NodeDetail, manifestsDir string) (bool, string, string, string, error) {
+	generatedDir := fmt.Sprintf("%s/generated", manifestsDir)
 	secretManifest, err := makeMariaDBSecret(p.cfg.Database.RootPassword, p.cfg.Database.Password, p.cfg.Database.ExporterPassword)
 	if err != nil {
-		return fmt.Errorf("failed to generate MariaDB Secret manifest: %w", err)
+		return false, "", "", "", fmt.Errorf("failed to generate MariaDB Secret manifest: %w", err)
 	}
 	secretPath := fmt.Sprintf("%s/mariadb-secret.yaml", generatedDir)
 	if err := p.pool.CopyContent(ctx, master1.IP, secretManifest, secretPath, 0600); err != nil {
-		return fmt.Errorf("failed to copy generated MariaDB Secret: %w", err)
+		return false, "", "", "", fmt.Errorf("failed to copy generated MariaDB Secret: %w", err)
 	}
 
 	// Backups live off the DRBD device (Garage S3 on the hypervisor). The jobs
@@ -262,25 +372,28 @@ func (p *Phase) Run(ctx context.Context) error {
 	if backupsOn {
 		backupSecret, err := makeBackupSecret(p.cfg.BackupAccessKey(), p.cfg.Backup.SecretKey)
 		if err != nil {
-			return fmt.Errorf("failed to generate backup Secret manifest: %w", err)
+			return false, "", "", "", fmt.Errorf("failed to generate backup Secret manifest: %w", err)
 		}
 		backupSecretPath = fmt.Sprintf("%s/backup-secret.yaml", generatedDir)
 		if err := p.pool.CopyContent(ctx, master1.IP, backupSecret, backupSecretPath, 0600); err != nil {
-			return fmt.Errorf("failed to copy generated backup Secret: %w", err)
+			return false, "", "", "", fmt.Errorf("failed to copy generated backup Secret: %w", err)
 		}
 
 		backupConfig, err := makeBackupConfigMap(p.cfg.BackupS3Endpoint(), p.cfg.BackupBucket(), p.cfg.BackupS3Region(), p.cfg.BackupRetentionDays())
 		if err != nil {
-			return fmt.Errorf("failed to generate backup ConfigMap manifest: %w", err)
+			return false, "", "", "", fmt.Errorf("failed to generate backup ConfigMap manifest: %w", err)
 		}
 		backupConfigPath = fmt.Sprintf("%s/backup-config.yaml", generatedDir)
 		if err := p.pool.CopyContent(ctx, master1.IP, backupConfig, backupConfigPath, 0644); err != nil {
-			return fmt.Errorf("failed to copy generated backup ConfigMap: %w", err)
+			return false, "", "", "", fmt.Errorf("failed to copy generated backup ConfigMap: %w", err)
 		}
 	}
+	return backupsOn, secretPath, backupSecretPath, backupConfigPath, nil
+}
 
-	// Namespace and generated credentials first, so no workload ever starts
-	// against a missing Secret.
+// applyGeneratedManifests creates the namespace and credentials before any
+// workload can start against a missing Secret.
+func (p *Phase) applyGeneratedManifests(ctx context.Context, master1 config.NodeDetail, manifestsDir, secretPath, backupSecretPath, backupConfigPath string, backupsOn bool) error {
 	if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s/base/namespace.yaml", manifestsDir), "apply Kubernetes namespace"); err != nil {
 		return err
 	}
@@ -298,10 +411,13 @@ func (p *Phase) Run(ctx context.Context) error {
 		}
 		_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", backupSecretPath))
 	}
+	return nil
+}
 
+func (p *Phase) applyKustomizeRoots(ctx context.Context, master1 config.NodeDetail, manifestsDir string, backupsOn bool) error {
 	// Core platform via the lab kustomize overlay (base + overlays).
 	logging.Info("Applying base manifests with kustomize (kubectl apply -k overlays/lab)...")
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 6, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 6, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
 		return runChecked(attemptCtx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -k %s/overlays/lab", manifestsDir), "apply base kustomize overlay")
 	})
 	if err != nil {
@@ -321,30 +437,33 @@ func (p *Phase) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	return nil
+}
 
-	// Keep the CronJob schedules in sync with config.yaml; the schedules baked
-	// into the manifests are only fallbacks. Schedules are validated in
-	// config.Validate() to be shell-safe.
-	if backupsOn {
-		schedules := map[string]string{
-			"mariadb-backup":       p.cfg.BackupSchedule(),
-			"mariadb-restore-test": p.cfg.BackupRestoreTestSchedule(),
-		}
-		for name, sched := range schedules {
-			patch := fmt.Sprintf(`{"spec":{"schedule":"%s"}}`, sched)
-			cmd := fmt.Sprintf("kubectl patch cronjob %s -n cms --type merge -p '%s'", name, patch)
-			if out, errOut, code, err := p.pool.RunCommand(ctx, master1.IP, cmd); err != nil || code != 0 {
-				logging.Warn("Could not sync the schedule of CronJob %s (exit %d): %v %s%s",
-					name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
-			}
+// syncBackupSchedules keeps the CronJob schedules in sync with config.yaml;
+// the schedules baked into the manifests are only fallbacks. Schedules are
+// validated in config.Validate() to be shell-safe.
+func (p *Phase) syncBackupSchedules(ctx context.Context, master1 config.NodeDetail) {
+	schedules := map[string]string{
+		"mariadb-backup":       p.cfg.BackupSchedule(),
+		"mariadb-restore-test": p.cfg.BackupRestoreTestSchedule(),
+	}
+	for name, sched := range schedules {
+		patch := fmt.Sprintf(`{"spec":{"schedule":"%s"}}`, sched)
+		cmd := fmt.Sprintf("kubectl patch cronjob %s -n cms --type merge -p '%s'", name, patch)
+		if out, errOut, code, err := p.pool.RunCommand(ctx, master1.IP, cmd); err != nil || code != 0 {
+			logging.Warn("Could not sync the schedule of CronJob %s (exit %d): %v %s%s",
+				name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
 		}
 	}
+}
 
+func (p *Phase) waitForMariaDB(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Waiting for MariaDB pod to be Running...")
 	// The StatefulSet controller creates mariadb-0 asynchronously and
 	// `kubectl wait` fails outright when no pod matches yet, so wait for the
 	// pod object to appear before waiting on its phase.
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second, MaxInterval: 10 * time.Second, Timeout: 2 * time.Minute}, func(attemptCtx context.Context) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second, MaxInterval: 10 * time.Second, Timeout: 2 * time.Minute}, func(attemptCtx context.Context) error {
 		return runChecked(attemptCtx, p.pool, master1.IP, "kubectl get pod mariadb-0 -n cms", "wait for the MariaDB pod to be created")
 	})
 	if err != nil {
@@ -354,7 +473,10 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := runCheckedRetry(ctx, p.pool, master1.IP, "kubectl wait --for=jsonpath='{.status.phase}'=Running pod mariadb-0 -n cms --timeout=300s", "wait for MariaDB pod"); err != nil {
 		return fmt.Errorf("mariadb pod failed to start: %w", err)
 	}
+	return nil
+}
 
+func (p *Phase) applyInitJob(ctx context.Context, master1 config.NodeDetail, manifestsDir string) error {
 	logging.Info("Applying init-db-job...")
 	// The Job name is fixed, so a resumed deploy has to clear the previous
 	// object first. kubectl delete already waits for it to disappear, but the
@@ -372,8 +494,6 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := runCheckedRetry(ctx, p.pool, master1.IP, "kubectl wait --for=condition=complete job/init-wordpress-db -n cms --timeout=300s", "wait for MariaDB initialization Job"); err != nil {
 		return fmt.Errorf("init-wordpress-db job did not complete: %w", err)
 	}
-
-	logging.Success("Kubernetes Setup completed successfully.")
 	return nil
 }
 
