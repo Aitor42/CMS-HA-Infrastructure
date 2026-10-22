@@ -32,15 +32,6 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 func (p *Phase) Name() string        { return catalog.Puppet.Name }
 func (p *Phase) Description() string { return catalog.Puppet.Description }
 
-// tailLines returns the last few non-empty lines of s for error reporting.
-func tailLines(s string) string {
-	lines := strings.Split(strings.TrimRight(s, "\n\r"), "\n")
-	if len(lines) > 10 {
-		lines = lines[len(lines)-10:]
-	}
-	return strings.Join(lines, "\n")
-}
-
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
@@ -78,8 +69,8 @@ func (p *Phase) Run(ctx context.Context) error {
 		// Jumpstart convergence bootstraps the puppetserver; letting a failed
 		// catalog slide here makes every later phase fail with confusing
 		// errors much further down the line.
-		logging.Warn("puppet agent output on %s (tail):\n%s", jumpstartIP, tailLines(stdout))
-		return fmt.Errorf("puppet agent failed on jumpstart %s: %v\n%s", jumpstartIP, err, tailLines(stderr))
+		logging.Warn("puppet agent output on %s (tail):\n%s", jumpstartIP, logging.Tail(stdout, 10))
+		return fmt.Errorf("puppet agent failed on jumpstart %s: %v\n%s", jumpstartIP, err, logging.Tail(stderr, 10))
 	}
 
 	agentNodes := p.getAgentNodes()
