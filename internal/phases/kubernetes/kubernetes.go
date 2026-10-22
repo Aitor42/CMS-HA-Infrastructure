@@ -29,11 +29,11 @@ const apiRetryBudget = 3 * time.Minute
 // Phase implements the Kubernetes setup phase.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new Kubernetes Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
@@ -129,13 +129,13 @@ func (p *Phase) Run(ctx context.Context) error {
 	// caught up). Measured on the hosted run, joining the two extra servers in
 	// series cost 43.8s + 32.8s; the quorum check below is what proves the
 	// parallel join actually converged.
-	serverJoinTasks := make(map[string]func(context.Context, *ssh.Pool) error, len(joiningServers))
+	serverJoinTasks := make(map[string]func(context.Context, ssh.Executor) error, len(joiningServers))
 	for _, m := range joiningServers {
 		if m.IP == "" {
 			continue
 		}
 		m := m
-		serverJoinTasks[m.IP] = func(ctx context.Context, pool *ssh.Pool) error {
+		serverJoinTasks[m.IP] = func(ctx context.Context, pool ssh.Executor) error {
 			logging.Info("Installing K3s on %s (server join)...", m.Name)
 			joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, joinTokenPath, m.IP)
 			return runChecked(ctx, pool, m.IP, joinCmd, "join K3s "+m.Name)
@@ -382,7 +382,7 @@ func (p *Phase) Run(ctx context.Context) error {
 // (e.g. ../../base from an overlay) keep working. The whole tree is packed into
 // a single tar and extracted in one SSH session (directories 0700, files 0644)
 // instead of one round-trip per directory and per file.
-func copyKustomizeTree(ctx context.Context, pool *ssh.Pool, host, dest string) error {
+func copyKustomizeTree(ctx context.Context, pool ssh.Executor, host, dest string) error {
 	tarball, err := buildKustomizeTar()
 	if err != nil {
 		return err
@@ -444,7 +444,7 @@ func countNonEmptyLines(out string) int {
 	return count
 }
 
-func runChecked(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
+func runChecked(ctx context.Context, pool ssh.Executor, host, command, action string) error {
 	stdout, stderr, code, err := pool.RunCommand(ctx, host, command)
 	// A non-zero exit status arrives as an error as well, but it carries the
 	// command's own output, which is what explains the failure. Only a
@@ -505,7 +505,7 @@ func isTransientAPIError(detail string) bool {
 // runCheckedRetry is runChecked for idempotent kubectl commands (apply, get,
 // delete, wait): a control-plane hiccup is retried for up to apiRetryBudget,
 // while a real rejection (a bad manifest, a missing object) fails at once.
-func runCheckedRetry(ctx context.Context, pool *ssh.Pool, host, command, action string) error {
+func runCheckedRetry(ctx context.Context, pool ssh.Executor, host, command, action string) error {
 	deadline := time.Now().Add(apiRetryBudget)
 	for attempt := 1; ; attempt++ {
 		err := runChecked(ctx, pool, host, command, action)

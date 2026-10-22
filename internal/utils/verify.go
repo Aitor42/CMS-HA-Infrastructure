@@ -17,12 +17,12 @@ import (
 // Verifier holds the dependencies needed to check the deployment.
 type Verifier struct {
 	cfg     *config.Config
-	ssh     *ssh.Pool
+	ssh     ssh.Executor
 	libvirt *libvirt.Client
 }
 
 // NewVerifier initializes a new Verifier.
-func NewVerifier(cfg *config.Config, s *ssh.Pool, l *libvirt.Client) *Verifier {
+func NewVerifier(cfg *config.Config, s ssh.Executor, l *libvirt.Client) *Verifier {
 	return &Verifier{cfg: cfg, ssh: s, libvirt: l}
 }
 

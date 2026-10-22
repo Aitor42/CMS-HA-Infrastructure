@@ -28,7 +28,7 @@ type DrillsOptions struct {
 }
 
 // RunDrills executes the backup/restore, TLS renewal and alert-hygiene drills.
-func RunDrills(ctx context.Context, cfg *config.Config, pool *ssh.Pool, opts DrillsOptions) error {
+func RunDrills(ctx context.Context, cfg *config.Config, pool ssh.Executor, opts DrillsOptions) error {
 	timer := logging.PhaseStart("Operational Drills")
 	defer timer.End()
 
@@ -52,7 +52,7 @@ func RunDrills(ctx context.Context, cfg *config.Config, pool *ssh.Pool, opts Dri
 // runBackupDrill triggers the two production CronJobs (dump + offsite upload,
 // then restore into a throwaway MariaDB) and proves that Prometheus received
 // the freshness metrics the alert rules read.
-func runBackupDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool) error {
+func runBackupDrill(ctx context.Context, cfg *config.Config, pool ssh.Executor) error {
 	master, ok := firstMaster(cfg)
 	if !ok {
 		return fmt.Errorf("no master node with an address is configured")
@@ -103,7 +103,7 @@ func runBackupDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool) err
 
 // runCronJob creates a one-shot Job from a CronJob and waits for it to
 // succeed. The job name is unique so repeated drills never collide.
-func runCronJob(ctx context.Context, pool *ssh.Pool, host, cron, prefix string, timeout time.Duration) (string, error) {
+func runCronJob(ctx context.Context, pool ssh.Executor, host, cron, prefix string, timeout time.Duration) (string, error) {
 	name := fmt.Sprintf("%s-%d", prefix, time.Now().Unix())
 	cmd := fmt.Sprintf("kubectl create job --from=cronjob/%s %s -n cms", cron, name)
 	if out, errOut, code, err := pool.RunCommand(ctx, host, cmd); err != nil || code != 0 {
@@ -120,7 +120,7 @@ func runCronJob(ctx context.Context, pool *ssh.Pool, host, cron, prefix string, 
 
 // jobDiagnostics collects why a drill job failed: the Job conditions, the Pod
 // state and the logs of every container (including init containers).
-func jobDiagnostics(ctx context.Context, pool *ssh.Pool, host, name string) string {
+func jobDiagnostics(ctx context.Context, pool ssh.Executor, host, name string) string {
 	const tmpl = "kubectl describe job %[1]s -n cms 2>&1; " +
 		"echo '--- pods ---'; kubectl get pods -n cms -l job-name=%[1]s -o wide 2>&1; " +
 		"echo '--- logs ---'; kubectl logs -n cms -l job-name=%[1]s --all-containers --tail=80 2>&1"
@@ -133,7 +133,7 @@ func jobDiagnostics(ctx context.Context, pool *ssh.Pool, host, name string) stri
 
 // deleteJob removes a drill job; the drill's evidence is already in the logs
 // and in Prometheus, so leaving completed pods around only clutters the lab.
-func deleteJob(ctx context.Context, pool *ssh.Pool, host, name string) {
+func deleteJob(ctx context.Context, pool ssh.Executor, host, name string) {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if _, _, _, err := pool.RunCommand(cleanupCtx, host, fmt.Sprintf("kubectl delete job %s -n cms --ignore-not-found --wait=false", name)); err != nil {
@@ -145,7 +145,7 @@ func deleteJob(ctx context.Context, pool *ssh.Pool, host, name string) {
 // mode, so the CA is really contacted over mTLS and the certificate is really
 // rotated. The backup balancer is used so the VIP holder keeps serving the
 // current certificate while the drill runs.
-func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool *ssh.Pool) error {
+func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool ssh.Executor) error {
 	if len(cfg.Nodes.LBs) == 0 {
 		return fmt.Errorf("no load balancer is configured")
 	}

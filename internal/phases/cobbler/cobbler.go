@@ -41,11 +41,11 @@ var cobblerVars = strings.NewReplacer(
 // Phase installs and configures the Cobbler provisioning server.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new Cobbler Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 

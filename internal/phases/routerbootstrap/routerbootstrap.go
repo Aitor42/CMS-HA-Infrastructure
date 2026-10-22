@@ -65,11 +65,11 @@ const (
 // Phase implements the router bootstrap.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new Router Bootstrap phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 

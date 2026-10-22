@@ -26,7 +26,7 @@ const natRulesPath = "/tmp/nat.rules"
 // interface that is not there leaves the lab without outbound connectivity
 // while every step still reports success, so an unresolvable WAN interface is
 // an error, not a guess.
-func WANIface(ctx context.Context, pool *ssh.Pool, routerIP, wanMAC string) (string, error) {
+func WANIface(ctx context.Context, pool ssh.Executor, routerIP, wanMAC string) (string, error) {
 	if wanMAC != "" {
 		// The MAC is interpolated into an awk filter: an unvalidated value
 		// would break the expression (or be read as part of it).
@@ -76,7 +76,7 @@ func RenderNATRules(wanIface string) ([]byte, error) {
 //
 // The function is idempotent: the splice starts by deleting any previously
 // injected block, so it can run both early (bootstrap) and late (UFW phase).
-func ConfigureNAT(ctx context.Context, pool *ssh.Pool, routerIP, wanIface string, apply bool) ([]byte, error) {
+func ConfigureNAT(ctx context.Context, pool ssh.Executor, routerIP, wanIface string, apply bool) ([]byte, error) {
 	natRules, err := RenderNATRules(wanIface)
 	if err != nil {
 		return nil, err

@@ -17,11 +17,11 @@ import (
 // Phase repairs SSH access and redistributes the deploy key.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new SSH-repair Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
@@ -90,13 +90,13 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 }
 
 func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error {
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, n := range nodes {
 		node := n // capture loop variable
 		if node.IP == "" {
 			continue
 		}
-		tasks[node.IP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[node.IP] = func(c context.Context, pool ssh.Executor) error {
 			cmd := fmt.Sprintf("hostnamectl set-hostname %s", node.FQDN)
 			_, _, code, err := pool.RunCommand(c, node.IP, cmd)
 			if err != nil || code != 0 {
@@ -134,13 +134,13 @@ func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) erro
 	}
 	hostsContent := sb.String()
 
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, n := range nodes {
 		node := n
 		if node.IP == "" {
 			continue
 		}
-		tasks[node.IP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[node.IP] = func(c context.Context, pool ssh.Executor) error {
 			return pool.CopyContent(c, node.IP, []byte(hostsContent), "/etc/hosts", 0644)
 		}
 	}
@@ -175,7 +175,7 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		return fmt.Errorf("jumpstart public key is empty")
 	}
 
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	// Inter-node SSH must use the non-root deploy account: the installers
 	// disable direct root logins (PermitRootLogin no), so authorising the
 	// jumpstart key for root would be dead weight.
@@ -189,7 +189,7 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 			continue
 		}
 		nodeIP := n.IP
-		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			cmd := fmt.Sprintf(`
 				mkdir -p %[1]s/.ssh
 				chmod 700 %[1]s/.ssh

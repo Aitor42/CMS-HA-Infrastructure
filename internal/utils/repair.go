@@ -12,7 +12,7 @@ import (
 )
 
 // SyncClocks sets date on all VMs to host time and restarts chrony / timesyncd.
-func SyncClocks(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
+func SyncClocks(ctx context.Context, cfg *config.Config, s ssh.Executor) error {
 	timer := logging.PhaseStart("Sync Clocks")
 	defer timer.End()
 
@@ -46,7 +46,7 @@ func SyncClocks(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
 }
 
 // RepairK8s syncs clocks, cleans k3s processes, restarts nodes, and verifies.
-func RepairK8s(ctx context.Context, cfg *config.Config, s *ssh.Pool) error {
+func RepairK8s(ctx context.Context, cfg *config.Config, s ssh.Executor) error {
 	timer := logging.PhaseStart("Repair Kubernetes")
 	defer timer.End()
 

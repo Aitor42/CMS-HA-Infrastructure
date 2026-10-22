@@ -17,7 +17,7 @@ import (
 // session, or the timeout expires. It replaces retry loops made of `status ssh`
 // plus a fixed sleep: the wait ends as soon as the lab is up instead of on the
 // next poll boundary.
-func WaitForAllSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, timeout time.Duration) error {
+func WaitForAllSSH(ctx context.Context, cfg *config.Config, s ssh.Executor, timeout time.Duration) error {
 	var hosts []string
 	seen := make(map[string]bool)
 	for _, n := range cfg.AllNodes() {
@@ -43,7 +43,7 @@ func WaitForAllSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, timeout
 }
 
 // CheckSSH checks SSH connectivity for all VMs and prints a table.
-func CheckSSH(ctx context.Context, cfg *config.Config, s *ssh.Pool, l *libvirt.Client) error {
+func CheckSSH(ctx context.Context, cfg *config.Config, s ssh.Executor, l *libvirt.Client) error {
 	timer := logging.PhaseStart("Check SSH Status")
 	defer timer.End()
 

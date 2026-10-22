@@ -17,11 +17,11 @@ import (
 // Phase implements the Monitoring setup phase.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new Monitoring Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
@@ -168,7 +168,7 @@ func (p *Phase) Run(ctx context.Context) error {
 // verifyNodeExporters fails when a node whose metrics the dashboards rely on is
 // not running the node exporter that role::base installs and enables. A silent
 // gap here would only show up as a hole in Grafana.
-func verifyNodeExporters(ctx context.Context, pool *ssh.Pool, hosts []string) error {
+func verifyNodeExporters(ctx context.Context, pool ssh.Executor, hosts []string) error {
 	if len(hosts) == 0 {
 		return nil
 	}

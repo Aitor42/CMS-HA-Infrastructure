@@ -45,17 +45,17 @@ type Options struct {
 type Phase struct {
 	cfg  *config.Config
 	lv   *libvirt.Client
-	pool *ssh.Pool
+	pool ssh.Executor
 	opts Options
 }
 
 // NewPhase creates a new InitVMs Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool, lv *libvirt.Client) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor, lv *libvirt.Client) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool, lv: lv}
 }
 
 // NewPhaseWithOpts creates a new InitVMs Phase with options.
-func NewPhaseWithOpts(cfg *config.Config, pool *ssh.Pool, lv *libvirt.Client, opts Options) phases.Phase {
+func NewPhaseWithOpts(cfg *config.Config, pool ssh.Executor, lv *libvirt.Client, opts Options) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool, lv: lv, opts: opts}
 }
 

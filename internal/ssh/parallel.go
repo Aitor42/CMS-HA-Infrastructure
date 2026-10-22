@@ -68,7 +68,7 @@ func (p *Pool) RunParallel(ctx context.Context, hosts []string, cmd string) []Pa
 
 // RunParallelFunc runs one task per host concurrently, with the same concurrency
 // limit as RunParallel. Results are unordered because tasks finish in any order.
-func (p *Pool) RunParallelFunc(ctx context.Context, tasks map[string]func(ctx context.Context, pool *Pool) error) []ParallelResult {
+func (p *Pool) RunParallelFunc(ctx context.Context, tasks map[string]func(ctx context.Context, exec Executor) error) []ParallelResult {
 	var wg sync.WaitGroup
 	results := make([]ParallelResult, 0, len(tasks))
 	var mu sync.Mutex
@@ -79,7 +79,7 @@ func (p *Pool) RunParallelFunc(ctx context.Context, tasks map[string]func(ctx co
 
 	for host, taskFunc := range tasks {
 		wg.Add(1)
-		go func(h string, f func(context.Context, *Pool) error) {
+		go func(h string, f func(context.Context, Executor) error) {
 			defer wg.Done()
 			sem <- struct{}{}
 			err := f(ctx, p)
@@ -101,12 +101,12 @@ func (p *Pool) RunParallelFunc(ctx context.Context, tasks map[string]func(ctx co
 
 // WaitForAllSSH waits for all hosts to be SSH-reachable.
 func (p *Pool) WaitForAllSSH(ctx context.Context, hosts []string, timeout time.Duration) error {
-	tasks := make(map[string]func(ctx context.Context, pool *Pool) error)
+	tasks := make(map[string]func(ctx context.Context, exec Executor) error)
 
 	for _, host := range hosts {
 		h := host
-		tasks[h] = func(c context.Context, pool *Pool) error {
-			return pool.WaitForSSH(c, h, timeout)
+		tasks[h] = func(c context.Context, exec Executor) error {
+			return exec.WaitForSSH(c, h, timeout)
 		}
 	}
 

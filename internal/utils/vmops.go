@@ -387,7 +387,7 @@ const (
 // No guest-side action can recover from that, but a restart can: the
 // definition already boots disk-first (see FixBootOrder), so the node comes
 // back straight into the installed system.
-func installBatchSSH(ctx context.Context, l *libvirt.Client, s *ssh.Pool, names, ips []string, budget time.Duration) error {
+func installBatchSSH(ctx context.Context, l *libvirt.Client, s ssh.Executor, names, ips []string, budget time.Duration) error {
 	if len(names) != len(ips) {
 		return fmt.Errorf("batch has %d node names and %d IPs", len(names), len(ips))
 	}
@@ -420,7 +420,7 @@ func installBatchSSH(ctx context.Context, l *libvirt.Client, s *ssh.Pool, names,
 
 // waitForInstalledNode waits for one node to reach its installed system,
 // restarting it when the installer's shutdown wedges (see installBatchSSH).
-func waitForInstalledNode(ctx context.Context, l *libvirt.Client, s *ssh.Pool, name, ip string) error {
+func waitForInstalledNode(ctx context.Context, l *libvirt.Client, s ssh.Executor, name, ip string) error {
 	logging.Info("Waiting for %s (%s) to boot its installed system...", name, ip)
 
 	var installerSeen time.Time
@@ -618,7 +618,7 @@ func installNodeNames(nodes []installNode) string {
 // node PXE-boots also listens on port 22 but does not trust the deployment
 // key, so "port open, key refused" means the installer is still working;
 // only a successful login means the node reached its disk.
-func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s *ssh.Pool) error {
+func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s ssh.Executor) error {
 	timer := logging.PhaseStart("Install By Batches")
 	defer timer.End()
 

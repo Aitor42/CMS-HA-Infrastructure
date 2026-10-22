@@ -22,11 +22,11 @@ import (
 // Phase implements the DRBD setup phase.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new DRBD Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
@@ -90,10 +90,10 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 	}
 
 	drbdCfgBytes := buf.Bytes()
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, ip := range []string{master1.IP, master2.IP} {
 		nodeIP := ip
-		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			return pool.CopyContent(c, nodeIP, drbdCfgBytes, "/etc/drbd.d/cms_data.res", 0644)
 		}
 	}
@@ -119,10 +119,10 @@ if ! drbdadm create-md cms_data --force; then
 fi
 drbdadm up cms_data
 `
-	initTasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	initTasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, ip := range []string{master1.IP, master2.IP} {
 		nodeIP := ip
-		initTasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+		initTasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			_, err := pool.RunScript(c, nodeIP, initScript)
 			return err
 		}

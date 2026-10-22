@@ -20,11 +20,11 @@ import (
 // Phase installs the Puppet server and converges every node.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new Puppet Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
@@ -143,11 +143,11 @@ func (p *Phase) installRuntimeSecretFiles(ctx context.Context) error {
 			nodes[frontend.IP] = target{name: frontend.Name, credentials: credentials}
 		}
 	}
-	tasks := make(map[string]func(context.Context, *ssh.Pool) error, len(nodes))
+	tasks := make(map[string]func(context.Context, ssh.Executor) error, len(nodes))
 	for ip, node := range nodes {
 		node := node
 		nodeIP := ip
-		tasks[nodeIP] = func(ctx context.Context, pool *ssh.Pool) error {
+		tasks[nodeIP] = func(ctx context.Context, pool ssh.Executor) error {
 			_, _, code, err := pool.RunCommand(ctx, nodeIP, "install -d -m 0700 /etc/cms-ha")
 			if err != nil {
 				return fmt.Errorf("prepare credentials directory on %s (%s): %w", node.name, nodeIP, err)
@@ -284,11 +284,11 @@ func (p *Phase) getAgentNodes() []config.NodeSpec {
 
 func (p *Phase) installAgents(ctx context.Context, nodes []config.NodeSpec) error {
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 
 	for _, n := range nodes {
 		nodeSpec := n
-		tasks[nodeSpec.IP] = func(ctx context.Context, pool *ssh.Pool) error {
+		tasks[nodeSpec.IP] = func(ctx context.Context, pool ssh.Executor) error {
 			cmd := fmt.Sprintf(`
 				set -e
 				export DEBIAN_FRONTEND=noninteractive

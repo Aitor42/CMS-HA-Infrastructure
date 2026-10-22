@@ -308,7 +308,7 @@ func (t *Traffic) runDBCheck(ctx context.Context) error {
 	return nil
 }
 
-func newTrafficSSHPool(cfg *config.Config) (*ssh.Pool, error) {
+func newTrafficSSHPool(cfg *config.Config) (ssh.Executor, error) {
 	timeout := cfg.SSH.ConnectTimeout
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -333,7 +333,7 @@ func dialTCP(ctx context.Context, host string, port int, timeout time.Duration) 
 // testDBQueries runs a query against the MariaDB pod using the `mysql` client
 // that ships inside the pod image (reached through kubectl on a control-plane
 // node). A non-empty result proves WordPress data is loaded.
-func testDBQueries(ctx context.Context, pool *ssh.Pool, master, user, password, dbName string) error {
+func testDBQueries(ctx context.Context, pool ssh.Executor, master, user, password, dbName string) error {
 	const query = "SELECT option_value FROM wp_options LIMIT 5"
 	// Resolve the pod by label so the check does not hard-code the StatefulSet
 	// ordinal, then run the client inside it (the only place a mysql client is

@@ -19,11 +19,11 @@ import (
 // Phase implements the PKI setup phase.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
 // NewPhase creates a new PKI Phase.
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
@@ -186,7 +186,7 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 		}
 	}
 
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	certBytes := []byte(caCert)
 
 	// Leave a copy where the unprivileged deploy account can read it. The
@@ -205,7 +205,7 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	}
 	for _, ip := range allIPs {
 		nodeIP := ip
-		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			if err := pool.CopyContent(c, nodeIP, certBytes, "/usr/local/share/ca-certificates/cms_root_ca.crt", 0644); err != nil {
 				return err
 			}

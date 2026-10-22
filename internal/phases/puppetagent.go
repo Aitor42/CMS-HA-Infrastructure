@@ -23,7 +23,7 @@ func PuppetAgentCommand(server string) string {
 // command (e.g. a dedicated puppetserver name) and interprets the standard
 // exit codes: 0 = clean run, 2 = changes applied; everything else fails and
 // brings back stdout/stderr for richer caller diagnostics.
-func RunPuppetAgentCmd(ctx context.Context, pool *ssh.Pool, host, label, cmd string) (stdout, stderr string, err error) {
+func RunPuppetAgentCmd(ctx context.Context, pool ssh.Executor, host, label, cmd string) (stdout, stderr string, err error) {
 	stdout, stderr, code, runErr := pool.RunCommand(ctx, host, cmd)
 	if runErr == nil && (code == 0 || code == 2) {
 		return stdout, stderr, nil
@@ -32,14 +32,14 @@ func RunPuppetAgentCmd(ctx context.Context, pool *ssh.Pool, host, label, cmd str
 }
 
 // RunPuppetAgent runs the canonical agent convergence on one host.
-func RunPuppetAgent(ctx context.Context, pool *ssh.Pool, host, label string) (string, string, error) {
+func RunPuppetAgent(ctx context.Context, pool ssh.Executor, host, label string) (string, string, error) {
 	return RunPuppetAgentCmd(ctx, pool, host, label, PuppetAgentCommand(""))
 }
 
 // RunPuppetAgentParallel converges hosts concurrently and aggregates every
 // failure (SSH-level error or unexpected exit code) into one descriptive
 // error; tolerant callers decide whether to warn or abort.
-func RunPuppetAgentParallel(ctx context.Context, pool *ssh.Pool, hosts []string) error {
+func RunPuppetAgentParallel(ctx context.Context, pool ssh.Executor, hosts []string) error {
 	var targets []string
 	for _, h := range hosts {
 		if h != "" {

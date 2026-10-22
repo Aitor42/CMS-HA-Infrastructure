@@ -28,12 +28,12 @@ const shutdownGracePeriod = 90 * time.Second
 // FailoverTester struct contains dependencies for failover tests.
 type FailoverTester struct {
 	cfg     *config.Config
-	ssh     *ssh.Pool
+	ssh     ssh.Executor
 	libvirt *libvirt.Client
 }
 
 // NewFailoverTester initializes a new FailoverTester.
-func NewFailoverTester(cfg *config.Config, s *ssh.Pool, l *libvirt.Client) *FailoverTester {
+func NewFailoverTester(cfg *config.Config, s ssh.Executor, l *libvirt.Client) *FailoverTester {
 	return &FailoverTester{cfg: cfg, ssh: s, libvirt: l}
 }
 
