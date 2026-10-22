@@ -62,8 +62,12 @@ class role::cms_frontend {
     unless  => "/bin/bash -c 'v=\$(/usr/bin/dpkg-query -W php8.3-cli 2>/dev/null | /usr/bin/cut -f2); [ -n \"\$v\" ] && /usr/bin/dpkg --compare-versions \"\$v\" ge \"${php_patched_version}\"'",
   }
 
+  # The version range must not carry a space after the operator: Puppet parses
+  # it with the Debian version grammar, which rejects ">= 1.2.3" ("Unable to
+  # parse '=' as a debian version identifier") and then hands the whole
+  # string to apt-get as a literal version.
   package { ['php8.3-cli', 'php8.3-common', 'libapache2-mod-php8.3']:
-    ensure  => ">= ${php_patched_version}",
+    ensure  => ">=${php_patched_version}",
     require => Exec['apt-get-update-cms-frontend'],
     # mod_php lives inside the Apache process: the new library is only used
     # after Apache is restarted.

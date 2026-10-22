@@ -162,7 +162,10 @@ func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
 		"php8.3-cli",
 		"php8.3-common",
 		"libapache2-mod-php8.3",
-		`">= ${php_patched_version}"`,
+		// No space after the operator: Puppet parses the range with the
+		// Debian version grammar, which rejects ">= 1.2.3" and then passes
+		// the whole string to apt-get as a literal version.
+		`">=${php_patched_version}"`,
 		// The mitigations: the session path CVE-2026-109619 was confirmed
 		// with, and the out-of-memory bailout CVE-2026-109618 abuses.
 		"session.upload_progress.enabled",
