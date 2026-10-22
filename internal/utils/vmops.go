@@ -614,11 +614,72 @@ func installNodeNames(nodes []installNode) string {
 	return strings.Join(names, ", ")
 }
 
+// batchBackend is the subset of the libvirt client used by the batched
+// installer. Keeping it as an interface lets the orchestration (create/start,
+// wait, shut down, resize, final boot) be tested without a live hypervisor;
+// the production adapter below is a thin pass-through.
+type batchBackend interface {
+	CreateVM(ctx context.Context, name string) error
+	DomainStates(ctx context.Context) (map[string]string, error)
+	Start(ctx context.Context, name string) error
+	Shutdown(ctx context.Context, name string) error
+	ForceStop(ctx context.Context, name string) error
+	SetMaxMemory(ctx context.Context, name string, kib int64) error
+	SetMemory(ctx context.Context, name string, kib int64) error
+	FixBootOrder(ctx context.Context, names []string) error
+	WaitForSSH(ctx context.Context, s ssh.Executor, names, ips []string, budget time.Duration) error
+}
+
+type libvirtBatchBackend struct {
+	cfg *config.Config
+	l   *libvirt.Client
+}
+
+func (b libvirtBatchBackend) CreateVM(ctx context.Context, name string) error {
+	return CreateClientVM(ctx, b.cfg, b.l, name)
+}
+
+func (b libvirtBatchBackend) DomainStates(ctx context.Context) (map[string]string, error) {
+	return b.l.DomainStates(ctx)
+}
+
+func (b libvirtBatchBackend) Start(ctx context.Context, name string) error {
+	return b.l.Start(ctx, name)
+}
+
+func (b libvirtBatchBackend) Shutdown(ctx context.Context, name string) error {
+	return b.l.Shutdown(ctx, name)
+}
+
+func (b libvirtBatchBackend) ForceStop(ctx context.Context, name string) error {
+	return forceStop(ctx, b.l, name)
+}
+
+func (b libvirtBatchBackend) SetMaxMemory(ctx context.Context, name string, kib int64) error {
+	return b.l.SetMaxMemory(ctx, name, kib)
+}
+
+func (b libvirtBatchBackend) SetMemory(ctx context.Context, name string, kib int64) error {
+	return b.l.SetMemory(ctx, name, kib)
+}
+
+func (b libvirtBatchBackend) FixBootOrder(ctx context.Context, names []string) error {
+	return FixBootOrder(ctx, b.l, names)
+}
+
+func (b libvirtBatchBackend) WaitForSSH(ctx context.Context, s ssh.Executor, names, ips []string, budget time.Duration) error {
+	return installBatchSSH(ctx, b.l, s, names, ips, budget)
+}
+
 // InstallByBatches provisions VMs in batches using PXE. The live installer a
 // node PXE-boots also listens on port 22 but does not trust the deployment
 // key, so "port open, key refused" means the installer is still working;
 // only a successful login means the node reached its disk.
 func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s ssh.Executor) error {
+	return installByBatches(ctx, cfg, libvirtBatchBackend{cfg: cfg, l: l}, s)
+}
+
+func installByBatches(ctx context.Context, cfg *config.Config, b batchBackend, s ssh.Executor) error {
 	timer := logging.PhaseStart("Install By Batches")
 	defer timer.End()
 
@@ -631,185 +692,228 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 	}
 
 	batches := planInstallBatches(cfg)
-	for i, b := range batches {
-		batch := b.nodes
-		logging.Info("Starting Batch %s (%d VMs: %s)...", b.name, len(batch), installNodeNames(batch))
-
-		// 1. Define (when missing) and boot every VM in this batch. Creating
-		// the batch here, instead of relying on `init-vms` to have defined the
-		// whole topology in one go, is what makes the batching worth anything
-		// on a RAM-limited host: each batch is shrunk and idle by the time the
-		// next one starts its installer.
-		var ips []string
-		var batchNamesList []string
-		states, err := l.DomainStates(ctx)
-		if err != nil {
-			return fmt.Errorf("list domains for batch %d: %w", i+1, err)
-		}
-		for _, node := range batch {
-			if node.name == "" || node.ip == "" {
-				return fmt.Errorf("batch %d has a VM with an empty name or IP", i+1)
-			}
-			batchNamesList = append(batchNamesList, node.name)
-			state, defined := states[node.name]
-			if !defined {
-				if err := CreateClientVM(ctx, cfg, l, node.name); err != nil {
-					return fmt.Errorf("create VM %s: %w", node.name, err)
-				}
-			} else if state != "running" {
-				if err := l.Start(ctx, node.name); err != nil {
-					return fmt.Errorf("start VM %s: %w", node.name, err)
-				}
-			}
-			ips = append(ips, node.ip)
-		}
-
-		// Pin disk-first booting now, minutes before the installers finish:
-		// a PXE guest left booting from the network would re-enter PXE and
-		// reinstall the node at the reboot the autoinstall ends with.
-		if err := FixBootOrder(ctx, l, batchNamesList); err != nil {
-			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
-		}
-
-		// 2. Wait for each installed system to answer SSH. The live installer
-		// answers on port 22 too but refuses our key, and a node whose
-		// installer wedges in its shutdown is restarted from here.
-		logging.Info("Waiting for SSH on all VMs in Batch %d (budget %s)...", i+1, sshBudget)
-		if err := installBatchSSH(ctx, l, s, batchNamesList, ips, sshBudget); err != nil {
-			return fmt.Errorf("wait for SSH in batch %d: %w", i+1, err)
-		}
-
-		// 3. Re-assert the boot order (idempotent) and signal shutdown, so the
-		// batch releases its RAM before the next one starts its installer. It
-		// is not restarted here: an idle batch still holds its final RAM, and
-		// with four or five installers in the next batch that idle footprint
-		// is what pushes a memory-tight host into swapping. The whole topology
-		// boots together once every batch is installed.
-		if err := FixBootOrder(ctx, l, batchNamesList); err != nil {
-			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
-		}
-
-		shutdownStates, err := l.DomainStates(ctx)
-		if err != nil {
-			return fmt.Errorf("list domains before shutdown in batch %d: %w", i+1, err)
-		}
-		for _, node := range batch {
-			if state := shutdownStates[node.name]; state != "shut off" {
-				if err := l.Shutdown(ctx, node.name); err != nil {
-					return fmt.Errorf("shutdown VM %s: %w", node.name, err)
-				}
-			}
-		}
-
-		// Wait for all VMs in the batch to shut down, polling a single
-		// `virsh list --all` snapshot per tick instead of one per VM.
-		pending := make([]string, 0, len(batch))
-		for _, node := range batch {
-			pending = append(pending, node.name)
-		}
-		shutdownDeadline := time.Now().Add(30 * time.Second)
-		for len(pending) > 0 && time.Now().Before(shutdownDeadline) {
-			states, err := l.DomainStates(ctx)
-			if err != nil {
-				return fmt.Errorf("list domains while shutting down batch %d: %w", i+1, err)
-			}
-			var still []string
-			for _, name := range pending {
-				if state := states[name]; state != "shut off" {
-					still = append(still, name)
-				}
-			}
-			pending = still
-			if len(pending) == 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(2 * time.Second):
-			}
-		}
-		var errMsgs []string
-		for _, name := range pending {
-			logging.Warn("VM %s did not shut down gracefully; forcing stop", name)
-			if err := forceStop(ctx, l, name); err != nil {
-				errMsgs = append(errMsgs, err.Error())
-			}
-		}
-		if len(errMsgs) > 0 {
-			return fmt.Errorf("failed to shut down batch %d: %s", i+1, strings.Join(errMsgs, "; "))
-		}
-		if err := ctx.Err(); err != nil {
+	for i, batch := range batches {
+		if err := runInstallBatch(ctx, b, s, batch, i, sshBudget); err != nil {
 			return err
-		}
-
-		// Resize all VMs in the batch to their final RAM (in parallel). They
-		// stay shut off until the last batch is installed; see step 3 above.
-		var resizeWg sync.WaitGroup
-		var resizeMu sync.Mutex
-		var resizeErrs []string
-		for _, node := range batch {
-			n := node
-			resizeWg.Add(1)
-			go func() {
-				defer resizeWg.Done()
-				kib := int64(n.ramFinalMB * 1024)
-				if err := l.SetMaxMemory(ctx, n.name, kib); err != nil {
-					resizeMu.Lock()
-					resizeErrs = append(resizeErrs, fmt.Sprintf("set maximum memory for %s: %v", n.name, err))
-					resizeMu.Unlock()
-					return
-				}
-				if err := l.SetMemory(ctx, n.name, kib); err != nil {
-					resizeMu.Lock()
-					resizeErrs = append(resizeErrs, fmt.Sprintf("set memory for %s: %v", n.name, err))
-					resizeMu.Unlock()
-					return
-				}
-				logging.Success("Batch %d: %s resized to %d MB", i+1, n.name, n.ramFinalMB)
-			}()
-		}
-		resizeWg.Wait()
-		if len(resizeErrs) > 0 {
-			return fmt.Errorf("failed to resize batch %d: %s", i+1, strings.Join(resizeErrs, "; "))
 		}
 	}
 
-	// Start the whole topology now that no installer is left to compete with
-	// it. Booting the whole batch set at once is the footprint the deploy phase
-	// runs on anyway, so it is a state this host has to hold; the difference
-	// is that it happens once, after the last install, instead of adding the
-	// idle batches to every later batch's installers.
-	states, err := l.DomainStates(ctx)
+	if err := startProvisionedTopology(ctx, b, batches); err != nil {
+		return err
+	}
+
+	logging.Success("All batches provisioned and resized; the whole topology is booting")
+	return nil
+}
+
+// installBatch runs the full lifecycle of one batch: make its guests run, let
+// the installers finish, then shut them down and resize them to their final
+// memory before the next batch starts.
+func runInstallBatch(ctx context.Context, b batchBackend, s ssh.Executor, batch installBatch, index int, sshBudget time.Duration) error {
+	nodes := batch.nodes
+	logging.Info("Starting Batch %s (%d VMs: %s)...", batch.name, len(nodes), installNodeNames(nodes))
+
+	names, ips, err := startBatchVMs(ctx, b, nodes, index)
+	if err != nil {
+		return err
+	}
+
+	// Pin disk-first booting now, minutes before the installers finish: a PXE
+	// guest left booting from the network would re-enter PXE and reinstall the
+	// node at the reboot the autoinstall ends with.
+	if err := b.FixBootOrder(ctx, names); err != nil {
+		logging.Warn("Could not fix boot order in batch %d: %v", index+1, err)
+	}
+
+	// Wait for each installed system to answer SSH. The live installer answers
+	// on port 22 too but refuses our key, and a node whose installer wedges in
+	// its shutdown is restarted from here.
+	logging.Info("Waiting for SSH on all VMs in Batch %d (budget %s)...", index+1, sshBudget)
+	if err := b.WaitForSSH(ctx, s, names, ips, sshBudget); err != nil {
+		return fmt.Errorf("wait for SSH in batch %d: %w", index+1, err)
+	}
+
+	// Re-assert the boot order (idempotent) and signal shutdown, so the batch
+	// releases its RAM before the next one starts its installer. It is not
+	// restarted here: an idle batch still holds its final RAM, and with four
+	// or five installers in the next batch that idle footprint is what pushes
+	// a memory-tight host into swapping. The whole topology boots together
+	// once every batch is installed.
+	if err := b.FixBootOrder(ctx, names); err != nil {
+		logging.Warn("Could not fix boot order in batch %d: %v", index+1, err)
+	}
+	if err := shutdownBatch(ctx, b, nodes, index); err != nil {
+		return err
+	}
+	if err := resizeBatch(ctx, b, nodes, index); err != nil {
+		return err
+	}
+	return nil
+}
+
+// startBatchVMs defines the missing guests and starts the stopped ones.
+// Creating the batch here, instead of relying on `init-vms` to have defined
+// the whole topology in one go, is what makes batching worth anything on a
+// RAM-limited host: each batch is shrunk and idle by the time the next one
+// starts its installer.
+func startBatchVMs(ctx context.Context, b batchBackend, batch []installNode, index int) ([]string, []string, error) {
+	states, err := b.DomainStates(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list domains for batch %d: %w", index+1, err)
+	}
+	var names, ips []string
+	for _, node := range batch {
+		if node.name == "" || node.ip == "" {
+			return nil, nil, fmt.Errorf("batch %d has a VM with an empty name or IP", index+1)
+		}
+		names = append(names, node.name)
+		state, defined := states[node.name]
+		if !defined {
+			if err := b.CreateVM(ctx, node.name); err != nil {
+				return nil, nil, fmt.Errorf("create VM %s: %w", node.name, err)
+			}
+		} else if state != "running" {
+			if err := b.Start(ctx, node.name); err != nil {
+				return nil, nil, fmt.Errorf("start VM %s: %w", node.name, err)
+			}
+		}
+		ips = append(ips, node.ip)
+	}
+	return names, ips, nil
+}
+
+// shutdownBatch asks every guest to shut down and force-stops the ones still
+// running after the grace period.
+func shutdownBatch(ctx context.Context, b batchBackend, batch []installNode, index int) error {
+	if err := requestBatchShutdown(ctx, b, batch, index); err != nil {
+		return err
+	}
+	return waitForBatchShutdown(ctx, b, batch, index)
+}
+
+func requestBatchShutdown(ctx context.Context, b batchBackend, batch []installNode, index int) error {
+	states, err := b.DomainStates(ctx)
+	if err != nil {
+		return fmt.Errorf("list domains before shutdown in batch %d: %w", index+1, err)
+	}
+	for _, node := range batch {
+		if state := states[node.name]; state != "shut off" {
+			if err := b.Shutdown(ctx, node.name); err != nil {
+				return fmt.Errorf("shutdown VM %s: %w", node.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// waitForBatchShutdown polls a single `virsh list --all` snapshot per tick
+// instead of one per VM, then force-stops whatever is still running.
+func waitForBatchShutdown(ctx context.Context, b batchBackend, batch []installNode, index int) error {
+	pending := make([]string, 0, len(batch))
+	for _, node := range batch {
+		pending = append(pending, node.name)
+	}
+	shutdownDeadline := time.Now().Add(30 * time.Second)
+	for len(pending) > 0 && time.Now().Before(shutdownDeadline) {
+		states, err := b.DomainStates(ctx)
+		if err != nil {
+			return fmt.Errorf("list domains while shutting down batch %d: %w", index+1, err)
+		}
+		var still []string
+		for _, name := range pending {
+			if state := states[name]; state != "shut off" {
+				still = append(still, name)
+			}
+		}
+		pending = still
+		if len(pending) == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	var errMsgs []string
+	for _, name := range pending {
+		logging.Warn("VM %s did not shut down gracefully; forcing stop", name)
+		if err := b.ForceStop(ctx, name); err != nil {
+			errMsgs = append(errMsgs, err.Error())
+		}
+	}
+	if len(errMsgs) > 0 {
+		return fmt.Errorf("failed to shut down batch %d: %s", index+1, strings.Join(errMsgs, "; "))
+	}
+	return ctx.Err()
+}
+
+// resizeBatch grows every guest to its final RAM in parallel. They stay shut
+// off until the last batch is installed.
+func resizeBatch(ctx context.Context, b batchBackend, batch []installNode, index int) error {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []string
+	for _, node := range batch {
+		n := node
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			kib := int64(n.ramFinalMB * 1024)
+			if err := b.SetMaxMemory(ctx, n.name, kib); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("set maximum memory for %s: %v", n.name, err))
+				mu.Unlock()
+				return
+			}
+			if err := b.SetMemory(ctx, n.name, kib); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("set memory for %s: %v", n.name, err))
+				mu.Unlock()
+				return
+			}
+			logging.Success("Batch %d: %s resized to %d MB", index+1, n.name, n.ramFinalMB)
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to resize batch %d: %s", index+1, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// startProvisionedTopology boots the whole cluster after the last install, so
+// no installer competes for RAM with the services that are coming up.
+func startProvisionedTopology(ctx context.Context, b batchBackend, batches []installBatch) error {
+	states, err := b.DomainStates(ctx)
 	if err != nil {
 		return fmt.Errorf("list domains before starting the topology: %w", err)
 	}
-	var startWg sync.WaitGroup
-	var startMu sync.Mutex
-	var startErrs []string
-	for _, b := range batches {
-		for _, n := range b.nodes {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errs []string
+	for _, batch := range batches {
+		for _, n := range batch.nodes {
 			name := n.name
 			if states[name] == "running" {
 				continue
 			}
-			startWg.Add(1)
+			wg.Add(1)
 			go func() {
-				defer startWg.Done()
-				if err := l.Start(ctx, name); err != nil {
-					startMu.Lock()
-					startErrs = append(startErrs, fmt.Sprintf("start VM %s: %v", name, err))
-					startMu.Unlock()
+				defer wg.Done()
+				if err := b.Start(ctx, name); err != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Sprintf("start VM %s: %v", name, err))
+					mu.Unlock()
 				}
 			}()
 		}
 	}
-	startWg.Wait()
-	if len(startErrs) > 0 {
-		return fmt.Errorf("failed to start the provisioned topology: %s", strings.Join(startErrs, "; "))
+	wg.Wait()
+	if len(errs) > 0 {
+		return fmt.Errorf("failed to start the provisioned topology: %s", strings.Join(errs, "; "))
 	}
-
-	logging.Success("All batches provisioned and resized; the whole topology is booting")
 	return nil
 }
 
