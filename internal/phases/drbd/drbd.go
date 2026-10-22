@@ -52,19 +52,48 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	master1 := p.cfg.Nodes.Masters[0]
 	master2 := p.cfg.Nodes.Masters[1]
-
 	drbdPair := []config.NodeDetail{master1, master2}
 
 	if err := p.setupFencing(ctx, drbdPair); err != nil {
 		return err
 	}
+	if err := p.installDRBD(ctx, drbdPair); err != nil {
+		return err
+	}
+	if err := p.deployDRBDConfig(ctx, drbdPair); err != nil {
+		return err
+	}
+	if err := p.initDRBDMetadata(ctx, drbdPair); err != nil {
+		return err
+	}
+	if err := p.promotePrimary(ctx, master1); err != nil {
+		return err
+	}
+	p.waitForReplication(ctx, master1)
+	if err := p.formatAndMount(ctx, master1); err != nil {
+		return err
+	}
+	p.updateFstab(ctx, drbdPair)
+	if err := p.deployFailoverScripts(ctx, drbdPair); err != nil {
+		return err
+	}
+	if err := p.deployBootRoleResolution(ctx, master1, master2); err != nil {
+		return err
+	}
+	p.deployTmpfiles(ctx, drbdPair)
 
+	logging.Success("DRBD Setup completed successfully.")
+	return nil
+}
+
+// installDRBD installs drbd-utils on both peers in parallel.
+func (p *Phase) installDRBD(ctx context.Context, pair []config.NodeDetail) error {
 	logging.Info("Installing DRBD utils on master nodes...")
 	installCmd := ssh.AptLockWaitSnippet + `
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 `
 
-	for _, r := range p.pool.RunParallel(ctx, []string{master1.IP, master2.IP}, installCmd) {
+	for _, r := range p.pool.RunParallel(ctx, []string{pair[0].IP, pair[1].IP}, installCmd) {
 		if r.Err != nil {
 			return fmt.Errorf("failed to install DRBD on %s: %w", r.Host, r.Err)
 		}
@@ -72,7 +101,11 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 			return fmt.Errorf("failed to install DRBD on %s (exit %d): %s", r.Host, r.ExitCode, strings.TrimSpace(r.Output))
 		}
 	}
+	return nil
+}
 
+// deployDRBDConfig renders the resource template and copies it to both peers.
+func (p *Phase) deployDRBDConfig(ctx context.Context, pair []config.NodeDetail) error {
 	logging.Info("Deploying DRBD configuration...")
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/drbd/cms-data.res")
 	if err != nil {
@@ -91,7 +124,7 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 
 	drbdCfgBytes := buf.Bytes()
 	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
-	for _, ip := range []string{master1.IP, master2.IP} {
+	for _, ip := range []string{pair[0].IP, pair[1].IP} {
 		nodeIP := ip
 		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			return pool.CopyContent(c, nodeIP, drbdCfgBytes, "/etc/drbd.d/cms_data.res", 0644)
@@ -102,7 +135,12 @@ apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 			return fmt.Errorf("failed to copy DRBD config to %s: %w", r.Host, r.Err)
 		}
 	}
+	return nil
+}
 
+// initDRBDMetadata creates the metadata (idempotently) and brings the resource
+// up on both peers in parallel.
+func (p *Phase) initDRBDMetadata(ctx context.Context, pair []config.NodeDetail) error {
 	logging.Info("Initializing DRBD metadata in parallel...")
 	// create-md fails when metadata already exists (expected on re-runs): that
 	// is confirmed with dump-md, and `set -e` surfaces every other error.
@@ -120,7 +158,7 @@ fi
 drbdadm up cms_data
 `
 	initTasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
-	for _, ip := range []string{master1.IP, master2.IP} {
+	for _, ip := range []string{pair[0].IP, pair[1].IP} {
 		nodeIP := ip
 		initTasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			_, err := pool.RunScript(c, nodeIP, initScript)
@@ -132,15 +170,24 @@ drbdadm up cms_data
 			return fmt.Errorf("failed to initialize DRBD metadata on %s: %w", r.Host, r.Err)
 		}
 	}
+	return nil
+}
 
+// promotePrimary makes master1 the single writer once both disks are ready.
+func (p *Phase) promotePrimary(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Promoting Master 1 to Primary...")
 	_, _, code, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms_data --force")
 	if err != nil || code != 0 {
 		return fmt.Errorf("failed to promote %s to DRBD Primary: %v (exit code %d)", master1.IP, err, code)
 	}
+	return nil
+}
 
+// waitForReplication waits until the peer is connected and its disk is
+// UpToDate (or at least syncing). A connection alone is not enough.
+func (p *Phase) waitForReplication(ctx context.Context, master1 config.NodeDetail) {
 	logging.Info("Waiting for DRBD replication to start/sync...")
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
 		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "drbdadm status cms_data")
 		if err != nil {
 			return err
@@ -159,7 +206,10 @@ drbdadm up cms_data
 	if err != nil {
 		logging.Warn("DRBD replication sync might still be ongoing: %v", err)
 	}
+}
 
+// formatAndMount initialises the filesystem once and mounts it on master1.
+func (p *Phase) formatAndMount(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Formatting and mounting DRBD volume on Master 1...")
 	mountCmd := `
 mkdir -p /mnt/data/mariadb
@@ -170,19 +220,28 @@ if ! mountpoint -q /mnt/data/mariadb; then
     mount /dev/drbd0 /mnt/data/mariadb
 fi
 `
-	_, err = p.pool.RunScript(ctx, master1.IP, mountCmd)
-	if err != nil {
+	if _, err := p.pool.RunScript(ctx, master1.IP, mountCmd); err != nil {
 		return fmt.Errorf("failed to format and mount DRBD volume on master1: %w", err)
 	}
+	return nil
+}
 
+// updateFstab records the noauto mount on both peers. A failure is logged but
+// not fatal: the volume is already mounted on master1 and the boot unit only
+// needs the directory to exist.
+func (p *Phase) updateFstab(ctx context.Context, pair []config.NodeDetail) {
 	logging.Info("Updating fstab and mount directory on masters...")
 	fstabCmd := "mkdir -p /mnt/data/mariadb && (grep -q '/dev/drbd0' /etc/fstab || echo '/dev/drbd0 /mnt/data/mariadb ext4 defaults,noauto 0 0' >> /etc/fstab)"
-	for _, ip := range []string{master1.IP, master2.IP} {
+	for _, ip := range []string{pair[0].IP, pair[1].IP} {
 		if _, _, _, err := p.pool.RunCommand(ctx, ip, fstabCmd); err != nil {
 			logging.Warn("failed to update fstab on %s: %v", ip, err)
 		}
 	}
+}
 
+// deployFailoverScripts installs the failover script, the watchdog and its
+// unit, then enables both services.
+func (p *Phase) deployFailoverScripts(ctx context.Context, pair []config.NodeDetail) error {
 	logging.Info("Deploying DRBD failover script and watchdog daemon...")
 	scriptContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
 	if err != nil {
@@ -197,7 +256,7 @@ fi
 		return fmt.Errorf("failed to read drbd-failover-watchdog.service template: %w", err)
 	}
 
-	for _, ip := range []string{master1.IP, master2.IP} {
+	for _, ip := range []string{pair[0].IP, pair[1].IP} {
 		if err := p.pool.CopyContent(ctx, ip, []byte(scriptContent), "/usr/local/bin/drbd-failover.sh", 0755); err != nil {
 			return fmt.Errorf("failed to deploy failover script to %s: %w", ip, err)
 		}
@@ -211,17 +270,21 @@ fi
 			return fmt.Errorf("failed to enable DRBD services on %s: %w", ip, err)
 		}
 	}
+	return nil
+}
 
+// deployBootRoleResolution installs the boot-time role resolver. This unit is
+// the only thing that promotes on boot: it resolves a stale Primary (power
+// cut, hypervisor crash, fence) before k3s starts, so a node that restarts
+// while its peer is primary comes back as Secondary instead of becoming a
+// second writer. Master 1 is the designated primary; master 2 only resolves
+// its role and never promotes itself.
+func (p *Phase) deployBootRoleResolution(ctx context.Context, master1, master2 config.NodeDetail) error {
 	logging.Info("Deploying DRBD boot-time role resolution on both masters...")
 	bootScript, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-boot.sh")
 	if err != nil {
 		return fmt.Errorf("failed to read drbd-boot.sh template: %w", err)
 	}
-	// This unit is the only thing that promotes on boot. It resolves a stale
-	// Primary (power cut, hypervisor crash, fence) before k3s starts, so a node
-	// that restarts while its peer is primary comes back as Secondary instead of
-	// becoming a second writer. Master 1 is the designated primary; master 2
-	// only resolves its role and never promotes itself.
 	for _, m := range []struct {
 		node    config.NodeDetail
 		promote int
@@ -257,18 +320,21 @@ WantedBy=multi-user.target
 			return fmt.Errorf("failed to enable drbd-cms-boot.service on %s: %w", m.node.IP, err)
 		}
 	}
+	return nil
+}
 
+// deployTmpfiles creates the MariaDB data directories at boot with the right
+// ownership. Failures are warnings, as before: the mount script already
+// creates the directory and MariaDB sets its own ownership.
+func (p *Phase) deployTmpfiles(ctx context.Context, pair []config.NodeDetail) {
 	tmpfilesContent := "d /mnt/data 0755 root root -\nd /mnt/data/mariadb 0755 999 999 -\n"
-	for _, ip := range []string{master1.IP, master2.IP} {
+	for _, ip := range []string{pair[0].IP, pair[1].IP} {
 		if err := p.pool.CopyContent(ctx, ip, []byte(tmpfilesContent), "/etc/tmpfiles.d/mariadb-datadir.conf", 0644); err != nil {
 			logging.Warn("Failed to upload mariadb-datadir.conf on %s: %v", ip, err)
 		} else {
 			p.pool.RunCommand(ctx, ip, "systemd-tmpfiles --create /etc/tmpfiles.d/mariadb-datadir.conf 2>/dev/null || true")
 		}
 	}
-
-	logging.Success("DRBD Setup completed successfully.")
-	return nil
 }
 
 // setupFencing provisions STONITH fencing for the 2-node DRBD resource: it
@@ -287,17 +353,9 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 	offCmd, stateCmd := p.cfg.FenceCommands()
 	custom := p.cfg.DRBD.FenceCommand != ""
 
-	fenceScript, err := cms.TemplatesFS.ReadFile("templates/drbd/fence-peer.sh")
+	fenceScript, confTmpl, err := p.loadFenceTemplates()
 	if err != nil {
-		return fmt.Errorf("failed to read fence-peer.sh: %w", err)
-	}
-	confContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-fence.conf")
-	if err != nil {
-		return fmt.Errorf("failed to read drbd-fence.conf template: %w", err)
-	}
-	confTmpl, err := template.New("drbd-fence").Parse(string(confContent))
-	if err != nil {
-		return fmt.Errorf("failed to parse drbd-fence.conf template: %w", err)
+		return err
 	}
 
 	// Derived (SSH) fencing needs a key on the hypervisor and a copy on the
@@ -314,6 +372,31 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 		}
 	}
 
+	if err := p.deployFenceArtifacts(ctx, pair, fenceScript, confTmpl, fenceKey, fenceRequired, offCmd, stateCmd); err != nil {
+		return err
+	}
+
+	logging.Success("DRBD fencing configured on %s and %s.", pair[0].Name, pair[1].Name)
+	return nil
+}
+
+func (p *Phase) loadFenceTemplates() ([]byte, *template.Template, error) {
+	fenceScript, err := cms.TemplatesFS.ReadFile("templates/drbd/fence-peer.sh")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read fence-peer.sh: %w", err)
+	}
+	confContent, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-fence.conf")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read drbd-fence.conf template: %w", err)
+	}
+	confTmpl, err := template.New("drbd-fence").Parse(string(confContent))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse drbd-fence.conf template: %w", err)
+	}
+	return fenceScript, confTmpl, nil
+}
+
+func (p *Phase) deployFenceArtifacts(ctx context.Context, pair []config.NodeDetail, fenceScript []byte, confTmpl *template.Template, fenceKey []byte, fenceRequired, offCmd, stateCmd string) error {
 	for i, node := range pair {
 		peer := pair[(i+1)%len(pair)] // DRBD cms_data is a 2-node resource
 
@@ -346,8 +429,6 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 			return fmt.Errorf("failed to deploy drbd-fence.conf to %s: %w", node.Name, err)
 		}
 	}
-
-	logging.Success("DRBD fencing configured on %s and %s.", pair[0].Name, pair[1].Name)
 	return nil
 }
 
