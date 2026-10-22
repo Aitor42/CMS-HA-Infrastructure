@@ -100,6 +100,17 @@ On the hypervisor terminal, create the virtual networks and install the central 
 ./cms-ha phase register-nodes
 ```
 
+**Opt-in: cloud-image jumpstart.** The ISO/autoinstall path above is the deliverable and stays the default. For iteration, `--jumpstart-image cloud` (or `vm.jumpstart_image: cloud` for a persistent choice) boots a qcow2 overlay of the official Ubuntu cloud image instead: the base system is already installed, cloud-init applies the same hostname, MACs, IPs and SSH key, and the node is reachable in well under a minute instead of ~4 minutes. The run pays for the base image once and shares it read-only across overlays:
+
+```bash
+cd "${HOME}/vm_storage"
+curl -LO https://cloud-images.ubuntu.com/noble/current/ubuntu-24.04-server-cloudimg-amd64.img
+
+./cms-ha phase init-vms --jumpstart-only --jumpstart-image cloud
+```
+
+Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the client install and every later phase are unchanged; the ISO/PXE run remains the gate, so measure both with `--timings-file` before changing the default.
+
 ### Step 2: Sequential Installation and RAM Adjustment (Batches)
 
 Run the command that automates the creation and installation of client nodes in sequential batches:

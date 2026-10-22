@@ -315,7 +315,8 @@ Each phase is invoked through the unified Go CLI (`cms-ha`). The numbers follow 
 The Go orchestrator keeps the pipeline fast and safe:
 
 - **SSH connection pool** (`internal/ssh`) — one authenticated client per IP, safe for concurrent use, with in-memory SFTP uploads.
-- **Bounded parallelism** — clients converge in parallel (semaphore of 4) after the jumpstart node, so Puppet Server, DNS and Cobbler are up first. The CMS frontends converge sequentially because the first one creates the WordPress schema.
+- **Bounded parallelism** — clients converge in parallel (window from `deploy.puppet_concurrency`, auto 4–8 by CPU count) after the jumpstart node, so Puppet Server, DNS and Cobbler are up first. The CMS frontends converge sequentially because the first one creates the WordPress schema.
+- **Opt-in fast jumpstart** — `phase init-vms --jumpstart-image cloud` boots a qcow2 overlay of the Ubuntu cloud image for iteration and CI. The ISO/PXE path stays the default and remains the deliverable gate.
 - **Self-healing** — stale Puppet certificates are revoked, re-signed and the catalog is re-run; broken DRBD/K3s state aborts the deploy instead of reporting success.
 - **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository.
 - **Checkpoints** — `deploy.state` lets `--resume` and `--from-phase` continue after a failure.

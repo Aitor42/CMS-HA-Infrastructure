@@ -54,6 +54,26 @@ type Config struct {
 type VMConfig struct {
 	StorageDir string `yaml:"storage_dir"`
 	LibvirtURI string `yaml:"libvirt_uri"`
+	// JumpstartImage selects how the jumpstart node is installed. "iso" (the
+	// default) boots the Ubuntu server ISO through the same autoinstall path
+	// the lab and the Ansible roles use. "cloud" is the opt-in fast path: it
+	// boots a qcow2 overlay of the official cloud image and lets cloud-init
+	// configure it, which is useful for iteration and CI but does not replace
+	// the PXE/ISO deliverable.
+	JumpstartImage string `yaml:"jumpstart_image"`
+	// JumpstartBaseImage is the cloud image used when JumpstartImage is
+	// "cloud". Empty looks for ubuntu-24.04-server-cloudimg-amd64.img in
+	// StorageDir.
+	JumpstartBaseImage string `yaml:"jumpstart_base_image"`
+}
+
+// JumpstartImageMode returns the configured jumpstart install path, defaulting
+// to "iso" so existing configurations keep the deliverable behaviour.
+func (c *Config) JumpstartImageMode() string {
+	if mode := strings.ToLower(strings.TrimSpace(c.VM.JumpstartImage)); mode != "" {
+		return mode
+	}
+	return "iso"
 }
 
 // SSHConfig controls the deploy account, key and host-key verification.
@@ -582,6 +602,11 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 func (c *Config) Validate() error {
 	if c.VM.StorageDir == "" {
 		return fmt.Errorf("vm.storage_dir is required")
+	}
+	switch c.JumpstartImageMode() {
+	case "iso", "cloud":
+	default:
+		return fmt.Errorf("vm.jumpstart_image must be \"iso\" or \"cloud\" (got %q)", c.VM.JumpstartImage)
 	}
 	if c.SSH.User != "" && !validUnixUser.MatchString(c.SSH.User) {
 		return fmt.Errorf("ssh.user is not a valid Unix user name: %q", c.SSH.User)

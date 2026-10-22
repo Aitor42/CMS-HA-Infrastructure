@@ -34,6 +34,11 @@ on:
         description: "Run `cleanup` at the end (the runner is thrown away anyway; proves the teardown path)"
         type: boolean
         default: false
+      jumpstart_image:
+        description: "Jumpstart install path: iso (deliverable) or cloud (opt-in fast boot)"
+        type: choice
+        options: ["iso", "cloud"]
+        default: "iso"
 
 concurrency:
   group: integration-hosted-${{ github.ref }}
@@ -46,6 +51,7 @@ env:
   CONFIG: config.ci.local.yaml
   STATE_FILE: deploy.state
   ARTIFACTS_DIR: integration-artifacts
+  JUMPSTART_IMAGE: ${{ inputs.jumpstart_image }}
 
 jobs:
   integration:
@@ -269,12 +275,26 @@ jobs:
 
           make build
 
+          # The cloud jumpstart is opt-in: download the ~600 MB base image once
+          # and let init-vms boot a qcow2 overlay instead of running Subiquity.
+          # The ISO path stays the default and remains the deliverable gate.
+          if [ "$JUMPSTART_IMAGE" = "cloud" ]; then
+            IMG="$HOME/vm_storage/ubuntu-24.04-server-cloudimg-amd64.img"
+            if [ ! -s "$IMG" ]; then
+              mkdir -p "$(dirname "$IMG")"
+              curl -fL --retry 3 --retry-delay 5 -o "$IMG.tmp" \
+                https://cloud-images.ubuntu.com/noble/current/ubuntu-24.04-server-cloudimg-amd64.img
+              mv "$IMG.tmp" "$IMG"
+            fi
+          fi
+
           # The documented order: jumpstart first, then Cobbler, then the node
           # templates. `vm install-batches` then creates and installs the
           # clients one batch at a time, so the 15 GiB runner never has to hold
           # the whole topology at once — which is exactly why the manual
           # prescribes the batched path for RAM-limited hosts.
           ./cms-ha -c "$CONFIG" phase init-vms --jumpstart-only \
+            --jumpstart-image "$JUMPSTART_IMAGE" \
             | tee "$ARTIFACTS_DIR/00-init-jumpstart.log"
           ./cms-ha -c "$CONFIG" phase setup-cobbler \
             | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"

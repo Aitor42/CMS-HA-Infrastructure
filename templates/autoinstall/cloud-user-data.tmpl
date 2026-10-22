@@ -1,0 +1,69 @@
+#cloud-config
+# Cloud-image variant of user-data.tmpl. The ISO path uses Subiquity's
+# autoinstall schema; a booted cloud image runs cloud-init directly, so the
+# keys here are cloud-init's (users, ssh_authorized_keys, network) and the
+# autoinstall block is deliberately absent.
+
+hostname: {{ .Hostname }}
+preserve_hostname: false
+manage_etc_hosts: true
+
+users:
+  - name: ubuntu
+    gecos: Ubuntu
+    groups: [adm, sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    passwd: "{{ .PasswordHash }}"
+    ssh_authorized_keys:
+      - {{ .PubKey }}
+
+ssh_pwauth: false
+disable_root: true
+
+# The installer path refreshes packages and installs the server; the cloud
+# image already has them. Puppet owns package state from phase 04 onwards, so
+# cloud-init must not spend minutes on an apt update/upgrade first.
+package_update: false
+package_upgrade: false
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/01-permitrootlogin.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+  - path: /etc/sudoers.d/90-cms-ha
+    permissions: "0440"
+    content: |
+      Defaults:ubuntu !requiretty
+      Defaults log_output
+
+network:
+  version: 2
+  ethernets:
+    net0:
+      match:
+        macaddress: "{{ .MACInternal }}"
+      addresses:
+        - {{ .IPInternal }}/24
+      nameservers:
+        addresses:
+          - {{ .IPInternal }}
+      routes:
+        - to: default
+          via: {{ .GatewayInternal }}
+          metric: 200
+    net1:
+      match:
+        macaddress: "{{ .MACMain }}"
+      addresses:
+        - {{ .IPMain }}/24
+{{ if .WANIfaceConfigCloud }}{{ .WANIfaceConfigCloud }}{{ end }}
+
+runcmd:
+  # Match the installer path: the random password and the root account are
+  # locked; SSH key auth is the only way in.
+  - [passwd, -l, ubuntu]
+  - [passwd, -l, root]
+  - [systemctl, enable, --now, ssh]

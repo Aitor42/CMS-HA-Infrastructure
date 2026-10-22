@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -40,17 +41,25 @@ type NetworkOpt struct {
 
 // VirtInstallOpts holds all parameters for virt-install.
 type VirtInstallOpts struct {
-	Name          string
-	RAM           int // in MB
-	VCPUs         int
-	Disks         []DiskOpt
-	Networks      []NetworkOpt
-	PXE           bool
-	BootOrder     []string
-	OSVariant     string
-	ExtraArgs     string
-	Location      string
+	Name     string
+	RAM      int // in MB
+	VCPUs    int
+	Disks    []DiskOpt
+	Networks []NetworkOpt
+	PXE      bool
+	// Import tells virt-install to build the guest around an existing disk
+	// image instead of booting an installer. The cloud-image jumpstart uses it
+	// with a qcow2 overlay and must not pass --location or --extra-args.
+	Import    bool
+	BootOrder []string
+	OSVariant string
+	ExtraArgs string
+	Location  string
+	// Wait is passed to virt-install in minutes. NoWait omits --wait entirely,
+	// which is what an imported disk needs: the guest boots and stays up, so
+	// waiting for an installer to power it off would never return.
 	Wait          int
+	NoWait        bool
 	NoAutoConsole bool
 	NoReboot      bool
 	GraphicsNone  bool
@@ -376,6 +385,10 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--network", netArg)
 	}
 
+	if opts.Import {
+		args = append(args, "--import")
+	}
+
 	if opts.PXE {
 		// virt-install wants an explicit install method: --boot only describes
 		// a boot order, and virt-install 4.1 (the version shipped by Ubuntu
@@ -399,7 +412,9 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--extra-args", opts.ExtraArgs)
 	}
 
-	args = append(args, "--wait", strconv.Itoa(opts.Wait))
+	if !opts.NoWait {
+		args = append(args, "--wait", strconv.Itoa(opts.Wait))
+	}
 
 	if opts.NoAutoConsole {
 		args = append(args, "--noautoconsole")
@@ -444,6 +459,31 @@ func CreateDisk(ctx context.Context, path string, sizeGB int, format string) err
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("qemu-img create failed: %v, output: %s", err, string(out))
+	}
+	return nil
+}
+
+// CreateOverlayDisk creates a qcow2 overlay backed by basePath. The base image
+// stays read-only and is shared between jumpstart iterations, so a fast cloud
+// boot costs one downloaded image plus a small delta disk instead of a full
+// install. The backing path is made absolute because qemu-img resolves a
+// relative backing file against the overlay's directory.
+func CreateOverlayDisk(ctx context.Context, path, basePath string, sizeGB int) error {
+	if path == "" || basePath == "" {
+		return fmt.Errorf("overlay and base disk paths are required")
+	}
+	if sizeGB <= 0 {
+		return fmt.Errorf("overlay size must be positive (got %d)", sizeGB)
+	}
+	baseAbs, err := filepath.Abs(basePath)
+	if err != nil {
+		return fmt.Errorf("resolve base image %s: %w", basePath, err)
+	}
+	args := []string{"create", "-f", "qcow2", "-F", "qcow2", "-b", baseAbs, path, fmt.Sprintf("%dG", sizeGB)}
+	cmd := exec.CommandContext(ctx, "qemu-img", args...) // #nosec G204 -- qemu-img command with validated options
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("qemu-img create overlay failed: %v, output: %s", err, string(out))
 	}
 	return nil
 }

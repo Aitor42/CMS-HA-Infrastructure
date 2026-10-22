@@ -248,6 +248,23 @@ func TestConfig_SecretsEncryption(t *testing.T) {
 	}
 }
 
+func TestConfig_JumpstartImageMode(t *testing.T) {
+	cases := []struct {
+		set  string
+		want string
+	}{
+		{"", "iso"},
+		{"iso", "iso"},
+		{" Cloud ", "cloud"},
+	}
+	for _, tc := range cases {
+		cfg := &config.Config{VM: config.VMConfig{JumpstartImage: tc.set}}
+		if got := cfg.JumpstartImageMode(); got != tc.want {
+			t.Errorf("JumpstartImageMode(%q) = %q, want %q", tc.set, got, tc.want)
+		}
+	}
+}
+
 func TestConfig_Validate(t *testing.T) {
 	validCfg := func() *config.Config {
 		return &config.Config{
@@ -289,6 +306,14 @@ func TestConfig_Validate(t *testing.T) {
 		cfg.VM.StorageDir = ""
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for empty storage_dir")
+		}
+	})
+
+	t.Run("invalid jumpstart image", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.JumpstartImage = "pxe"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an unknown jumpstart image")
 		}
 	})
 

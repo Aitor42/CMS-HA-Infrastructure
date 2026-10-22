@@ -30,6 +30,9 @@ type Options struct {
 	NodesOnly     bool
 	Cleanup       bool
 	Recreate      bool
+	// JumpstartImage overrides vm.jumpstart_image for one run: "iso" or
+	// "cloud". Empty keeps the configured value (ISO by default).
+	JumpstartImage string
 }
 
 // Phase implements the VM initialization phase (Phase 00).
@@ -302,6 +305,10 @@ type autoinstallData struct {
 	MACMain         string
 	IPMain          string
 	WANIfaceConfig  string
+	// WANIfaceConfigCloud is the same optional WAN stanza indented for the
+	// cloud-init template, where network.ethernets sits one level higher than
+	// under autoinstall.
+	WANIfaceConfigCloud string
 }
 
 // deployJumpstart provisions the Jumpstart VM via cloud-init autoinstall.
@@ -323,6 +330,12 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return nil
 	}
 
+	mode, err := p.jumpstartImageMode()
+	if err != nil {
+		return err
+	}
+	logging.Info("Jumpstart install path: %s", mode)
+
 	keyPath := p.cfg.SSH.PrivateKey
 	pubKey, err := p.ensureSSHKey(keyPath)
 	if err != nil {
@@ -337,73 +350,56 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return fmt.Errorf("generate admin password hash: %w", err)
 	}
 
-	// Determine WAN interface config (if libvirt default network exists)
+	// Determine WAN interface config (if libvirt default network exists). The
+	// two indentation levels match the autoinstall and cloud-init templates.
 	hasDefaultNet := p.lv.NetExists(ctx, "default")
 	wanIfaceConfig := ""
+	wanIfaceConfigCloud := ""
 	if hasDefaultNet {
 		wanIfaceConfig = fmt.Sprintf("\n      net2:\n        match:\n          macaddress: \"%s\"\n        dhcp4: true\n        dhcp4-overrides:\n          route-metric: 100\n          use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
-	}
-
-	tmplContent, err := cms.TemplatesFS.ReadFile("templates/autoinstall/user-data.tmpl")
-	if err != nil {
-		return fmt.Errorf("failed to read autoinstall template: %w", err)
-	}
-
-	tmpl, err := template.New("autoinstall").Parse(string(tmplContent))
-	if err != nil {
-		return fmt.Errorf("failed to parse autoinstall template: %w", err)
+		wanIfaceConfigCloud = fmt.Sprintf("\n    net2:\n      match:\n        macaddress: \"%s\"\n      dhcp4: true\n      dhcp4-overrides:\n        route-metric: 100\n        use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
 	}
 
 	data := autoinstallData{
-		Hostname:        p.cfg.Nodes.Jumpstart.Name,
-		PasswordHash:    passHash,
-		PubKey:          pubKey,
-		MACInternal:     p.cfg.Nodes.Jumpstart.MACInternal,
-		IPInternal:      p.cfg.Nodes.Jumpstart.IP,
-		GatewayInternal: p.cfg.Network.Internal.Gateway,
-		MACMain:         p.cfg.Nodes.Jumpstart.MACMain,
-		IPMain:          p.cfg.Nodes.Jumpstart.IPMain,
-		WANIfaceConfig:  wanIfaceConfig,
+		Hostname:            p.cfg.Nodes.Jumpstart.Name,
+		PasswordHash:        passHash,
+		PubKey:              pubKey,
+		MACInternal:         p.cfg.Nodes.Jumpstart.MACInternal,
+		IPInternal:          p.cfg.Nodes.Jumpstart.IP,
+		GatewayInternal:     p.cfg.Network.Internal.Gateway,
+		MACMain:             p.cfg.Nodes.Jumpstart.MACMain,
+		IPMain:              p.cfg.Nodes.Jumpstart.IPMain,
+		WANIfaceConfig:      wanIfaceConfig,
+		WANIfaceConfigCloud: wanIfaceConfigCloud,
 	}
 
-	var userDataBuf bytes.Buffer
-	if err := tmpl.Execute(&userDataBuf, data); err != nil {
-		return fmt.Errorf("failed to render autoinstall template: %w", err)
+	// Resolve the install artifact before writing the seed ISO, so a missing
+	// ISO/cloud image fails without leaving a half-prepared seed behind.
+	var baseImage, isoPath string
+	switch mode {
+	case "cloud":
+		baseImage, err = findCloudImage(p.cfg.VM.StorageDir, p.cfg.VM.JumpstartBaseImage)
+		if err != nil {
+			return err
+		}
+		logging.Info("Using Ubuntu cloud image: %s", baseImage)
+	case "iso":
+		isoPath, err = findUbuntuISO(p.cfg.VM.StorageDir)
+		if err != nil {
+			return err
+		}
+		logging.Info("Using Ubuntu ISO: %s", isoPath)
 	}
 
-	autoinstallDir := filepath.Join(p.cfg.VM.StorageDir, "autoinstall")
-	if err := os.MkdirAll(autoinstallDir, 0700); err != nil {
-		return fmt.Errorf("failed to create autoinstall dir: %w", err)
-	}
-
-	if err := os.WriteFile(filepath.Join(autoinstallDir, "user-data"), userDataBuf.Bytes(), 0600); err != nil {
-		return fmt.Errorf("failed to write user-data: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(autoinstallDir, "meta-data"), []byte(""), 0600); err != nil {
-		return fmt.Errorf("failed to write meta-data: %w", err)
-	}
-
-	seedISO := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
-	if err := libvirt.CreateISO(ctx, seedISO, autoinstallDir, "cidata"); err != nil {
-		return fmt.Errorf("failed to create seed ISO: %w", err)
-	}
-	_ = os.Chmod(seedISO, 0644)
-	logging.Success("Cloud-init seed ISO created: %s", seedISO)
-
-	isoPath, err := findUbuntuISO(p.cfg.VM.StorageDir)
+	seedISO, err := p.createJumpstartSeed(ctx, mode, data)
 	if err != nil {
 		return err
 	}
-	logging.Info("Using Ubuntu ISO: %s", isoPath)
 
 	diskPath := filepath.Join(p.cfg.VM.StorageDir, "jumpstart.qcow2")
 	if err := utils.EnsureDiskPathAvailable(diskPath); err != nil {
 		return err
 	}
-	if err := libvirt.CreateDisk(ctx, diskPath, p.cfg.Nodes.Jumpstart.DiskGB, "qcow2"); err != nil {
-		return fmt.Errorf("failed to create jumpstart disk: %w", err)
-	}
-	_ = os.Chmod(diskPath, 0666)
 
 	// Determine networks (always internal + main, optionally WAN)
 	nets := []libvirt.NetworkOpt{
@@ -414,32 +410,64 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		nets = append(nets, libvirt.NetworkOpt{Network: "default", Mac: p.cfg.Nodes.Jumpstart.MACWAN})
 	}
 
-	logging.Info("Starting Jumpstart automated installation (this may take several minutes)...")
-	err = p.lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
-		Name:  p.cfg.Nodes.Jumpstart.Name,
-		RAM:   p.cfg.Nodes.Jumpstart.RAMInstallMB,
-		VCPUs: p.cfg.Nodes.Jumpstart.VCPUs,
-		Disks: []libvirt.DiskOpt{
+	installOpts := libvirt.VirtInstallOpts{
+		Name:          p.cfg.Nodes.Jumpstart.Name,
+		RAM:           p.cfg.Nodes.Jumpstart.RAMInstallMB,
+		VCPUs:         p.cfg.Nodes.Jumpstart.VCPUs,
+		Networks:      nets,
+		OSVariant:     "ubuntu24.04",
+		GraphicsNone:  true,
+		NoAutoConsole: true,
+	}
+
+	switch mode {
+	case "cloud":
+		if err := libvirt.CreateOverlayDisk(ctx, diskPath, baseImage, p.cfg.Nodes.Jumpstart.DiskGB); err != nil {
+			return fmt.Errorf("failed to create jumpstart overlay disk: %w", err)
+		}
+		installOpts.Disks = []libvirt.DiskOpt{
+			{Path: diskPath},
+			{Path: seedISO},
+		}
+		installOpts.Import = true
+		installOpts.BootOrder = []string{"hd"}
+		installOpts.NoWait = true
+	case "iso":
+		if err := libvirt.CreateDisk(ctx, diskPath, p.cfg.Nodes.Jumpstart.DiskGB, "qcow2"); err != nil {
+			return fmt.Errorf("failed to create jumpstart disk: %w", err)
+		}
+		installOpts.Disks = []libvirt.DiskOpt{
 			{Path: diskPath},
 			{Path: isoPath},
 			{Path: seedISO},
-		},
-		Networks:      nets,
-		Location:      isoPath + ",kernel=casper/vmlinuz,initrd=casper/initrd",
-		ExtraArgs:     "autoinstall ds=nocloud console=ttyS0,115200n8",
-		OSVariant:     "ubuntu24.04",
-		GraphicsNone:  true,
-		Wait:          -1,
-		NoReboot:      true,
-		NoAutoConsole: true,
-	})
-	if err != nil {
+		}
+		installOpts.Location = isoPath + ",kernel=casper/vmlinuz,initrd=casper/initrd"
+		installOpts.ExtraArgs = "autoinstall ds=nocloud console=ttyS0,115200n8"
+		installOpts.Wait = -1
+		installOpts.NoReboot = true
+	}
+	_ = os.Chmod(diskPath, 0666)
+
+	if mode == "cloud" {
+		logging.Info("Starting Jumpstart cloud boot (the image is already installed)...")
+	} else {
+		logging.Info("Starting Jumpstart automated installation (this may take several minutes)...")
+	}
+	if err := p.lv.VirtInstall(ctx, installOpts); err != nil {
 		return fmt.Errorf("jumpstart virt-install failed: %w", err)
 	}
 
 	logging.Info("Starting Jumpstart VM...")
-	if err := p.lv.Start(ctx, p.cfg.Nodes.Jumpstart.Name); err != nil {
-		logging.Warn("Failed to start jumpstart (may already be running): %v", err)
+	// The ISO path leaves the guest powered off after Subiquity finishes;
+	// --import boots it immediately, so only start it when needed.
+	running := false
+	if state, err := p.lv.DomainState(ctx, p.cfg.Nodes.Jumpstart.Name); err == nil && state == "running" {
+		running = true
+	}
+	if !running {
+		if err := p.lv.Start(ctx, p.cfg.Nodes.Jumpstart.Name); err != nil {
+			logging.Warn("Failed to start jumpstart (may already be running): %v", err)
+		}
 	}
 
 	logging.Info("Waiting for Jumpstart VM to boot and SSH to become ready...")
@@ -451,6 +479,110 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 
 	logging.Success("Jumpstart VM deployed and started")
 	return nil
+}
+
+// jumpstartImageMode resolves the install path: the CLI flag wins, then the
+// config value, then the ISO default.
+func (p *Phase) jumpstartImageMode() (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(p.opts.JumpstartImage))
+	if mode == "" {
+		mode = p.cfg.JumpstartImageMode()
+	}
+	switch mode {
+	case "iso", "cloud":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid jumpstart image %q: want \"iso\" or \"cloud\"", mode)
+	}
+}
+
+// createJumpstartSeed renders the mode-specific cloud-init user-data and packs
+// it into the NoCloud seed ISO shared by both install paths.
+func (p *Phase) createJumpstartSeed(ctx context.Context, mode string, data autoinstallData) (string, error) {
+	templatePath := "templates/autoinstall/user-data.tmpl"
+	seedDirName := "autoinstall"
+	metaData := ""
+	if mode == "cloud" {
+		templatePath = "templates/autoinstall/cloud-user-data.tmpl"
+		seedDirName = "cloud-init"
+		// A stable instance-id would make cloud-init skip its modules on a
+		// reused disk; every jumpstart disk is new, so a fresh id is safest.
+		metaData = fmt.Sprintf("instance-id: cms-ha-jumpstart-%d\nlocal-hostname: %s\n", time.Now().Unix(), data.Hostname)
+	}
+
+	userData, err := renderTemplate(templatePath, data)
+	if err != nil {
+		return "", fmt.Errorf("render %s: %w", templatePath, err)
+	}
+
+	seedDir := filepath.Join(p.cfg.VM.StorageDir, seedDirName)
+	if err := os.MkdirAll(seedDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create %s dir: %w", seedDirName, err)
+	}
+	if err := os.WriteFile(filepath.Join(seedDir, "user-data"), userData, 0600); err != nil {
+		return "", fmt.Errorf("failed to write user-data: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(seedDir, "meta-data"), []byte(metaData), 0600); err != nil {
+		return "", fmt.Errorf("failed to write meta-data: %w", err)
+	}
+
+	seedISO := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
+	if err := libvirt.CreateISO(ctx, seedISO, seedDir, "cidata"); err != nil {
+		return "", fmt.Errorf("failed to create seed ISO: %w", err)
+	}
+	_ = os.Chmod(seedISO, 0644)
+	logging.Success("Cloud-init seed ISO created: %s", seedISO)
+	return seedISO, nil
+}
+
+// renderTemplate renders one embedded cloud-init template. It is separate from
+// createJumpstartSeed so tests can assert the rendered YAML without xorrisofs.
+func renderTemplate(path string, data autoinstallData) ([]byte, error) {
+	content, err := cms.TemplatesFS.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	tmpl, err := template.New(filepath.Base(path)).Parse(string(content))
+	if err != nil {
+		return nil, err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// findCloudImage locates the Ubuntu cloud image for the opt-in cloud jumpstart.
+// Unlike the ISO path it returns instructions instead of downloading: a base
+// image is a 600 MB artifact and pinning it is the caller's decision.
+func findCloudImage(dir, configured string) (string, error) {
+	if configured != "" {
+		path := config.ExpandPath(configured)
+		if info, err := os.Stat(path); err == nil && info.Size() > 100<<20 {
+			return path, nil
+		}
+		return "", fmt.Errorf("vm.jumpstart_base_image %s is missing or too small; expected the Ubuntu 24.04 cloud image", path)
+	}
+
+	candidates := []string{
+		filepath.Join(dir, "ubuntu-24.04-server-cloudimg-amd64.img"),
+		filepath.Join(dir, "ubuntu-24.04-server-cloudimg-amd64.qcow2"),
+		filepath.Join(dir, "noble-server-cloudimg-amd64.img"),
+	}
+	for _, c := range candidates {
+		if info, err := os.Stat(c); err == nil && info.Size() > 100<<20 {
+			return c, nil
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "*cloudimg*amd64*.img"))
+	for _, m := range matches {
+		if info, err := os.Stat(m); err == nil && info.Size() > 100<<20 {
+			return m, nil
+		}
+	}
+
+	return "", fmt.Errorf("no Ubuntu 24.04 cloud image found in %s; download ubuntu-24.04-server-cloudimg-amd64.img from https://cloud-images.ubuntu.com/noble/current/ or set vm.jumpstart_base_image", dir)
 }
 
 // deployClientNodes provisions all client nodes via PXE boot.

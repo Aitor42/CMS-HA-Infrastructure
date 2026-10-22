@@ -33,6 +33,7 @@ func init() {
 			nodesOnly, _ := cmd.Flags().GetBool("nodes-only")
 			cleanup, _ := cmd.Flags().GetBool("cleanup")
 			recreate, _ := cmd.Flags().GetBool("recreate")
+			jumpstartImage, _ := cmd.Flags().GetString("jumpstart-image")
 
 			// --cleanup only removes what is present, so it must tolerate an
 			// incomplete config exactly like `cms-ha cleanup`/`destroy`.
@@ -52,10 +53,11 @@ func init() {
 			lv := newLibvirtClient(cfg)
 
 			opts := initvms.Options{
-				JumpstartOnly: jumpstartOnly,
-				NodesOnly:     nodesOnly,
-				Cleanup:       cleanup,
-				Recreate:      recreate,
+				JumpstartOnly:  jumpstartOnly,
+				NodesOnly:      nodesOnly,
+				Cleanup:        cleanup,
+				Recreate:       recreate,
+				JumpstartImage: jumpstartImage,
 			}
 
 			p := initvms.NewPhaseWithOpts(cfg, pool, lv, opts)
@@ -66,6 +68,7 @@ func init() {
 	initVMsCmd.Flags().Bool("nodes-only", false, "Deploy only client nodes (reuses the existing Jumpstart)")
 	initVMsCmd.Flags().Bool("cleanup", false, "Destroy all VMs and networks")
 	initVMsCmd.Flags().Bool("recreate", false, "Destroy and recreate the Jumpstart VM")
+	initVMsCmd.Flags().String("jumpstart-image", "", "Jumpstart install path: iso (default) or cloud (opt-in fast path)")
 	phaseCmd.AddCommand(initVMsCmd)
 
 	// Helper for phases without libvirt

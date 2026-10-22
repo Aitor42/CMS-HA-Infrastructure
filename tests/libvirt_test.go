@@ -92,6 +92,110 @@ func TestLibvirt_VirtInstallBuildsExpectedArgs(t *testing.T) {
 	}
 }
 
+func TestLibvirt_VirtInstallImportArgs(t *testing.T) {
+	argsFile := fakeVirtInstall(t)
+	c := libvirt.NewClient("test:///default")
+
+	err := c.VirtInstall(t.Context(), libvirt.VirtInstallOpts{
+		Name:      "cloud-jumpstart",
+		RAM:       3072,
+		VCPUs:     2,
+		OSVariant: "ubuntu24.04",
+		Disks: []libvirt.DiskOpt{
+			{Path: "/var/lib/libvirt/images/jumpstart.qcow2"},
+			{Path: "/var/lib/libvirt/images/seed.iso"},
+		},
+		Networks: []libvirt.NetworkOpt{
+			{Network: "internal", Mac: "52:54:00:10:00:01"},
+		},
+		Import:        true,
+		BootOrder:     []string{"hd"},
+		NoWait:        true,
+		GraphicsNone:  true,
+		NoAutoConsole: true,
+	})
+	if err != nil {
+		t.Fatalf("VirtInstall: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{
+		"--connect", "test:///default",
+		"--name", "cloud-jumpstart",
+		"--memory", "3072",
+		"--vcpus", "2",
+		"--os-variant", "ubuntu24.04",
+		"--disk", "path=/var/lib/libvirt/images/jumpstart.qcow2,format=qcow2,bus=virtio",
+		"--disk", "path=/var/lib/libvirt/images/seed.iso,bus=sata,device=cdrom",
+		"--network", "network=internal,model=virtio,mac=52:54:00:10:00:01",
+		"--import",
+		"--boot", "hd",
+		"--noautoconsole",
+		"--graphics", "none",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("virt-install argv = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("virt-install argv[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, arg := range got {
+		if arg == "--wait" || arg == "--location" {
+			t.Errorf("imported guest must not use %s; argv = %v", arg, got)
+		}
+	}
+}
+
+func fakeQemuImg(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\n"
+	binary := filepath.Join(dir, "qemu-img")
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake qemu-img: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argsFile
+}
+
+func TestLibvirt_CreateOverlayDisk(t *testing.T) {
+	argsFile := fakeQemuImg(t)
+	base := filepath.Join(t.TempDir(), "ubuntu-cloud.img")
+	if err := os.WriteFile(base, []byte("base"), 0o644); err != nil {
+		t.Fatalf("write base image: %v", err)
+	}
+	overlay := filepath.Join(t.TempDir(), "jumpstart.qcow2")
+
+	if err := libvirt.CreateOverlayDisk(t.Context(), overlay, base, 30); err != nil {
+		t.Fatalf("CreateOverlayDisk: %v", err)
+	}
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	want := []string{"create", "-f", "qcow2", "-F", "qcow2", "-b", base, overlay, "30G"}
+	if len(got) != len(want) {
+		t.Fatalf("qemu-img argv = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("qemu-img argv[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	if err := libvirt.CreateOverlayDisk(t.Context(), overlay, base, 0); err == nil {
+		t.Fatal("expected a non-positive overlay size to be rejected")
+	}
+}
+
 func TestLibvirt_VirtInstallRejectsCommaInDiskAndNetwork(t *testing.T) {
 	argsFile := fakeVirtInstall(t)
 	c := libvirt.NewClient("test:///default")

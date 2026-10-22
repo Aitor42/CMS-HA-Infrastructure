@@ -33,6 +33,12 @@
 vm:
   storage_dir: "${HOME}/vm_storage"
   libvirt_uri: "qemu:///system"
+  # Jumpstart install path: "iso" (default, the PXE/autoinstall deliverable) or
+  # "cloud" (opt-in: boot a qcow2 overlay of the Ubuntu cloud image). For cloud,
+  # put ubuntu-24.04-server-cloudimg-amd64.img in storage_dir or set
+  # jumpstart_base_image. The cloud path is for iteration and CI; it does not
+  # replace the ISO/PXE gate.
+  jumpstart_image: "iso"
 
 ssh:
   # Non-root deploy account created by every installer (Cobbler autoinstall and
