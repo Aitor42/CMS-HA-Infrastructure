@@ -1,7 +1,7 @@
 # role::jumpstart — Infrastructure provisioning, configuration management, and core services.
 #
 # Runs: Cobbler (PXE, DHCP, TFTP, HTTP), Puppet Server (8140), BIND9 DNS (53), Chrony NTP (123), NFS.
-# Inherits role::base for base packages, /etc/hosts, swap, and common UFW rules.
+# Includes role::base for base packages, /etc/hosts, swap, and common UFW rules.
 
 class role::jumpstart {
   include role::base

@@ -37,15 +37,12 @@ func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
 
-	// The Puppet phase (04) already converged every node once: the storage node
-	// serves the export and the balancers run nginx+keepalived, and that phase
-	// fails the deploy if any node does not converge. Nothing between then and
-	// now changes those catalogs, so re-running the agent on the storage node
-	// or the balancers only re-applied an identical catalog. This phase checks
-	// the preconditions instead and converges only the frontends, whose
-	// catalog really does depend on state that exists by now (the database is
-	// created in the Kubernetes phase and the NFS export is only reachable
-	// after the storage node converged).
+	// The Puppet phase (04) already converged every node and fails the deploy
+	// if one does not, so re-running it here would only re-apply an identical
+	// catalog. This phase checks the preconditions and converges only the
+	// frontends, whose catalog depends on state that exists by now (the
+	// database from the Kubernetes phase, the NFS export from the storage
+	// node).
 	var lbIPs []string
 	for _, lb := range p.cfg.Nodes.LBs {
 		if lb.IP == "" {

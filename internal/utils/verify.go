@@ -99,7 +99,6 @@ func (v *Verifier) printResult(phase, name string, pass bool, details string) {
 }
 
 func (v *Verifier) phase00(ctx context.Context) CheckResult {
-	// At least one libvirt VM is running.
 	running, err := v.libvirt.ListRunning(ctx)
 	pass := err == nil && len(running) > 0
 	return CheckResult{"Phase 00", "Libvirt VMs & Networks", pass, fmt.Sprintf("%d running VMs", len(running))}

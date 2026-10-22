@@ -769,7 +769,7 @@ func toSpec(n NodeDetail, fallbackIP string) NodeSpec {
 	}
 }
 
-// InternalNodes returns nodes on 192.168.10.0/24
+// InternalNodes returns the nodes on the internal network.
 func (c *Config) InternalNodes() []NodeSpec {
 	var nodes []NodeSpec
 	nodes = append(nodes, toSpec(c.Nodes.Router, ""))
@@ -785,7 +785,7 @@ func (c *Config) InternalNodes() []NodeSpec {
 	return nodes
 }
 
-// MainNodes returns nodes on 192.168.20.0/24
+// MainNodes returns the nodes on the main network.
 func (c *Config) MainNodes() []NodeSpec {
 	var nodes []NodeSpec
 	if c.Nodes.Jumpstart.IPMain != "" {

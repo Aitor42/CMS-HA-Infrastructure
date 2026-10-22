@@ -37,7 +37,6 @@ autoinstall:
     layout:
       name: direct
   late-commands:
-    # Create SSH key directories
     - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
     # Fetch authorised public keys from the Jumpstart Cobbler pub endpoint
     - >-

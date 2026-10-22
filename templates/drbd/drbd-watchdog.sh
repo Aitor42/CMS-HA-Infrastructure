@@ -98,7 +98,6 @@ while true; do
   if [ "$LOCAL_ROLE" = "Primary" ]; then
     STRIKE_COUNT=0
 
-    # Ensure storage volume is mounted
     mkdir -p "$MOUNT_POINT"
     if ! mountpoint -q "$MOUNT_POINT"; then
       log "Primary storage not mounted. Mounting $DRBD_DEVICE at $MOUNT_POINT..."

@@ -275,8 +275,9 @@ func httpGetWithClient(ctx context.Context, client *http.Client, rawURL, hostHea
 }
 
 // httpGet is a one-shot GET with a per-request timeout. insecure skips TLS
-// verification, which the CMS endpoint requires: its certificate is issued by
-// the project's own internal CA, not by a public one.
+// verification: the CMS endpoint needs it (its certificate comes from the
+// project's own CA), but it is probed with cmsHTTPClient, which already skips
+// it — so every caller passes false today.
 func httpGet(ctx context.Context, rawURL, hostHeader string, timeout time.Duration, insecure bool) (int, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

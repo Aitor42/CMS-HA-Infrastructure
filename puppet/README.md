@@ -11,7 +11,7 @@ puppet/
 ├── manifests/site.pp              # maps hostnames to role classes
 └── modules/role/
     ├── manifests/                 # one class per node type
-    │   ├── base.pp                # all nodes: node_exporter, chrony, UFW, swap, /etc/hosts
+    │   ├── base.pp                # all nodes: node_exporter, chrony, UFW, swap, /etc/hosts, sudoers, sshd
     │   ├── router.pp              # ufw-router
     │   ├── jumpstart.pp           # jumpstart: Puppet Server, Cobbler, DNS, NFS
     │   ├── loadbalancer.pp        # main-lb*: Nginx, keepalived, TLS
@@ -37,7 +37,7 @@ puppet/
 | `main-lb*` | `role::loadbalancer` | Nginx, step-ca certificate, keepalived VIP |
 | `main-cms*` | `role::cms_frontend` | Apache, PHP, WordPress, WP-CLI |
 | `main-hotdesk*` | `role::hotdesk` | XFCE desktop, LightDM |
-| `*` (default) | `role::base` | node_exporter, chrony, `/etc/hosts`, swap, UFW base |
+| `*` (default) | `role::base` | node_exporter, chrony, `/etc/hosts`, swap, UFW base, sudoers, sshd |
 
 Every role includes `role::base` first, so the base configuration is applied
 regardless of the node type.

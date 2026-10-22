@@ -138,7 +138,6 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	master1 := f.cfg.Nodes.Masters[0]
 	master2 := f.cfg.Nodes.Masters[1]
 
-	// Shutdown master1
 	if err := f.shutdownForTest(ctx, master1.Name); err != nil {
 		f.printSummary("DRBD Master Failover", false, time.Since(start))
 		logging.Error("%v", err)
@@ -318,7 +317,6 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 
 	cms1 := f.cfg.Nodes.CMSFrontends[0]
 
-	// Shutdown cms1
 	if err := f.shutdownForTest(ctx, cms1.Name); err != nil {
 		f.printSummary("CMS Frontend Failover", false, time.Since(start))
 		logging.Error("%v", err)
@@ -362,7 +360,6 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	worker1 := f.cfg.Nodes.Workers[0]
 	master2 := f.cfg.Nodes.Masters[1]
 
-	// Shutdown worker1
 	if err := f.shutdownForTest(ctx, worker1.Name); err != nil {
 		f.printSummary("K3s Worker Failover", false, time.Since(start))
 		logging.Error("%v", err)

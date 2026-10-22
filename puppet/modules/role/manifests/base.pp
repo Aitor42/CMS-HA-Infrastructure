@@ -1,6 +1,7 @@
 # role::base — Applied to every node in the infrastructure.
 #
-# Manages: node_exporter, chrony NTP, /etc/hosts, swap, and UFW base policies.
+# Manages: node_exporter, chrony NTP, /etc/hosts, swap, UFW base policies, the
+# deploy account's sudoers drop-in and the sshd root-login lockdown.
 # Every specialised role must `include role::base` as its first statement.
 
 class role::base {

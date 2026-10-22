@@ -23,8 +23,8 @@ import { Rate, Trend } from 'k6/metrics';
 const BASE_URL = __ENV.BASE_URL || 'https://192.168.20.100';
 const VHOST = __ENV.VHOST || 'cms.fake-enterprise.com';
 
-// Browse paths mirror the WordPress surface exercised by the old Go generator
-// (front page, search, REST API, feeds, cron and the login form).
+// Browse paths cover the WordPress surface a CMS user exercises (front page,
+// search, REST API, feeds, cron and the login form).
 const BROWSE_PATHS = [
   '/',
   '/wp-login.php',

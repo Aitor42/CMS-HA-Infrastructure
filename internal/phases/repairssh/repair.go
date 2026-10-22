@@ -158,14 +158,12 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		return fmt.Errorf("jumpstart IP is empty")
 	}
 
-	// Check if jumpstart has an ssh key, if not generate it
 	checkCmd := "if [ ! -f /root/.ssh/id_ed25519 ]; then mkdir -p /root/.ssh && chmod 700 /root/.ssh && ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519; fi"
 	_, _, code, err := p.pool.RunCommand(ctx, jumpstartIP, checkCmd)
 	if err != nil || code != 0 {
 		return fmt.Errorf("failed to ensure jumpstart ssh key (exit %d): %v", code, err)
 	}
 
-	// Read jumpstart public key
 	pubKeyStr, _, code, err := p.pool.RunCommand(ctx, jumpstartIP, "cat /root/.ssh/id_ed25519.pub")
 	if err != nil || code != 0 {
 		return fmt.Errorf("failed to read jumpstart public key (exit %d): %v", code, err)

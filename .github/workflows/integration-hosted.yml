@@ -12,11 +12,11 @@ name: Integration (KVM lab, hosted)
 #     /, 86 GB free (113 GB after deleting the preinstalled SDKs);
 #   * the real limits are 4 vCPU and 15 GiB of RAM + 3 GiB swap.
 #
-# That is why it deploys `config.ci.yaml` (identical to config.yaml except the
-# three client hotdesks are dropped: 13 VMs instead of 16, ~12.7 GB of guest
-# RAM) and why it is manual only: a full run takes tens of minutes and holds a
-# whole runner for the duration. The full 16-VM topology is still covered by
-# `integration.yml` on a self-hosted `kvm` runner.
+# That is why it deploys `config.ci.yaml` (config.yaml with the three client
+# hotdesks dropped and the installer RAM lowered to 3 GiB: 13 VMs instead of
+# 16, ~12.7 GB of guest RAM) and why it is manual only: a full run takes tens
+# of minutes and holds a whole runner for the duration. The full 16-VM
+# topology is still covered by `integration.yml` on a self-hosted `kvm` runner.
 
 on:
   workflow_dispatch:
@@ -243,8 +243,7 @@ jobs:
 
       # Both stages need the lab installed; `full` then continues with the
       # service phases, which find the client VMs already defined and skip
-      # their creation. On a branch push `inputs.stage` is empty, so only this
-      # cheaper step runs.
+      # their creation.
       - name: Provision the lab (jumpstart, Cobbler and PXE clients)
         run: |
           set -o pipefail

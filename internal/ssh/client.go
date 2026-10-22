@@ -112,7 +112,6 @@ func NewPoolWithOptions(keyPath string, opts Options) (*Pool, error) {
 		connectTimeout: opts.ConnectTimeout,
 	}
 
-	// If key file exists, initialize immediately
 	if _, err := os.Stat(keyPath); err == nil {
 		if err := p.initKey(); err != nil {
 			return nil, err

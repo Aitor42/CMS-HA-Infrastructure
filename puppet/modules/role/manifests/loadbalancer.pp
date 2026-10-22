@@ -43,10 +43,8 @@ class role::loadbalancer {
   # step CLI is required to renew the CA-issued certificate. Pinned to the same
   # release as pki.step_version in config.yaml (keep the two in sync): the
   # version-independent "latest" alias would silently change what a fresh
-  # balancer installs. `set -e` plus the trailing `test -x` matter because the
-  # previous one-liner ended in `; rm -f`, so a failed download (or a missing
-  # wget) exited 0: Puppet saw success, `creates` never became true and the exec
-  # silently re-ran on every convergence without ever installing step.
+  # balancer installs. `set -e` plus the trailing `test -x` keep a failed
+  # download from exiting 0 and re-running on every convergence.
   exec { 'install-step-cli':
     command => '/bin/bash -c "set -e; wget -q https://github.com/smallstep/cli/releases/download/v0.31.0/step-cli_0.31.0-1_$(dpkg --print-architecture).deb -O /tmp/step-cli.deb; \
       dpkg -i /tmp/step-cli.deb || apt-get install -f -y; rm -f /tmp/step-cli.deb; test -x /usr/bin/step"',

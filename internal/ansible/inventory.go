@@ -213,9 +213,7 @@ func bareNames(nodes []config.NodeDetail) map[string]HostVars {
 	return m
 }
 
-// ResolvePath resolves a (possibly relative) inventory path against the
-// module root, so `cms-ha inventory` writes to the repository regardless of
-// the current working directory.
+// ResolvePath resolves a (possibly relative) inventory path against root.
 func ResolvePath(root, path string) string {
 	if filepath.IsAbs(path) {
 		return path

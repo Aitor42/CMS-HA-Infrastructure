@@ -1,8 +1,9 @@
 # role::monitor — Prometheus + Grafana observability stack (internal-monitor).
 #
 # Manages: Prometheus binary + config file, Prometheus Alertmanager
-# (prometheus-alertmanager package + config), Grafana APT repo + package +
-# provisioning files (datasource and dashboard provider), UFW rules.
+# (prometheus-alertmanager package + config), the blackbox exporter, the Grafana
+# APT repo + package + provisioning files (datasource, dashboard provider and
+# home-dashboard drop-in), UFW rules.
 
 class role::monitor {
 

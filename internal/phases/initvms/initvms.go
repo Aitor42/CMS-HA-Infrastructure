@@ -34,15 +34,11 @@ type Options struct {
 
 // Phase implements the VM initialization phase (Phase 00).
 //
-// MIGRATION STATUS: Ansible (ansible/playbooks/provision.yml,
-// generated from config.yaml by `cms-ha inventory`) is the declared
-// infrastructure-as-code path that creates and declares libvirt networks,
-// disks and domains. This Go/virsh creation phase is kept on purpose during
-// the coexistence window so the existing deploy pipeline keeps working until
-// the Ansible playbook has been validated against a real hypervisor. Once
-// that is confirmed, this creation path is removed and only the thin runtime
-// libvirt primitive (start/stop/shrink, fencing) remains. Do not add new
-// creation logic here — put it in the Ansible roles instead.
+// Ansible (ansible/playbooks/provision.yml, generated from config.yaml by
+// `cms-ha inventory`) is the declared infrastructure-as-code path for
+// creating networks, disks and domains; this Go/virsh phase is only a
+// fallback until that playbook has been validated on a real hypervisor. Do
+// not add new creation logic here — put it in the Ansible roles.
 type Phase struct {
 	cfg  *config.Config
 	lv   *libvirt.Client
@@ -117,13 +113,11 @@ func (p *Phase) Run(ctx context.Context) error {
 func (p *Phase) preflightChecks(ctx context.Context) error {
 	logging.Info("Running preflight checks...")
 
-	// Validate hotdesk count
 	if p.cfg.Nodes.Hotdesks.Count > p.cfg.Nodes.Hotdesks.Max {
 		return fmt.Errorf("hotdesk count %d exceeds max %d",
 			p.cfg.Nodes.Hotdesks.Count, p.cfg.Nodes.Hotdesks.Max)
 	}
 
-	// Check required commands
 	required := map[string]string{
 		"virsh":        "libvirt-daemon-system",
 		"virt-install": "virtinst",
@@ -136,7 +130,6 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 		}
 	}
 
-	// Check disk space
 	dir := filepath.Clean(p.cfg.VM.StorageDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create storage dir %s: %w", dir, err)
@@ -329,7 +322,6 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return nil
 	}
 
-	// Ensure SSH key exists
 	keyPath := p.cfg.SSH.PrivateKey
 	pubKey, err := p.ensureSSHKey(keyPath)
 	if err != nil {
@@ -351,7 +343,6 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		wanIfaceConfig = fmt.Sprintf("\n      net2:\n        match:\n          macaddress: \"%s\"\n        dhcp4: true\n        dhcp4-overrides:\n          route-metric: 100\n          use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
 	}
 
-	// Build autoinstall user-data from template
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/autoinstall/user-data.tmpl")
 	if err != nil {
 		return fmt.Errorf("failed to read autoinstall template: %w", err)
@@ -379,7 +370,6 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return fmt.Errorf("failed to render autoinstall template: %w", err)
 	}
 
-	// Create autoinstall directory and write files
 	autoinstallDir := filepath.Join(p.cfg.VM.StorageDir, "autoinstall")
 	if err := os.MkdirAll(autoinstallDir, 0700); err != nil {
 		return fmt.Errorf("failed to create autoinstall dir: %w", err)
@@ -392,7 +382,6 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return fmt.Errorf("failed to write meta-data: %w", err)
 	}
 
-	// Create seed ISO
 	seedISO := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
 	if err := libvirt.CreateISO(ctx, seedISO, autoinstallDir, "cidata"); err != nil {
 		return fmt.Errorf("failed to create seed ISO: %w", err)
@@ -400,14 +389,12 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	_ = os.Chmod(seedISO, 0644)
 	logging.Success("Cloud-init seed ISO created: %s", seedISO)
 
-	// Find Ubuntu 24.04 ISO
 	isoPath, err := findUbuntuISO(p.cfg.VM.StorageDir)
 	if err != nil {
 		return err
 	}
 	logging.Info("Using Ubuntu ISO: %s", isoPath)
 
-	// Create main disk
 	diskPath := filepath.Join(p.cfg.VM.StorageDir, "jumpstart.qcow2")
 	if err := utils.EnsureDiskPathAvailable(diskPath); err != nil {
 		return err
@@ -426,7 +413,6 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		nets = append(nets, libvirt.NetworkOpt{Network: "default", Mac: p.cfg.Nodes.Jumpstart.MACWAN})
 	}
 
-	// Install Jumpstart VM
 	logging.Info("Starting Jumpstart automated installation (this may take several minutes)...")
 	err = p.lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
 		Name:  p.cfg.Nodes.Jumpstart.Name,
@@ -450,7 +436,6 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		return fmt.Errorf("jumpstart virt-install failed: %w", err)
 	}
 
-	// Start the VM after installation
 	logging.Info("Starting Jumpstart VM...")
 	if err := p.lv.Start(ctx, p.cfg.Nodes.Jumpstart.Name); err != nil {
 		logging.Warn("Failed to start jumpstart (may already be running): %v", err)
@@ -627,7 +612,6 @@ func findUbuntuISO(dir string) (string, error) {
 		}
 	}
 
-	// Try glob
 	matches, _ := filepath.Glob(filepath.Join(dir, "*ubuntu-24.04*.iso"))
 	for _, m := range matches {
 		if info, err := os.Stat(m); err == nil && info.Size() > 1<<30 { // >1GB

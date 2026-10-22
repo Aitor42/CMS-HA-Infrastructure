@@ -9,7 +9,7 @@
 #     15 GiB with 13 VMs (16 without this change). Nothing in `verify` or in
 #     the DRBD failover exercise touches the hotdesks, so the HA pipeline under
 #     test is unchanged.
-#   * `ram_install_mb` stays at 3072 (instead of 4096 in `config.yaml`).
+#   * `ram_install_mb` stays at 3072 (the K3s nodes use 4096 in `config.yaml`).
 #     Canonical's hard minimum for an ISO install is 1.5 GiB, but its
 #     *suggested* minimum is 3 GiB and Subiquity also unpacks the base snaps,
 #     so this lab does not install below that. To keep that 3 GiB affordable,

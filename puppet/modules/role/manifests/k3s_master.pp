@@ -3,8 +3,9 @@
 # Manages: base dependencies and all UFW rules required by a K3s server.
 # master1/master2 additionally have DRBD configured by the deploy phase; master3
 # is control-plane only (etcd quorum).
-# The K3s binary installation and cluster bootstrap remain in 06_setup_kubernetes.sh
-# because they require ordered token exchange between masters (not declarative state).
+# The K3s binary installation and cluster bootstrap are done by the
+# orchestrator (the `setup-kubernetes` phase): they need an ordered token
+# exchange between the servers, which is not declarative state.
 
 class role::k3s_master {
 

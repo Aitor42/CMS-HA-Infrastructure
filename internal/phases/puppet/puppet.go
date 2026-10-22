@@ -188,7 +188,6 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		dpkg -s puppet-agent >/dev/null 2>&1 || apt-get install -y puppet-agent
 		dpkg -s puppetserver >/dev/null 2>&1 || apt-get install -y puppetserver
 
-		# Ensure puppet binaries are in PATH
 		ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
 
 		# Configure 512m memory limit for memory-constrained environments
@@ -216,7 +215,6 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		chmod 644 /etc/puppetlabs/puppet/autosign.conf
 		ln -sf /etc/puppetlabs/puppet/autosign.conf /etc/puppet/autosign.conf
 
-		# Ensure local puppet alias in /etc/hosts
 		grep -q "puppet" /etc/hosts || echo "127.0.0.1 puppet" >> /etc/hosts
 
 		systemctl enable puppetserver
@@ -264,7 +262,6 @@ func (p *Phase) uploadPuppetCode(ctx context.Context, jumpstartIP string) error 
 		return fmt.Errorf("copy dir failed: %w", err)
 	}
 
-	// Fix ownership and permissions
 	chownCmd := fmt.Sprintf("chown -R puppet:puppet %s && chmod -R u+rwX,go+rX %s", remoteCodeDir, remoteCodeDir)
 	p.pool.RunCommand(ctx, jumpstartIP, chownCmd)
 
@@ -391,7 +388,6 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 				logging.Warn("Certificate mismatch detected on %s (%s). Performing self-healing SSL reset...", spec.Name, spec.FQDN)
 				p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("puppetserver ca clean --certname %s 2>/dev/null || true", spec.FQDN))
 				p.pool.RunCommand(ctx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl")
-				// Retry agent run
 				stdout, stderr, code, err = p.pool.RunCommand(nodeCtx, spec.IP, cmd)
 			}
 

@@ -345,10 +345,9 @@ func normalizeBootOrder(ctx context.Context, l *libvirt.Client, vmName string) (
 }
 
 // reorderBootElements moves the network boot entry after the disk one and
-// reports whether the order had to change. virt-install 4.1 emits the network
-// first whenever --pxe is used, and a guest keeps the order it booted with
-// across reboots, so such a guest would reinstall itself instead of booting
-// the system the installer left on the disk.
+// reports whether the order had to change. A guest keeps the boot order it
+// booted with, so the network-first order virt-install 4.1 leaves behind
+// would make the node reinstall itself (see internal/utils/vmcreate.go).
 func reorderBootElements(xml string) (string, bool) {
 	const networkBoot = "<boot dev='network'/>"
 	const diskBoot = "<boot dev='hd'/>"
@@ -364,11 +363,6 @@ func reorderBootElements(xml string) (string, bool) {
 	return strings.Replace(withoutNetwork, diskBoot, diskBoot+"\n    "+networkBoot, 1), true
 }
 
-// InstallByBatches provisions VMs in batches using PXE.
-// Batch install waits. The live installer a node PXE-boots also listens on
-// port 22, but by design it does not trust the deployment key: only the
-// installed system does. So "port open, key refused" means the installer is
-// still working, and only a successful login means the node reached its disk.
 const (
 	// nodePollInterval is how often a node is probed while installing.
 	nodePollInterval = 5 * time.Second
@@ -620,6 +614,10 @@ func installNodeNames(nodes []installNode) string {
 	return strings.Join(names, ", ")
 }
 
+// InstallByBatches provisions VMs in batches using PXE. The live installer a
+// node PXE-boots also listens on port 22 but does not trust the deployment
+// key, so "port open, key refused" means the installer is still working;
+// only a successful login means the node reached its disk.
 func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client, s *ssh.Pool) error {
 	timer := logging.PhaseStart("Install By Batches")
 	defer timer.End()
@@ -667,9 +665,8 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 		}
 
 		// Pin disk-first booting now, minutes before the installers finish:
-		// virt-install 4.1 leaves a freshly created PXE guest booting from the
-		// network first, and the reboot at the end of the autoinstall would
-		// re-enter PXE and reinstall the node if this waited for SSH.
+		// a PXE guest left booting from the network would re-enter PXE and
+		// reinstall the node at the reboot the autoinstall ends with.
 		if err := FixBootOrder(ctx, l, batchNamesList); err != nil {
 			logging.Warn("Could not fix boot order in batch %d: %v", i+1, err)
 		}
@@ -779,7 +776,7 @@ func InstallByBatches(ctx context.Context, cfg *config.Config, l *libvirt.Client
 	}
 
 	// Start the whole topology now that no installer is left to compete with
-	// it. Booting thirteen guests together is the footprint the deploy phase
+	// it. Booting the whole batch set at once is the footprint the deploy phase
 	// runs on anyway, so it is a state this host has to hold; the difference
 	// is that it happens once, after the last install, instead of adding the
 	// idle batches to every later batch's installers.

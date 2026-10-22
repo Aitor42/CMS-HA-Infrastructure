@@ -224,7 +224,6 @@ func (o *Orchestrator) preflightChecks(ctx context.Context) error {
 		}
 	}
 
-	// Verify libvirt connectivity
 	if _, err := o.Libvirt.ListAll(ctx); err != nil {
 		return fmt.Errorf("libvirt not accessible at %s: %w", o.Cfg.VM.LibvirtURI, err)
 	}

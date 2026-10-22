@@ -65,7 +65,6 @@ func NewClient(uri string) *Client {
 	useSudo := false
 	if _, err := exec.LookPath("virsh"); err == nil {
 		if uri == "qemu:///system" || strings.HasPrefix(uri, "qemu+ssh://root@") {
-			// Check if virsh works directly
 			probeCtx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 			if err := exec.CommandContext(probeCtx, "virsh", "-c", uri, "list").Run(); err != nil { // #nosec G204
 				// Only use sudo if sudo -n works non-interactively
@@ -381,9 +380,10 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		// virt-install wants an explicit install method: --boot only describes
 		// a boot order, and virt-install 4.1 (the version shipped by Ubuntu
 		// 24.04) aborts with "An install method must be specified" when the
-		// guest has no other install source. --pxe and --boot coexist, but on
-		// 4.1 --pxe wins and leaves the guest booting from the network first;
-		// FixBootOrder restores the intended disk-first order afterwards.
+		// guest has no other install source. --pxe wins over --boot there and
+		// leaves the guest booting from the network first; FixBootOrder
+		// restores the intended disk-first order afterwards (see
+		// internal/utils/vmcreate.go).
 		args = append(args, "--pxe")
 	}
 

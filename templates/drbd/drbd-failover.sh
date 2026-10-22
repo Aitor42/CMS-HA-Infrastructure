@@ -1,8 +1,9 @@
 #!/bin/bash
 # drbd-failover.sh
 #
-# Manual DRBD failover utility for the high-availability cluster.
-# Enables hot-standby promotion when the primary master node goes down.
+# DRBD failover utility for the high-availability cluster.
+# The watchdog invokes it to promote the survivor once the peer has been
+# fenced; promote, demote and status can also be run by hand.
 #
 # Usage: drbd-failover.sh {promote|demote|status}
 
@@ -23,11 +24,9 @@ case "${1:-status}" in
       exit 1
     fi
 
-    # Promote device to Primary
     drbdadm primary "$RESOURCE" || drbdadm primary --force "$RESOURCE"
     echo "  ✔ Node promoted to Primary"
 
-    # Mount the replicated device
     mkdir -p "$MOUNT_POINT"
     if ! mountpoint -q "$MOUNT_POINT"; then
       mount "$DRBD_DEVICE" "$MOUNT_POINT"
@@ -80,13 +79,11 @@ case "${1:-status}" in
       kubectl label node "$LOCAL_NODE" drbd-status- 2>/dev/null || true
     fi
 
-    # Unmount the volume
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
       umount "$MOUNT_POINT"
       echo "  ✔ Volume unmounted from $MOUNT_POINT"
     fi
 
-    # Degrade resource to Secondary
     drbdadm secondary "$RESOURCE"
     echo "  ✔ Resource degraded to Secondary"
     ;;
