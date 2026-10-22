@@ -13,22 +13,6 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func TestShellQuote(t *testing.T) {
-	cases := map[string]string{
-		"simple":      "'simple'",
-		"with space":  "'with space'",
-		"it's":        `'it'\''s'`,
-		"":            "''",
-		"a;rm -rf /":  "'a;rm -rf /'",
-		"$(touch /x)": "'$(touch /x)'",
-	}
-	for in, want := range cases {
-		if got := shellQuote(in); got != want {
-			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestRemoteCommandElevation(t *testing.T) {
 	root := &Pool{user: "root"}
 	if got := root.remoteCommand("id -u"); got != "id -u" {

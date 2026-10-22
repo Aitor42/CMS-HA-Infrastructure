@@ -425,22 +425,6 @@ func TestPrometheusValues(t *testing.T) {
 	})
 }
 
-func TestShellQuote(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{in: "plain", want: "'plain'"},
-		{in: "pa'ss", want: `'pa'\''ss'`},
-		{in: "", want: "''"},
-	}
-	for _, tt := range tests {
-		if got := shellQuote(tt.in); got != tt.want {
-			t.Errorf("shellQuote(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
 func TestDashboardUIDFromURL(t *testing.T) {
 	tests := map[string]string{
 		"/d/default-home-dashboard/cms-ha-e28094-drbd-etcd-lb-overview": "default-home-dashboard",

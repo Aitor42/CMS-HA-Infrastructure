@@ -17,6 +17,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/container"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -341,7 +342,7 @@ func testDBQueries(ctx context.Context, pool ssh.Executor, master, user, passwor
 	script := fmt.Sprintf(
 		"POD=$(kubectl get pod -n cms -l app=mariadb,role=database -o jsonpath='{.items[0].metadata.name}') && "+
 			"kubectl exec -n cms \"$POD\" -- env MYSQL_PWD=%s mysql -h 127.0.0.1 -P 3306 -u %s %s -N -B -e %s",
-		shellQuote(password), shellQuote(user), shellQuote(dbName), shellQuote(query))
+		shell.Quote(password), shell.Quote(user), shell.Quote(dbName), shell.Quote(query))
 
 	stdout, stderr, exitCode, err := pool.RunCommand(ctx, master, script)
 	if err != nil || exitCode != 0 {
@@ -351,9 +352,4 @@ func testDBQueries(ctx context.Context, pool ssh.Executor, master, user, passwor
 		return fmt.Errorf("test query returned no data: wp_options is empty or the database is not loaded")
 	}
 	return nil
-}
-
-// shellQuote single-quotes s for a POSIX shell, escaping embedded quotes.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

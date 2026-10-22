@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -172,13 +173,7 @@ func (p *Pool) remoteCommand(cmd string) string {
 	if !p.elevated() {
 		return cmd
 	}
-	return "sudo -n -H bash -c " + shellQuote(cmd)
-}
-
-// shellQuote wraps s in single quotes, escaping embedded single quotes, so it
-// can be safely embedded in a `bash -c '...'` invocation.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "sudo -n -H bash -c " + shell.Quote(cmd)
 }
 
 func (p *Pool) initKey() error {
@@ -587,12 +582,12 @@ func (p *Pool) writeRemoteFile(ctx context.Context, host string, src io.Reader, 
 
 	tmpPath := remotePath + ".cms-tmp"
 	script := fmt.Sprintf("set -e; mkdir -p %s; cat > %s; chmod %o %s; mv -f %s %s",
-		shellQuote(path.Dir(remotePath)),
-		shellQuote(tmpPath),
+		shell.Quote(path.Dir(remotePath)),
+		shell.Quote(tmpPath),
 		mode.Perm(),
-		shellQuote(tmpPath),
-		shellQuote(tmpPath),
-		shellQuote(remotePath),
+		shell.Quote(tmpPath),
+		shell.Quote(tmpPath),
+		shell.Quote(remotePath),
 	)
 	stderr, code, err := p.RunCommandStdin(ctx, host, script, src, io.Discard)
 	if err != nil {
@@ -712,7 +707,7 @@ func (p *Pool) copyDirElevated(ctx context.Context, host, localDir, remoteDir st
 // account rather than the local uid/gid stored in the archive.
 func (p *Pool) CopyTar(ctx context.Context, host, remoteDir string, tarball []byte) error {
 	script := fmt.Sprintf("set -e; mkdir -p %s; tar -xf - -C %s --no-same-owner",
-		shellQuote(remoteDir), shellQuote(remoteDir))
+		shell.Quote(remoteDir), shell.Quote(remoteDir))
 	stderr, code, err := p.RunCommandStdin(ctx, host, script, bytes.NewReader(tarball), io.Discard)
 	if err != nil {
 		return fmt.Errorf("failed to upload archive to %s: %w", remoteDir, err)
@@ -726,7 +721,7 @@ func (p *Pool) CopyTar(ctx context.Context, host, remoteDir string, tarball []by
 // ReadFile reads remote file content.
 func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, error) {
 	if p.elevated() {
-		out, stderr, code, err := p.RunCommand(ctx, host, "cat -- "+shellQuote(remotePath))
+		out, stderr, code, err := p.RunCommand(ctx, host, "cat -- "+shell.Quote(remotePath))
 		if err != nil || code != 0 {
 			return nil, fmt.Errorf("failed to read remote file %s (exit %d): %v %s", remotePath, code, err, strings.TrimSpace(stderr))
 		}

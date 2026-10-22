@@ -17,6 +17,7 @@ import (
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 )
 
 // This file implements the verifier's functional phase. Phase 08 proves that the
@@ -669,7 +670,7 @@ func (v *Verifier) checkMariaDB(ctx context.Context) e2eOutcome {
 	script := fmt.Sprintf(
 		"POD=$(kubectl get pod -n cms -l app=mariadb,role=database -o jsonpath='{.items[0].metadata.name}') && "+
 			"kubectl exec -n cms \"$POD\" -- env MYSQL_PWD=%s mysql -h 127.0.0.1 -P 3306 -u %s %s -N -B -e %s",
-		shellQuote(v.cfg.Database.Password), shellQuote(user), shellQuote(dbName), shellQuote(mariadbRoundTripSQL))
+		shell.Quote(v.cfg.Database.Password), shell.Quote(user), shell.Quote(dbName), shell.Quote(mariadbRoundTripSQL))
 
 	// The API server is unreachable for a few seconds after a k3s restart, and
 	// on the small CI guests k3s is the first process to go when the runner is
@@ -1184,13 +1185,6 @@ func dialTCP(ctx context.Context, host string, port int, timeout time.Duration) 
 		return err
 	}
 	return conn.Close()
-}
-
-// shellQuote single-quotes s for a POSIX shell, escaping embedded quotes. The
-// database password reaches mysql through MYSQL_PWD, but it still has to survive
-// the shell that launches kubectl.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // firstAssetPath returns the path of the first WordPress asset a page loads.
