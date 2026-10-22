@@ -11,6 +11,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -602,19 +603,22 @@ func (f *FailoverTester) printSkipped(name string) {
 // waitFor polls fn until it returns true, the context is cancelled or the
 // timeout elapses. It replaces blind fixed sleeps so a failover that completes
 // early is detected immediately instead of after an arbitrary delay.
+//
+// The attempt count reproduces the old deadline loop exactly: the first probe
+// runs at once, then one probe per interval, plus one final probe after the
+// deadline in case it lands just past it.
 func waitFor(ctx context.Context, timeout, interval time.Duration, fn func() bool) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if fn() {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		if !sleepCtx(ctx, interval) {
-			return false
-		}
+	if interval <= 0 {
+		interval = time.Millisecond
 	}
+	attempts := int(timeout/interval) + 2
+	if attempts < 1 {
+		attempts = 1
+	}
+	err := retry.PollContext(ctx, retry.Config{MaxAttempts: attempts, Interval: interval}, func(context.Context) (bool, error) {
+		return fn(), nil
+	})
+	return err == nil
 }
 
 // waitForSSH blocks until host accepts a trivial SSH command or the timeout
