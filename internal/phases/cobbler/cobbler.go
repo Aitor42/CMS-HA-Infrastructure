@@ -38,6 +38,84 @@ var cobblerVars = strings.NewReplacer(
 	"{{profile}}", cobblerProfile,
 )
 
+// cobblerInstallSteps is the ordered package/configuration payload for the
+// Cobbler host. It is data, not logic: runCobblerInstallSteps logs each
+// step and stops at the first failure.
+var cobblerInstallSteps = []string{
+	`add-apt-repository -y universe 2>/dev/null || true && apt-get update -qq`,
+
+	`COBBLER_REPO_24="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_24.04"
+COBBLER_REPO_22="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_22.04"
+if ! grep -q "systemsmanagement.*cobbler" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
+    curl -fsSL "${COBBLER_REPO_24}/Release.key" 2>/dev/null | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/cobbler.gpg 2>/dev/null || true
+    if curl -sf --max-time 15 "${COBBLER_REPO_24}/Release" >/dev/null 2>&1; then
+        echo "deb [signed-by=/etc/apt/trusted.gpg.d/cobbler.gpg] ${COBBLER_REPO_24}/ /" > /etc/apt/sources.list.d/cobbler.list
+        apt-get update -qq 2>/dev/null || true
+    fi
+    if ! apt-cache show cobbler >/dev/null 2>&1; then
+        echo "deb [trusted=yes] ${COBBLER_REPO_22}/ /" > /etc/apt/sources.list.d/cobbler.list
+        apt-get update -qq 2>/dev/null || true
+    fi
+fi`,
+
+	`DEBIAN_FRONTEND=noninteractive apt-get install -y cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe shim-signed grub-efi-amd64-signed syslinux-common curl wget rsync || {
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe syslinux-common curl wget rsync
+}`,
+
+	`if ! python3 -c "import django" &>/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip 2>/dev/null || true
+    pip3 install "django>=3.2,<5" --break-system-packages 2>/dev/null || pip3 install "django>=3.2,<5" 2>/dev/null || true
+fi`,
+
+	`for svc in named.service isc-dhcp-server.service cobblerd.service; do
+    svc_dir="/etc/systemd/system/${svc}.d"
+    mkdir -p "$svc_dir"
+    cp /tmp/tpl_no_rate_limit.conf "${svc_dir}/override.conf"
+done
+mkdir -p /etc/systemd/system/isc-dhcp-server.service.d
+mkdir -p /etc/systemd/system/cobblerd.service.d
+cat /tmp/tpl_isc_dhcp_timeout.conf >> /etc/systemd/system/isc-dhcp-server.service.d/override.conf
+cat /tmp/tpl_cobblerd_timeout.conf >> /etc/systemd/system/cobblerd.service.d/override.conf
+systemctl daemon-reload`,
+
+	`INT_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/52:54:00:10:00:01/{print $2}' | head -1)
+[ -z "$INT_IF" ] && INT_IF="enp1s0"
+MAIN_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/52:54:00:10:02:0a/{print $2}' | head -1)
+[ -z "$MAIN_IF" ] && MAIN_IF="enp2s0"
+IFACES_LINE="INTERFACESv4=\"${INT_IF} ${MAIN_IF}\""
+if grep -q 'INTERFACESv4=' /etc/default/isc-dhcp-server 2>/dev/null; then
+    sed -i "s|INTERFACESv4=.*|${IFACES_LINE}|" /etc/default/isc-dhcp-server
+else
+    echo "${IFACES_LINE}" >> /etc/default/isc-dhcp-server
+fi`,
+
+	`python3 /tmp/tpl_settings_patch.py`,
+
+	`cp /tmp/tpl_dhcp.template /etc/cobbler/dhcp.template
+cp /tmp/tpl_named.template /etc/cobbler/named.template
+mkdir -p /var/cache/bind/data
+chown -R bind:bind /var/cache/bind`,
+
+	`if [ -f /etc/default/tftpd-hpa ]; then
+    sed -i 's|^TFTP_DIRECTORY=.*|TFTP_DIRECTORY="/srv/tftpboot"|' /etc/default/tftpd-hpa
+    sed -i 's|^TFTP_OPTIONS=.*|TFTP_OPTIONS="--secure --create"|' /etc/default/tftpd-hpa
+fi
+mkdir -p /srv/tftpboot`,
+
+	`mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
+NFS_EXPORT="/var/www/cobbler/distro_mirror/ubuntu-24.04 *(ro,async,no_root_squash,no_subtree_check)"
+if ! grep -qF "/var/www/cobbler/distro_mirror/ubuntu-24.04" /etc/exports 2>/dev/null; then
+    echo "${NFS_EXPORT}" >> /etc/exports
+fi`,
+
+	`a2enmod wsgi 2>/dev/null || true
+a2enconf cobbler 2>/dev/null || true`,
+
+	`for svc in tftpd-hpa apache2 cobblerd nfs-kernel-server named; do
+    systemctl restart $svc && systemctl enable $svc
+done`,
+}
+
 // Phase installs and configures the Cobbler provisioning server.
 type Phase struct {
 	cfg  *config.Config
@@ -176,89 +254,31 @@ func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
 		logging.Warn("Apt lock wait returned: %v (continuing)", err)
 	}
 
-	steps := []string{
-		`add-apt-repository -y universe 2>/dev/null || true && apt-get update -qq`,
-
-		`COBBLER_REPO_24="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_24.04"
-COBBLER_REPO_22="https://download.opensuse.org/repositories/systemsmanagement:/cobbler:/release33/xUbuntu_22.04"
-if ! grep -q "systemsmanagement.*cobbler" /etc/apt/sources.list /etc/apt/sources.list.d/* 2>/dev/null; then
-    curl -fsSL "${COBBLER_REPO_24}/Release.key" 2>/dev/null | gpg --dearmor --yes -o /etc/apt/trusted.gpg.d/cobbler.gpg 2>/dev/null || true
-    if curl -sf --max-time 15 "${COBBLER_REPO_24}/Release" >/dev/null 2>&1; then
-        echo "deb [signed-by=/etc/apt/trusted.gpg.d/cobbler.gpg] ${COBBLER_REPO_24}/ /" > /etc/apt/sources.list.d/cobbler.list
-        apt-get update -qq 2>/dev/null || true
-    fi
-    if ! apt-cache show cobbler >/dev/null 2>&1; then
-        echo "deb [trusted=yes] ${COBBLER_REPO_22}/ /" > /etc/apt/sources.list.d/cobbler.list
-        apt-get update -qq 2>/dev/null || true
-    fi
-fi`,
-
-		`DEBIAN_FRONTEND=noninteractive apt-get install -y cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe shim-signed grub-efi-amd64-signed syslinux-common curl wget rsync || {
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --fix-broken cobbler apache2 isc-dhcp-server tftpd-hpa nfs-kernel-server libapache2-mod-wsgi-py3 python3-yaml bind9 bind9utils pxelinux ipxe syslinux-common curl wget rsync
-}`,
-
-		`if ! python3 -c "import django" &>/dev/null; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip 2>/dev/null || true
-    pip3 install "django>=3.2,<5" --break-system-packages 2>/dev/null || pip3 install "django>=3.2,<5" 2>/dev/null || true
-fi`,
-
-		`for svc in named.service isc-dhcp-server.service cobblerd.service; do
-    svc_dir="/etc/systemd/system/${svc}.d"
-    mkdir -p "$svc_dir"
-    cp /tmp/tpl_no_rate_limit.conf "${svc_dir}/override.conf"
-done
-mkdir -p /etc/systemd/system/isc-dhcp-server.service.d
-mkdir -p /etc/systemd/system/cobblerd.service.d
-cat /tmp/tpl_isc_dhcp_timeout.conf >> /etc/systemd/system/isc-dhcp-server.service.d/override.conf
-cat /tmp/tpl_cobblerd_timeout.conf >> /etc/systemd/system/cobblerd.service.d/override.conf
-systemctl daemon-reload`,
-
-		`INT_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/52:54:00:10:00:01/{print $2}' | head -1)
-[ -z "$INT_IF" ] && INT_IF="enp1s0"
-MAIN_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/52:54:00:10:02:0a/{print $2}' | head -1)
-[ -z "$MAIN_IF" ] && MAIN_IF="enp2s0"
-IFACES_LINE="INTERFACESv4=\"${INT_IF} ${MAIN_IF}\""
-if grep -q 'INTERFACESv4=' /etc/default/isc-dhcp-server 2>/dev/null; then
-    sed -i "s|INTERFACESv4=.*|${IFACES_LINE}|" /etc/default/isc-dhcp-server
-else
-    echo "${IFACES_LINE}" >> /etc/default/isc-dhcp-server
-fi`,
-
-		`python3 /tmp/tpl_settings_patch.py`,
-
-		`cp /tmp/tpl_dhcp.template /etc/cobbler/dhcp.template
-cp /tmp/tpl_named.template /etc/cobbler/named.template
-mkdir -p /var/cache/bind/data
-chown -R bind:bind /var/cache/bind`,
-
-		`if [ -f /etc/default/tftpd-hpa ]; then
-    sed -i 's|^TFTP_DIRECTORY=.*|TFTP_DIRECTORY="/srv/tftpboot"|' /etc/default/tftpd-hpa
-    sed -i 's|^TFTP_OPTIONS=.*|TFTP_OPTIONS="--secure --create"|' /etc/default/tftpd-hpa
-fi
-mkdir -p /srv/tftpboot`,
-
-		`mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
-NFS_EXPORT="/var/www/cobbler/distro_mirror/ubuntu-24.04 *(ro,async,no_root_squash,no_subtree_check)"
-if ! grep -qF "/var/www/cobbler/distro_mirror/ubuntu-24.04" /etc/exports 2>/dev/null; then
-    echo "${NFS_EXPORT}" >> /etc/exports
-fi`,
-
-		`a2enmod wsgi 2>/dev/null || true
-a2enconf cobbler 2>/dev/null || true`,
-
-		`for svc in tftpd-hpa apache2 cobblerd nfs-kernel-server named; do
-    systemctl restart $svc && systemctl enable $svc
-done`,
+	if err := p.runCobblerInstallSteps(ctx, jumpIP); err != nil {
+		return err
 	}
+	if err := p.waitForCobblerd(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.publishAuthorizedKeys(ctx, jumpIP); err != nil {
+		return fmt.Errorf("publish authorized keys: %w", err)
+	}
+	return p.ensureCobblerObjects(ctx, jumpIP)
+}
 
-	for i, step := range steps {
-		logging.Info("Executing install step %d/%d...", i+1, len(steps))
-		_, err := p.pool.RunScript(ctx, jumpIP, step)
-		if err != nil {
+// runCobblerInstallSteps executes the ordered package/configuration payloads
+// and stops at the first failure.
+func (p *Phase) runCobblerInstallSteps(ctx context.Context, jumpIP string) error {
+	for i, step := range cobblerInstallSteps {
+		logging.Info("Executing install step %d/%d...", i+1, len(cobblerInstallSteps))
+		if _, err := p.pool.RunScript(ctx, jumpIP, step); err != nil {
 			return fmt.Errorf("install step %d failed: %w", i+1, err)
 		}
 	}
+	return nil
+}
 
+func (p *Phase) waitForCobblerd(ctx context.Context, jumpIP string) error {
 	logging.Info("Waiting for cobblerd to become active...")
 	err := retry.PollContext(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second, MaxInterval: 15 * time.Second, Timeout: 2 * time.Minute}, func(attemptCtx context.Context) (bool, error) {
 		_, _, code, _ := p.pool.RunCommand(attemptCtx, jumpIP, "systemctl is-active --quiet cobblerd")
@@ -267,11 +287,12 @@ done`,
 	if err != nil {
 		return fmt.Errorf("cobblerd failed to start: %w", err)
 	}
+	return nil
+}
 
-	if err := p.publishAuthorizedKeys(ctx, jumpIP); err != nil {
-		return fmt.Errorf("publish authorized keys: %w", err)
-	}
-
+// ensureCobblerObjects rebuilds the mirror only when the ISO stamp changed,
+// then makes the distro/profile match and syncs Cobbler.
+func (p *Phase) ensureCobblerObjects(ctx context.Context, jumpIP string) error {
 	mirrorFresh, objectsReady, err := p.mirrorState(ctx, jumpIP)
 	if err != nil {
 		return err
@@ -298,7 +319,6 @@ done`,
 	if err := p.syncCobbler(ctx, jumpIP); err != nil {
 		return fmt.Errorf("sync Cobbler: %w", err)
 	}
-
 	return nil
 }
 
