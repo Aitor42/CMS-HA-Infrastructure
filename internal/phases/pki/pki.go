@@ -16,28 +16,29 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Phase implements the PKI setup phase
+// Phase implements the PKI setup phase.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
-// NewPhase creates a new PKI Phase
+// NewPhase creates a new PKI Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
+// Description returns the phase description.
 func (p *Phase) Description() string {
 	return "Sets up Internal CA with step-ca"
 }
 
-// Name returns the phase name
+// Name returns the phase name.
 func (p *Phase) Name() string {
 	return "Internal CA Setup"
 }
 
-// Run runs the setup
+// Run installs step-ca, initialises the CA and distributes the load-balancer
+// certificate.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

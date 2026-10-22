@@ -14,7 +14,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Verifier struct contains dependencies for verification operations.
+// Verifier holds the dependencies needed to check the deployment.
 type Verifier struct {
 	cfg     *config.Config
 	ssh     *ssh.Pool
@@ -105,7 +105,6 @@ func (v *Verifier) phase00(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase01(ctx context.Context) CheckResult {
-	// Cobbler services + system count in single SSH session.
 	// bind9 and named are aliases for the same resolver on Ubuntu 24.04;
 	// checking both tolerates whichever alias systemd registers.
 	cmd := `for unit in cobblerd apache2 isc-dhcp-server bind9 named tftpd-hpa; do systemctl is-active $unit 2>/dev/null; done | sort -u; echo "---CMS_DELIM---"; cobbler system list | wc -l`
@@ -158,7 +157,6 @@ func countReadyNodes(nodesOut string) int {
 }
 
 func (v *Verifier) phase02(ctx context.Context) CheckResult {
-	// Puppet server + signed certs in single SSH session
 	cmd := `systemctl is-active puppetserver; echo "---CMS_DELIM---"; puppetserver ca list --all 2>/dev/null | grep -E 'Signed|\(SHA256\)' | wc -l`
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Jumpstart.IP, cmd)
 	parts := strings.Split(out, "---CMS_DELIM---")
@@ -178,8 +176,6 @@ func (v *Verifier) phase02(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase03(ctx context.Context) CheckResult {
-	// Nginx/keepalived + CA-issued cert on the LBs; apache2 + uploads mount on
-	// the CMS frontends.
 	var lbIPs []string
 	for _, lb := range v.cfg.Nodes.LBs {
 		if lb.IP != "" {
@@ -239,10 +235,9 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
 	}
 
-	// K3s cluster + MariaDB pod Running in a single SSH session. stderr is kept
-	// (no 2>/dev/null): when the API server is unreachable the count still reads
-	// 0, and the reason has to reach the failure detail instead of looking like
-	// an empty etcd cluster.
+	// stderr is kept (no 2>/dev/null): when the API server is unreachable the
+	// count still reads 0, and the reason has to reach the failure detail
+	// instead of looking like an empty etcd cluster.
 	cmd := `kubectl --request-timeout=10s get nodes; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers | wc -l`
 
 	wantNodes := len(v.cfg.Nodes.Masters) + len(v.cfg.Nodes.Workers)
@@ -312,14 +307,12 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase05(ctx context.Context) CheckResult {
-	// Prometheus + Grafana: every listed unit must be active.
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Monitor.IP, "systemctl is-active prometheus grafana-server")
 	pass := err == nil && serviceStatesActive(out)
 	return CheckResult{"Phase 05", "Prometheus & Grafana", pass, ""}
 }
 
 func (v *Verifier) phase06(ctx context.Context) CheckResult {
-	// UFW + ip_forward on router in single SSH session
 	cmd := `cat /proc/sys/net/ipv4/ip_forward; echo "---CMS_DELIM---"; ufw status`
 	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Router.IP, cmd)
 	parts := strings.Split(out, "---CMS_DELIM---")
@@ -336,7 +329,6 @@ func (v *Verifier) phase06(ctx context.Context) CheckResult {
 }
 
 func (v *Verifier) phase07(ctx context.Context) CheckResult {
-	// DRBD status on master nodes concurrently
 	var masterIPs []string
 	for _, m := range v.cfg.Nodes.Masters {
 		if m.IP != "" {

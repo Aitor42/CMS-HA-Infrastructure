@@ -14,28 +14,29 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Phase implements the Monitoring setup phase
+// Phase implements the Monitoring setup phase.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
-// NewPhase creates a new Monitoring Phase
+// NewPhase creates a new Monitoring Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
+// Description returns the phase description.
 func (p *Phase) Description() string {
-	return "Sets up Prometheus and Grafana monitoring"
+	return "Verifies the monitoring stack and deploys its alert rules"
 }
 
-// Name returns the phase name
+// Name returns the phase name.
 func (p *Phase) Name() string {
 	return "Monitoring Setup"
 }
 
-// Run runs the setup
+// Run verifies the exporters, refreshes the Prometheus token, deploys the alert
+// rules and checks the Prometheus API.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

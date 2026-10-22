@@ -11,28 +11,29 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Phase implements the NGINX/Wordpress setup phase
+// Phase implements the NGINX/WordPress setup phase.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
-// NewPhase creates a new Nginx Phase
+// NewPhase creates a new Nginx Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
+// Description returns the phase description.
 func (p *Phase) Description() string {
-	return "Verifies NGINX and Apache configurations"
+	return "Converges the CMS frontends and verifies nginx, Apache, NFS and HTTPS"
 }
 
-// Name returns the phase name
+// Name returns the phase name.
 func (p *Phase) Name() string {
 	return "NGINX & WordPress Setup"
 }
 
-// Run runs the setup
+// Run converges the CMS frontends and verifies the load balancers, frontends,
+// NFS export and HTTPS path.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

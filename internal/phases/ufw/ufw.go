@@ -11,28 +11,28 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Phase implements the UFW setup phase
+// Phase implements the UFW setup phase.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
-// NewPhase creates a new UFW Phase
+// NewPhase creates a new UFW Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
+// Description returns the phase description.
 func (p *Phase) Description() string {
 	return "Sets up UFW rules and NAT"
 }
 
-// Name returns the phase name
+// Name returns the phase name.
 func (p *Phase) Name() string {
 	return "UFW Setup"
 }
 
-// Run runs the setup
+// Run re-applies the router's NAT policy and verifies UFW is active on every node.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

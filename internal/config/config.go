@@ -1,3 +1,4 @@
+// Package config loads, validates and persists the lab configuration.
 package config
 
 import (
@@ -49,11 +50,13 @@ type Config struct {
 	Traffic    TrafficConfig    `yaml:"traffic"`
 }
 
+// VMConfig holds the storage directory and libvirt URI for the lab VMs.
 type VMConfig struct {
 	StorageDir string `yaml:"storage_dir"`
 	LibvirtURI string `yaml:"libvirt_uri"`
 }
 
+// SSHConfig controls the deploy account, key and host-key verification.
 type SSHConfig struct {
 	// User is the non-root account the orchestrator logs in as. Privileged
 	// commands are elevated with `sudo -n`; empty falls back to "root" for
@@ -84,11 +87,13 @@ func (c *Config) SSHKnownHostsFile() string {
 	return ExpandPath("~/.ssh/cms_known_hosts")
 }
 
+// NetworkConfig describes the internal and main lab networks.
 type NetworkConfig struct {
 	Internal NetworkDetail `yaml:"internal"`
 	Main     NetworkDetail `yaml:"main"`
 }
 
+// NetworkDetail is one libvirt network and its addressing.
 type NetworkDetail struct {
 	CIDR    string `yaml:"cidr"`
 	Gateway string `yaml:"gateway"`
@@ -99,6 +104,7 @@ type NetworkDetail struct {
 	VIP string `yaml:"vip"`
 }
 
+// NodesConfig lists every node in the topology.
 type NodesConfig struct {
 	Router       NodeDetail   `yaml:"router"`
 	Jumpstart    NodeDetail   `yaml:"jumpstart"`
@@ -111,6 +117,7 @@ type NodesConfig struct {
 	Hotdesks     HotdesksConf `yaml:"hotdesks"`
 }
 
+// NodeDetail describes one VM's addresses, MACs and resources.
 type NodeDetail struct {
 	Name         string `yaml:"name"`
 	IP           string `yaml:"ip"`
@@ -127,6 +134,7 @@ type NodeDetail struct {
 	DRBDDiskGB   int    `yaml:"drbd_disk_gb"`
 }
 
+// HotdesksConf controls the optional hotdesk cluster.
 type HotdesksConf struct {
 	Count        int `yaml:"count"`
 	Max          int `yaml:"max"`
@@ -137,6 +145,7 @@ type HotdesksConf struct {
 	BaseIPOctet  int `yaml:"base_ip_octet"`
 }
 
+// DatabaseConfig holds the MariaDB credentials and database name.
 type DatabaseConfig struct {
 	Name             string `yaml:"name"`
 	User             string `yaml:"user"`
@@ -146,20 +155,24 @@ type DatabaseConfig struct {
 	Port             int    `yaml:"port"`
 }
 
+// WordPressConfig holds the WordPress admin credentials.
 type WordPressConfig struct {
 	AdminPassword string `yaml:"admin_password"`
 }
 
+// MonitoringConfig controls the monitoring exporters.
 type MonitoringConfig struct {
 	Exporters ExportersConfig `yaml:"exporters"`
 }
 
+// ExportersConfig pins the exporter versions used by the monitor.
 type ExportersConfig struct {
 	NginxVersion  string `yaml:"nginx_version"`
 	ApacheVersion string `yaml:"apache_version"`
 	MysqldVersion string `yaml:"mysqld_version"`
 }
 
+// PKIConfig configures the internal step-ca and load-balancer certificate.
 type PKIConfig struct {
 	CAPort              int    `yaml:"ca_port"`
 	ProvisionerPassword string `yaml:"provisioner_password"`
@@ -232,6 +245,7 @@ func (c *Config) LBTLSCertLifetimeHours() int {
 	return 2160 // 90 days
 }
 
+// DeployConfig controls deployment timing and installer batching.
 type DeployConfig struct {
 	SSHTimeout   time.Duration `yaml:"ssh_timeout"`
 	StaggerDelay time.Duration `yaml:"stagger_delay"`
@@ -492,7 +506,7 @@ func LoadWithKey(path string, keyPath string) (*Config, error) {
 	c.VM.StorageDir = ExpandPath(c.VM.StorageDir)
 	c.SSH.PrivateKey = ExpandPath(c.SSH.PrivateKey)
 
-	// Allow NUM_HOTDESKS environment variable to override hotdesks count dynamically (matching scripts/config.sh)
+	// NUM_HOTDESKS overrides the configured hotdesk count at runtime.
 	if envHotdesks := os.Getenv("NUM_HOTDESKS"); envHotdesks != "" {
 		if val, err := strconv.Atoi(envHotdesks); err == nil && val > 0 {
 			c.Nodes.Hotdesks.Count = val

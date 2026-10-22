@@ -19,28 +19,29 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Phase implements the DRBD setup phase
+// Phase implements the DRBD setup phase.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
-// NewPhase creates a new DRBD Phase
+// NewPhase creates a new DRBD Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
+// Description returns the phase description.
 func (p *Phase) Description() string {
 	return "Sets up DRBD replication for MariaDB data"
 }
 
-// Name returns the phase name
+// Name returns the phase name.
 func (p *Phase) Name() string {
 	return "DRBD Setup"
 }
 
-// Run runs the DRBD setup
+// Run configures DRBD, fencing and the promote-on-boot guard, then verifies
+// that both peers are connected with up-to-date disks.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

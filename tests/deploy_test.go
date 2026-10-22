@@ -21,10 +21,8 @@ func TestDeploy_BuildPhaseList(t *testing.T) {
 		Libvirt: &libvirt.Client{},
 	}
 
-	// Full list with VM creation
+	// Build both variants so the assertions can compare them.
 	phasesAll := orch.BuildPhaseList(deploy.DeployOpts{SkipVMCreate: false})
-
-	// List skipping VM creation
 	phasesSkipVM := orch.BuildPhaseList(deploy.DeployOpts{SkipVMCreate: true})
 
 	// Invariants instead of brittle exact counts: skipping VM creation must
@@ -46,7 +44,7 @@ func TestDeploy_BuildPhaseList(t *testing.T) {
 		t.Errorf("skip-VM phase list is not a clean subsequence of the full list (matched %d of %d)", j, len(phasesSkipVM))
 	}
 
-	// Test DryRun
+	// A dry run must return without touching libvirt.
 	err := orch.Deploy(context.Background(), deploy.DeployOpts{SkipVMCreate: true, DryRun: true})
 	if err != nil {
 		t.Errorf("expected dry-run to succeed, got %v", err)

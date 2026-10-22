@@ -26,28 +26,29 @@ import (
 // genuinely broken cluster into a very long hang.
 const apiRetryBudget = 3 * time.Minute
 
-// Phase implements the Kubernetes setup phase
+// Phase implements the Kubernetes setup phase.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
-// NewPhase creates a new Kubernetes Phase
+// NewPhase creates a new Kubernetes Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
+// Description returns the phase description.
 func (p *Phase) Description() string {
 	return "Sets up Kubernetes cluster (K3s) and deploys MariaDB"
 }
 
-// Name returns the phase name
+// Name returns the phase name.
 func (p *Phase) Name() string {
 	return "Kubernetes Setup"
 }
 
-// Run runs the Kubernetes setup
+// Run joins the control-plane servers and applies the kustomize manifests,
+// including the database and backup resources.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

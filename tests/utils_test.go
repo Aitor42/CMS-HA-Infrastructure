@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,6 +11,16 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
 )
+
+func newTestPool(t *testing.T) *ssh.Pool {
+	t.Helper()
+	s, err := ssh.NewPool(filepath.Join(t.TempDir(), "id_ed25519"), 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("new ssh pool: %v", err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
 
 func TestUtils_NewFailoverTester(t *testing.T) {
 	cfg := &config.Config{
@@ -75,17 +86,13 @@ func TestUtils_CheckSSH_Concurrent(t *testing.T) {
 			Router:    config.NodeDetail{Name: "vm2", IP: "127.0.0.2"},
 		},
 	}
-	s, err := ssh.NewPool("/tmp/dummy_key", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("new ssh pool: %v", err)
-	}
-	defer s.Close()
+	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Runs concurrently across nodes and should not data race
+	// CheckSSH fans out across nodes; the race detector covers the shared pool.
 	_ = utils.CheckSSH(ctx, cfg, s, l)
 }
 
@@ -99,19 +106,15 @@ func TestUtils_VerifyAll_Concurrent(t *testing.T) {
 			Masters:   []config.NodeDetail{{Name: "master1", IP: "127.0.0.5"}},
 		},
 	}
-	s, err := ssh.NewPool("/tmp/dummy_key", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("new ssh pool: %v", err)
-	}
-	defer s.Close()
+	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
 	v := utils.NewVerifier(cfg, s, l)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// VerifyAll runs all 8 phases concurrently. It will fail because dummy IPs are unreachable,
-	// but it must execute all phases without deadlocks, panics, or data races.
+	// VerifyAll runs every check concurrently. The dummy IPs make it fail, but
+	// it must complete without deadlocks, panics or data races.
 	if verr := v.VerifyAll(ctx); verr == nil {
 		t.Errorf("expected verification to fail with unreachable dummy nodes")
 	}
@@ -125,11 +128,7 @@ func TestUtils_FailoverTester_SkipConditions(t *testing.T) {
 			Workers:      []config.NodeDetail{{Name: "worker1"}}, // < 2
 		},
 	}
-	s, err := ssh.NewPool("/tmp/dummy_key", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("new ssh pool: %v", err)
-	}
-	defer s.Close()
+	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
 	ft := utils.NewFailoverTester(cfg, s, l)

@@ -16,11 +16,13 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// Phase installs the Puppet server and converges every node.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
+// NewPhase creates a new Puppet Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }

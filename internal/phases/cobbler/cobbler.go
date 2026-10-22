@@ -17,11 +17,13 @@ import (
 	"github.com/pkg/sftp"
 )
 
+// Phase installs and configures the Cobbler provisioning server.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
+// NewPhase creates a new Cobbler Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }

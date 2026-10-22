@@ -53,7 +53,7 @@ func backoffInterval(cfg Config, attempt int) time.Duration {
 	return interval
 }
 
-// Do executes fn and retries it until it returns nil or the limits in cfg are reached.
+// Do executes fn until it succeeds or the retry limits in cfg are reached.
 func Do(ctx context.Context, cfg Config, fn func() error) error {
 	return DoContext(ctx, cfg, func(context.Context) error { return fn() })
 }
@@ -96,14 +96,13 @@ func DoContext(ctx context.Context, cfg Config, fn func(context.Context) error) 
 			timer.Stop()
 			return fmt.Errorf("retry context cancelled: %w (last error: %v)", ctx.Err(), lastErr)
 		case <-timer.C:
-			// backoff elapsed; retry the operation
 		}
 	}
 
 	return fmt.Errorf("max attempts (%d) reached: %w", cfg.MaxAttempts, lastErr)
 }
 
-// Poll executes fn and retries until fn returns (true, nil) or the limits in cfg are reached.
+// Poll executes fn until it reports success or the retry limits in cfg are reached.
 func Poll(ctx context.Context, cfg Config, fn func() (bool, error)) error {
 	return PollContext(ctx, cfg, func(context.Context) (bool, error) { return fn() })
 }
@@ -146,7 +145,6 @@ func PollContext(ctx context.Context, cfg Config, fn func(context.Context) (bool
 			timer.Stop()
 			return fmt.Errorf("poll context cancelled: %w", ctx.Err())
 		case <-timer.C:
-			// backoff elapsed; re-check the condition
 		}
 	}
 

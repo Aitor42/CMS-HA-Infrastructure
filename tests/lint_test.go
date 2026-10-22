@@ -22,9 +22,8 @@ func TestLint_FindModuleRoot(t *testing.T) {
 }
 
 // TestLint_FindFiles uses a throwaway tree instead of the repository so the
-// assertion is stable while the v1 shell scripts are migrated to Go: it checks
-// the walk itself (recursion, pattern matching and the skip list), not whether
-// scripts/ still happens to contain a .sh file.
+// assertion only tests the walk itself (recursion, pattern matching and the
+// skip list), not whether scripts/ still happens to contain a .sh file.
 func TestLint_FindFiles(t *testing.T) {
 	root := t.TempDir()
 	files := []string{

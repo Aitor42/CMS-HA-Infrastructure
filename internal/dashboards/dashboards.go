@@ -153,8 +153,8 @@ func Home(ds []Dashboard) (Dashboard, bool) {
 	return Dashboard{}, false
 }
 
-// Queries returns every panel query with a human-readable origin, so a failing
-// gate can name the panel an operator would have to look at.
+// Query is one panel query with a human-readable origin, so a failing gate can
+// name the panel an operator would have to look at.
 type Query struct {
 	Dashboard string
 	Panel     string

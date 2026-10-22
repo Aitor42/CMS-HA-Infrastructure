@@ -27,8 +27,8 @@ var trafficCmd = &cobra.Command{
 		if internal && external {
 			return fmt.Errorf("--internal and --external are mutually exclusive")
 		}
-		// The external mode is the default; "--external" is redundant but now
-		// explicit, and conflicting flags are rejected instead of ignored.
+		// External mode is the default; --internal selects the other mode and
+		// combining both flags is rejected above.
 		mode := "external"
 		if internal {
 			mode = "internal"

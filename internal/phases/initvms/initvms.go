@@ -59,7 +59,8 @@ func NewPhaseWithOpts(cfg *config.Config, pool *ssh.Pool, lv *libvirt.Client, op
 func (p *Phase) Name() string        { return "00-init-vms" }
 func (p *Phase) Description() string { return "Initialize libvirt networks and VMs" }
 
-// Run executes the init-vms phase.
+// Run provisions the libvirt networks and VMs, or removes them when cleanup is
+// requested.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()

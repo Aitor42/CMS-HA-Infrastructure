@@ -14,11 +14,13 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// Phase repairs SSH access and redistributes the deploy key.
 type Phase struct {
 	cfg  *config.Config
 	pool *ssh.Pool
 }
 
+// NewPhase creates a new SSH-repair Phase.
 func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }

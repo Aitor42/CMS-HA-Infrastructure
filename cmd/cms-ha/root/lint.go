@@ -17,7 +17,7 @@ var lintCmd = &cobra.Command{
 		k8s, _ := cmd.Flags().GetBool("k8s")
 		ansibleLint, _ := cmd.Flags().GetBool("ansible")
 
-		// If no specific flag, default to all
+		// With no specific flag, run every linter.
 		if !goLint && !shell && !yaml && !puppetF && !k8s && !ansibleLint {
 			all = true
 		}

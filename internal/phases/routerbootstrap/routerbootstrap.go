@@ -81,7 +81,8 @@ func (p *Phase) Description() string {
 	return "Give the router its gateway role (addresses, forwarding, NAT) before any node needs the internet"
 }
 
-// Run runs the bootstrap.
+// Run applies the router's gateway configuration and verifies outbound
+// connectivity from the router and a client node.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
