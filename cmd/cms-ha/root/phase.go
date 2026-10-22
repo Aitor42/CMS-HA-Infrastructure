@@ -2,6 +2,7 @@ package root
 
 import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/backup"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/cobbler"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/drbd"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/initvms"
@@ -26,8 +27,8 @@ func init() {
 	rootCmd.AddCommand(phaseCmd)
 
 	initVMsCmd := &cobra.Command{
-		Use:   "init-vms",
-		Short: "Initialize libvirt networks and VMs",
+		Use:   catalog.InitVMs.CLI,
+		Short: catalog.InitVMs.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jumpstartOnly, _ := cmd.Flags().GetBool("jumpstart-only")
 			nodesOnly, _ := cmd.Flags().GetBool("nodes-only")
@@ -84,7 +85,7 @@ func init() {
 		phaseCmd.AddCommand(cmd)
 	}
 
-	addPhaseCmd("setup-cobbler", "Install and configure the Cobbler provisioning server", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.Cobbler.CLI, catalog.Cobbler.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -96,9 +97,9 @@ func init() {
 		defer pool.Close()
 		p := cobbler.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "cobbler")
+	}, catalog.Cobbler.Aliases...)
 
-	addPhaseCmd("register-nodes", "Register client nodes with Cobbler", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.RegisterNodes.CLI, catalog.RegisterNodes.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -110,9 +111,9 @@ func init() {
 		defer pool.Close()
 		p := registernodes.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "register")
+	}, catalog.RegisterNodes.Aliases...)
 
-	addPhaseCmd("repair-ssh", "Repair SSH host keys across all nodes", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.RepairSSH.CLI, catalog.RepairSSH.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -124,9 +125,9 @@ func init() {
 		defer pool.Close()
 		p := repairssh.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "ssh")
+	}, catalog.RepairSSH.Aliases...)
 
-	addPhaseCmd("bootstrap-router", "Give the router its gateway role (addresses, forwarding, NAT)", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.RouterBootstrap.CLI, catalog.RouterBootstrap.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -138,9 +139,9 @@ func init() {
 		defer pool.Close()
 		p := routerbootstrap.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "router-bootstrap")
+	}, catalog.RouterBootstrap.Aliases...)
 
-	addPhaseCmd("setup-puppet", "Install and configure the Puppet server", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.Puppet.CLI, catalog.Puppet.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -152,9 +153,9 @@ func init() {
 		defer pool.Close()
 		p := puppet.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "puppet")
+	}, catalog.Puppet.Aliases...)
 
-	addPhaseCmd("setup-drbd", "Configure DRBD replication on the master nodes", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.DRBD.CLI, catalog.DRBD.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -166,18 +167,18 @@ func init() {
 		defer pool.Close()
 		p := drbd.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "drbd")
+	}, catalog.DRBD.Aliases...)
 
-	addPhaseCmd("setup-backup", "Configure the S3 (Garage) backup stack", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.Backup.CLI, catalog.Backup.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
 		}
 		p := backup.NewPhase(cfg)
 		return p.Run(cmd.Context())
-	}, "backup")
+	}, catalog.Backup.Aliases...)
 
-	addPhaseCmd("setup-kubernetes", "Install and configure the K3s cluster", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.Kubernetes.CLI, catalog.Kubernetes.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -189,9 +190,9 @@ func init() {
 		defer pool.Close()
 		p := kubernetes.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "kubernetes", "k8s")
+	}, catalog.Kubernetes.Aliases...)
 
-	addPhaseCmd("setup-nginx-wordpress", "Configure Nginx, WordPress and the CMS frontends", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.Nginx.CLI, catalog.Nginx.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -203,9 +204,9 @@ func init() {
 		defer pool.Close()
 		p := nginx.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "setup-nginx", "nginx", "wordpress")
+	}, catalog.Nginx.Aliases...)
 
-	addPhaseCmd("setup-monitoring", "Install and configure Prometheus and Grafana", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.Monitoring.CLI, catalog.Monitoring.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -217,9 +218,9 @@ func init() {
 		defer pool.Close()
 		p := monitoring.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "monitoring")
+	}, catalog.Monitoring.Aliases...)
 
-	addPhaseCmd("setup-ufw", "Configure UFW firewall rules", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.UFW.CLI, catalog.UFW.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -231,9 +232,9 @@ func init() {
 		defer pool.Close()
 		p := ufw.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "ufw")
+	}, catalog.UFW.Aliases...)
 
-	addPhaseCmd("setup-ca", "Set up the internal certificate authority (PKI)", func(cmd *cobra.Command) error {
+	addPhaseCmd(catalog.PKI.CLI, catalog.PKI.Short, func(cmd *cobra.Command) error {
 		cfg, err := loadConfig()
 		if err != nil {
 			return err
@@ -245,5 +246,5 @@ func init() {
 		defer pool.Close()
 		p := pki.NewPhase(cfg, pool)
 		return p.Run(cmd.Context())
-	}, "ca", "pki")
+	}, catalog.PKI.Aliases...)
 }

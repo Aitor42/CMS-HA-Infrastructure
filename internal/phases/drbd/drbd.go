@@ -15,6 +15,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -31,14 +32,10 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Sets up DRBD replication for MariaDB data"
-}
+func (p *Phase) Description() string { return catalog.DRBD.Description }
 
 // Name returns the phase name.
-func (p *Phase) Name() string {
-	return "DRBD Setup"
-}
+func (p *Phase) Name() string { return catalog.DRBD.Name }
 
 // Run configures DRBD, fencing and the promote-on-boot guard, then verifies
 // that both peers are connected with up-to-date disks.

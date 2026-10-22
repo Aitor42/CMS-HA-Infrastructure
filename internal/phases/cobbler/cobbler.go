@@ -12,6 +12,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/pkg/sftp"
@@ -127,10 +128,8 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-func (p *Phase) Name() string { return "01-setup-cobbler" }
-func (p *Phase) Description() string {
-	return "Install and configure Cobbler PXE provisioning server on Jumpstart"
-}
+func (p *Phase) Name() string        { return catalog.Cobbler.Name }
+func (p *Phase) Description() string { return catalog.Cobbler.Description }
 
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())

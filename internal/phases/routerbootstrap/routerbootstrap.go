@@ -38,6 +38,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/ufw"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -74,12 +75,10 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 }
 
 // Name returns the phase name.
-func (p *Phase) Name() string { return "Router Bootstrap" }
+func (p *Phase) Name() string { return catalog.RouterBootstrap.Name }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Give the router its gateway role (addresses, forwarding, NAT) before any node needs the internet"
-}
+func (p *Phase) Description() string { return catalog.RouterBootstrap.Description }
 
 // Run applies the router's gateway configuration and verifies outbound
 // connectivity from the router and a client node.

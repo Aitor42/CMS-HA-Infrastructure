@@ -20,6 +20,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
 )
@@ -59,8 +60,8 @@ func NewPhaseWithOpts(cfg *config.Config, pool ssh.Executor, lv *libvirt.Client,
 	return &Phase{cfg: cfg, pool: pool, lv: lv, opts: opts}
 }
 
-func (p *Phase) Name() string        { return "00-init-vms" }
-func (p *Phase) Description() string { return "Initialize libvirt networks and VMs" }
+func (p *Phase) Name() string        { return catalog.InitVMs.Name }
+func (p *Phase) Description() string { return catalog.InitVMs.Description }
 
 // Run provisions the libvirt networks and VMs, or removes them when cleanup is
 // requested.

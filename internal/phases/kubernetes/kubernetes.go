@@ -16,6 +16,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -38,14 +39,10 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Sets up Kubernetes cluster (K3s) and deploys MariaDB"
-}
+func (p *Phase) Description() string { return catalog.Kubernetes.Description }
 
 // Name returns the phase name.
-func (p *Phase) Name() string {
-	return "Kubernetes Setup"
-}
+func (p *Phase) Name() string { return catalog.Kubernetes.Name }
 
 // Run joins the control-plane servers and applies the kustomize manifests,
 // including the database and backup resources.

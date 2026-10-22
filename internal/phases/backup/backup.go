@@ -23,6 +23,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/container"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 )
 
@@ -46,12 +47,10 @@ func NewPhase(cfg *config.Config) phases.Phase {
 }
 
 // Name returns the phase name.
-func (p *Phase) Name() string { return "Backup Store Setup" }
+func (p *Phase) Name() string { return catalog.Backup.Name }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Deploys the off-DRBD Garage S3 backup store on the hypervisor"
-}
+func (p *Phase) Description() string { return catalog.Backup.Description }
 
 // Run deploys Garage as a container on the hypervisor, with its data volume
 // outside the DRBD device, and makes sure the backup bucket exists.

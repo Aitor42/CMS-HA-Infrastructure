@@ -8,6 +8,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -23,14 +24,10 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Sets up UFW rules and NAT"
-}
+func (p *Phase) Description() string { return catalog.UFW.Description }
 
 // Name returns the phase name.
-func (p *Phase) Name() string {
-	return "UFW Setup"
-}
+func (p *Phase) Name() string { return catalog.UFW.Name }
 
 // Run re-applies the router's NAT policy and verifies UFW is active on every node.
 func (p *Phase) Run(ctx context.Context) error {

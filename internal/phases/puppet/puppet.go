@@ -14,6 +14,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -28,10 +29,8 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-func (p *Phase) Name() string { return "04-setup-puppet" }
-func (p *Phase) Description() string {
-	return "Install Puppet Server on Jumpstart and Puppet Agents on all nodes"
-}
+func (p *Phase) Name() string        { return catalog.Puppet.Name }
+func (p *Phase) Description() string { return catalog.Puppet.Description }
 
 // tailLines returns the last few non-empty lines of s for error reporting.
 func tailLines(s string) string {

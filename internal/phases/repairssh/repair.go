@@ -11,6 +11,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -25,10 +26,8 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-func (p *Phase) Name() string { return "03-repair-ssh" }
-func (p *Phase) Description() string {
-	return "Repair SSH connectivity and distribute keys across all nodes"
-}
+func (p *Phase) Name() string        { return catalog.RepairSSH.Name }
+func (p *Phase) Description() string { return catalog.RepairSSH.Description }
 
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())

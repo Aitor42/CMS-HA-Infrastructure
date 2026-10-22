@@ -10,6 +10,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -26,14 +27,10 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Verifies the monitoring stack and deploys its alert rules"
-}
+func (p *Phase) Description() string { return catalog.Monitoring.Description }
 
 // Name returns the phase name.
-func (p *Phase) Name() string {
-	return "Monitoring Setup"
-}
+func (p *Phase) Name() string { return catalog.Monitoring.Name }
 
 // Run verifies the exporters, refreshes the Prometheus token, deploys the alert
 // rules and checks the Prometheus API.

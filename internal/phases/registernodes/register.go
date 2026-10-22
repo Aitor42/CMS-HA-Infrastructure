@@ -8,6 +8,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -22,8 +23,8 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-func (p *Phase) Name() string        { return "02-register-nodes" }
-func (p *Phase) Description() string { return "Register all nodes in Cobbler for PXE boot" }
+func (p *Phase) Name() string        { return catalog.RegisterNodes.Name }
+func (p *Phase) Description() string { return catalog.RegisterNodes.Description }
 
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())

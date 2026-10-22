@@ -8,6 +8,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -23,14 +24,10 @@ func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 }
 
 // Description returns the phase description.
-func (p *Phase) Description() string {
-	return "Converges the CMS frontends and verifies nginx, Apache, NFS and HTTPS"
-}
+func (p *Phase) Description() string { return catalog.Nginx.Description }
 
 // Name returns the phase name.
-func (p *Phase) Name() string {
-	return "NGINX & WordPress Setup"
-}
+func (p *Phase) Name() string { return catalog.Nginx.Name }
 
 // Run converges the CMS frontends and verifies the load balancers, frontends,
 // NFS export and HTTPS path.
