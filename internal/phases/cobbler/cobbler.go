@@ -349,8 +349,18 @@ if [ -f "$ISO" ] && [ -f "$STAMP" ] && [ -f "$MIRROR/casper/.tcp-patched" ] \
     fresh=1
 fi
 objects=0
-if cobbler distro report --name="{{distro}}" >/dev/null 2>&1 \
-   && cobbler profile report --name="{{profile}}" >/dev/null 2>&1; then
+has_distro=0
+has_profile=0
+# cobbler distro report and cobbler profile report exit 0 even when the
+# object does not exist (Cobbler 3.3 prints "No distro/profile found"), so
+# their exit status cannot be used as an existence check.
+if cobbler distro list 2>/dev/null | sed 's/^[[:space:]]*//' | grep -Fqx "{{distro}}"; then
+    has_distro=1
+fi
+if cobbler profile list 2>/dev/null | sed 's/^[[:space:]]*//' | grep -Fqx "{{profile}}"; then
+    has_profile=1
+fi
+if [ "$has_distro" = 1 ] && [ "$has_profile" = 1 ]; then
     objects=1
 fi
 echo "mirror=$fresh objects=$objects"`)
@@ -414,14 +424,23 @@ mkdir -p /etc/cobbler/autoinstall_templates /var/lib/cobbler/templates
 cp /tmp/tpl_autoinstall.yaml /etc/cobbler/autoinstall_templates/ubuntu-24.04-autoinstall.yaml
 cp /etc/cobbler/autoinstall_templates/ubuntu-24.04-autoinstall.yaml /var/lib/cobbler/templates/ubuntu-24.04-autoinstall.yaml
 
-if ! cobbler distro report --name="{{distro}}" >/dev/null 2>&1; then
+# cobbler distro report and cobbler profile report return exit 0 even when
+# the object is missing, so use the list commands for existence checks.
+distro_exists() {
+    cobbler distro list 2>/dev/null | sed 's/^[[:space:]]*//' | grep -Fqx "{{distro}}"
+}
+profile_exists() {
+    cobbler profile list 2>/dev/null | sed 's/^[[:space:]]*//' | grep -Fqx "{{profile}}"
+}
+
+if ! distro_exists; then
     cobbler distro add --name="{{distro}}" \
         --kernel="{{mirror}}/casper/vmlinuz" \
         --initrd="{{mirror}}/casper/initrd" \
         --breed=ubuntu
 fi
 
-if cobbler profile report --name="{{profile}}" >/dev/null 2>&1; then
+if profile_exists; then
     cobbler profile edit --name="{{profile}}" \
         --distro="{{distro}}" \
         --autoinstall="ubuntu-24.04-autoinstall.yaml"
@@ -431,8 +450,14 @@ else
         --autoinstall="ubuntu-24.04-autoinstall.yaml" \
         --autoinstall-meta="hostname=default"
 fi`)
-	_, err := p.pool.RunScript(ctx, jumpIP, script)
-	return err
+	out, err := p.pool.RunScript(ctx, jumpIP, script)
+	if err != nil {
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			return fmt.Errorf("%w\nStdout: %s", err, trimmed)
+		}
+		return err
+	}
+	return nil
 }
 
 func (p *Phase) syncCobbler(ctx context.Context, jumpIP string) error {

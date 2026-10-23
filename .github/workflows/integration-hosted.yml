@@ -553,6 +553,22 @@ jobs:
                 echo "-- services --"
                 systemctl is-active named isc-dhcp-server apache2 cobblerd \
                   tftpd-hpa nfs-kernel-server 2>&1 | tr "\n" " "; echo
+                echo "-- cobbler version --"
+                sudo cobbler --version 2>&1 | head -5 || true
+                echo "-- cobbler objects --"
+                sudo cobbler distro list 2>&1 || true
+                sudo cobbler profile list 2>&1 || true
+                echo "-- distro mirror --"
+                sudo ls -l /var/www/cobbler/distro_mirror/ubuntu-24.04/casper/ \
+                  2>&1 | head -20 || true
+                sudo cat /var/lib/cobbler/isos/.cms-mirror-stamp 2>&1 || true
+                sudo stat -c "ISO %s bytes, mtime %Y" \
+                  /var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso \
+                  2>&1 || true
+                echo "-- cobblerd journal (tail 80) --"
+                sudo journalctl -u cobblerd --no-pager -n 80 2>/dev/null || true
+                echo "-- cobbler log (tail 80) --"
+                sudo tail -80 /var/log/cobbler/cobbler.log 2>/dev/null || true
                 echo "-- apache access log (tail 40) --"
                 sudo tail -40 /var/log/apache2/access.log 2>/dev/null || true
                 echo "-- named journal (tail 30) --"
