@@ -855,14 +855,18 @@ func (p *Pool) ForgetHost(host string) {
 		return
 	}
 
+	// Serialise with verifyHostKey: a concurrent first-contact handshake may be
+	// about to append the old key. Dropping the file entry before taking the
+	// lock would let that append resurrect it after the removal.
+	p.knownHostsMu.Lock()
+	defer p.knownHostsMu.Unlock()
+
 	if err := RemoveHostsFromKnownHosts(p.knownHostsPath, []string{host}); err != nil {
 		slog.Warn("could not drop the pinned host key",
 			"host", host, "path", p.knownHostsPath, "error", err)
 	}
 
-	p.knownHostsMu.Lock()
 	p.knownHostsCallback = nil
-	p.knownHostsMu.Unlock()
 }
 
 // AptLockWaitSnippet is the shared shell preamble that waits for
