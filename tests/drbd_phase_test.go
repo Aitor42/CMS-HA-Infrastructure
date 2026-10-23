@@ -67,6 +67,9 @@ func TestDRBDPhaseRun(t *testing.T) {
 		if !hasScript(fake.Scripts, ip, "drbdadm create-md cms_data --force") {
 			t.Errorf("%s never initialized DRBD metadata", ip)
 		}
+		if !hasCommand(fake.Commands, ip, `linux-modules-extra-$(uname -r)`) {
+			t.Errorf("%s did not install the DRBD kernel module package", ip)
+		}
 		if !hasCommand(fake.Commands, ip, "/dev/drbd0 /mnt/data/mariadb") {
 			t.Errorf("%s did not get the fstab entry", ip)
 		}

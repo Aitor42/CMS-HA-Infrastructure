@@ -83,11 +83,14 @@ func (p *Phase) Run(ctx context.Context) error {
 	return nil
 }
 
-// installDRBD installs drbd-utils on both peers in parallel.
+// installDRBD installs drbd-utils and the kernel module on both peers in
+// parallel. The PXE install pulls linux-modules-extra in as part of the
+// server seed, but the cloud image does not, so drbd.ko is absent there and
+// `modprobe drbd` fails during metadata initialization.
 func (p *Phase) installDRBD(ctx context.Context, pair []config.NodeDetail) error {
-	logging.Info("Installing DRBD utils on master nodes...")
+	logging.Info("Installing DRBD utils and kernel module on master nodes...")
 	installCmd := ssh.AptLockWaitSnippet + `
-apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
+apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils "linux-modules-extra-$(uname -r)"
 `
 
 	for _, r := range p.pool.RunParallel(ctx, []string{pair[0].IP, pair[1].IP}, installCmd) {
