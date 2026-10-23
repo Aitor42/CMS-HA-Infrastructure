@@ -39,6 +39,10 @@ on:
         type: choice
         options: ["iso", "cloud"]
         default: "iso"
+      fast_provisioning:
+        description: "Provision client nodes from the cloud image instead of PXE (opt-in fast path)"
+        type: boolean
+        default: false
 
 concurrency:
   group: integration-hosted-${{ github.ref }}
@@ -52,6 +56,7 @@ env:
   STATE_FILE: deploy.state
   ARTIFACTS_DIR: integration-artifacts
   JUMPSTART_IMAGE: ${{ inputs.jumpstart_image }}
+  FAST_PROVISIONING: ${{ inputs.fast_provisioning }}
 
 jobs:
   integration:
@@ -250,7 +255,7 @@ jobs:
       # Both stages need the lab installed; `full` then continues with the
       # service phases, which find the client VMs already defined and skip
       # their creation.
-      - name: Provision the lab (jumpstart, Cobbler and PXE clients)
+      - name: Provision the lab (jumpstart, Cobbler and client nodes)
         run: |
           set -o pipefail
           mkdir -p "$ARTIFACTS_DIR"
@@ -275,10 +280,21 @@ jobs:
 
           make build
 
+          # `--fast-provisioning` mirrors `deploy --fast-provisioning`: both the
+          # jumpstart and every client boot from the cloud image. The ISO is
+          # still downloaded above because setup-cobbler transfers it to the
+          # jumpstart and the verification gate checks Cobbler; only the ~31m
+          # PXE install disappears.
+          if [ "$FAST_PROVISIONING" = "true" ]; then
+            EFFECTIVE_JUMPSTART_IMAGE=cloud
+          else
+            EFFECTIVE_JUMPSTART_IMAGE="$JUMPSTART_IMAGE"
+          fi
+
           # The cloud jumpstart is opt-in: download the ~600 MB base image once
           # and let init-vms boot a qcow2 overlay instead of running Subiquity.
           # The ISO path stays the default and remains the deliverable gate.
-          if [ "$JUMPSTART_IMAGE" = "cloud" ]; then
+          if [ "$EFFECTIVE_JUMPSTART_IMAGE" = "cloud" ]; then
             IMG="$HOME/vm_storage/ubuntu-24.04-server-cloudimg-amd64.img"
             if [ ! -s "$IMG" ]; then
               mkdir -p "$(dirname "$IMG")"
@@ -289,50 +305,58 @@ jobs:
           fi
 
           # The documented order: jumpstart first, then Cobbler, then the node
-          # templates. `vm install-batches` then creates and installs the
-          # clients one batch at a time, so the 15 GiB runner never has to hold
-          # the whole topology at once — which is exactly why the manual
-          # prescribes the batched path for RAM-limited hosts.
+          # templates. Client provisioning is the only branch: the PXE path
+          # installs them one batch at a time so the 15 GiB runner never holds
+          # the whole topology at once; the fast path creates cloud-image
+          # overlays instead and skips the installers entirely.
           ./cms-ha -c "$CONFIG" phase init-vms --jumpstart-only \
-            --jumpstart-image "$JUMPSTART_IMAGE" \
+            --jumpstart-image "$EFFECTIVE_JUMPSTART_IMAGE" \
             | tee "$ARTIFACTS_DIR/00-init-jumpstart.log"
           ./cms-ha -c "$CONFIG" phase setup-cobbler \
             | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
           ./cms-ha -c "$CONFIG" phase register-nodes \
             | tee "$ARTIFACTS_DIR/02-register-nodes.log"
 
-          # Probes, not part of the deployment: the client installers resolve
-          # through the jumpstart's named and fetch their authorised keys from
-          # its Apache, so both are checked here, with the lab up and before the
-          # clients put load on it. Every probe is best-effort.
-          echo "==== resolver probe (as the client nodes use it) ===="
-          sudo apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
-          for q in archive.ubuntu.com security.ubuntu.com; do
-            for srv in "@192.168.10.10" ""; do
-              label=$([ -n "$srv" ] && echo jumpstart || echo runner)
-              printf -- "-- %s via %s: " "$q" "$label"
-              timeout 30 dig +time=3 +tries=1 +noall +answer +comments \
-                ${srv:+"$srv"} "$q" A 2>&1 \
-                | grep -E "Query time|status:" | tr '\n' ' ' || true
-              echo
+          if [ "$FAST_PROVISIONING" = "true" ]; then
+            # One qcow2 overlay plus one cloud-init seed per client. The phase
+            # starts every guest at its runtime RAM, so the whole topology fits
+            # the runner without the installer batches.
+            ./cms-ha -c "$CONFIG" phase init-vms --nodes-only --fast-provisioning \
+              | tee "$ARTIFACTS_DIR/03-cloud-clients.log"
+          else
+            # Probes, not part of the deployment: the client installers resolve
+            # through the jumpstart's named and fetch their authorised keys from
+            # its Apache, so both are checked here, with the lab up and before the
+            # clients put load on it. Every probe is best-effort.
+            echo "==== resolver probe (as the client nodes use it) ===="
+            sudo apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
+            for q in archive.ubuntu.com security.ubuntu.com; do
+              for srv in "@192.168.10.10" ""; do
+                label=$([ -n "$srv" ] && echo jumpstart || echo runner)
+                printf -- "-- %s via %s: " "$q" "$label"
+                timeout 30 dig +time=3 +tries=1 +noall +answer +comments \
+                  ${srv:+"$srv"} "$q" A 2>&1 \
+                  | grep -E "Query time|status:" | tr '\n' ' ' || true
+                echo
+              done
             done
-          done
-          echo "==== cobbler HTTP endpoints, from the runner ===="
-          timeout 10 curl -sS -o /dev/null \
-            -w 'authorized_keys -> HTTP %{http_code} in %{time_total}s\n' \
-            http://192.168.10.10/cblr/pub/authorized_keys || true
-          timeout 10 curl -sS http://192.168.10.10/cblr/pub/authorized_keys 2>&1 | head -3 || true
-          timeout 10 curl -sS -o /dev/null \
-            -w 'autoinstall   -> HTTP %{http_code} in %{time_total}s\n' \
-            http://192.168.10.10/cblr/svc/op/autoinstall/system/ufw-router/ || true
+            echo "==== cobbler HTTP endpoints, from the runner ===="
+            timeout 10 curl -sS -o /dev/null \
+              -w 'authorized_keys -> HTTP %{http_code} in %{time_total}s\n' \
+              http://192.168.10.10/cblr/pub/authorized_keys || true
+            timeout 10 curl -sS http://192.168.10.10/cblr/pub/authorized_keys 2>&1 | head -3 || true
+            timeout 10 curl -sS -o /dev/null \
+              -w 'autoinstall   -> HTTP %{http_code} in %{time_total}s\n' \
+              http://192.168.10.10/cblr/svc/op/autoinstall/system/ufw-router/ || true
 
-          ./cms-ha -c "$CONFIG" vm install-batches \
-            | tee "$ARTIFACTS_DIR/03-install-batches.log"
+            ./cms-ha -c "$CONFIG" vm install-batches \
+              | tee "$ARTIFACTS_DIR/03-install-batches.log"
+          fi
 
-          # The batches phase leaves every guest shut off until the last one is
-          # installed, then boots the whole topology at once (that is what keeps
-          # an idle batch from competing for RAM with the next batch's
-          # installers). All thirteen guests therefore boot right here.
+          # The PXE batches phase leaves every guest shut off until the last one
+          # is installed, then boots the whole topology at once (that is what
+          # keeps an idle batch from competing for RAM with the next batch's
+          # installers). The fast path has already started every cloud guest.
           #
           # `--wait` polls every node concurrently and returns as soon as the
           # last one accepts a session. The old loop sampled the whole table
