@@ -320,7 +320,7 @@ func hasPlaintextSecrets(node *yaml.Node) bool {
 
 func isSecretField(name string) bool {
 	switch name {
-	case "password", "root_password", "exporter_password", "admin_password", "provisioner_password", "secret_key":
+	case "password", "root_password", "exporter_password", "admin_password", "grafana_admin_password", "provisioner_password", "secret_key":
 		return true
 	default:
 		return false

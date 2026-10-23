@@ -1,0 +1,27 @@
+version: 2
+
+# Keep the two dependency surfaces that can execute code in CI current:
+# Go modules and the GitHub Actions used by the workflows. Actions are pinned
+# to commit SHAs, so Dependabot updates the SHA and leaves the version comment.
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

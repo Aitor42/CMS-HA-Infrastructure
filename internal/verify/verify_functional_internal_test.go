@@ -1,14 +1,17 @@
 package verify
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/lint"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 )
 
 func TestFirstAssetPath(t *testing.T) {
@@ -433,6 +436,38 @@ func TestCheckHomeDashboard(t *testing.T) {
 	edited.Panels[0].Targets = []dashboards.Target{{RefID: "A", Expr: "up"}}
 	if err := checkHomeDashboard(edited, shipped); err == nil {
 		t.Error("a home dashboard with an edited panel must not pass")
+	}
+}
+
+func TestGrafanaAdminPasswordPrefersConfig(t *testing.T) {
+	v := &Verifier{cfg: &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: "configured-value"}}}
+	got, err := v.grafanaAdminPassword(context.Background(), "192.0.2.1")
+	if err != nil {
+		t.Fatalf("grafanaAdminPassword: %v", err)
+	}
+	if got != "configured-value" {
+		t.Fatalf("password = %q, want configured-value", got)
+	}
+}
+
+func TestGrafanaAdminPasswordReadsGeneratedFile(t *testing.T) {
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			if host != "192.0.2.1" || !strings.Contains(cmd, "/etc/grafana/grafana-admin.env") {
+				t.Fatalf("unexpected command on %s: %s", host, cmd)
+			}
+			// The real command is `sed -n 's/^GF_SECURITY_ADMIN_PASSWORD=//p'`,
+			// so stdout is already the bare password.
+			return "generated-value\n", "", 0, nil
+		},
+	}
+	v := &Verifier{cfg: &config.Config{}, ssh: fake}
+	got, err := v.grafanaAdminPassword(context.Background(), "192.0.2.1")
+	if err != nil {
+		t.Fatalf("grafanaAdminPassword: %v", err)
+	}
+	if got != "generated-value" {
+		t.Fatalf("password = %q, want generated-value", got)
 	}
 }
 

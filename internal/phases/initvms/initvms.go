@@ -643,7 +643,7 @@ func findCloudImage(dir, configured string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("no Ubuntu 24.04 cloud image found in %s; download ubuntu-24.04-server-cloudimg-amd64.img from https://cloud-images.ubuntu.com/noble/current/ or set vm.jumpstart_base_image", dir)
+	return "", fmt.Errorf("no Ubuntu 24.04 cloud image found in %s; download noble-server-cloudimg-amd64.img from https://cloud-images.ubuntu.com/noble/current/ or set vm.jumpstart_base_image", dir)
 }
 
 // clientProvisioningMode resolves how client nodes are installed: the flag

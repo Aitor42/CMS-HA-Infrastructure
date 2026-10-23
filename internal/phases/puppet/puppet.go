@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -75,6 +76,14 @@ func (p *Phase) Run(ctx context.Context) error {
 
 	agentNodes := p.getAgentNodes()
 
+	// Autosign only the FQDNs this configuration is about to bring up. A
+	// wildcard (*.internal.local) would let any host that can reach the
+	// Puppet server obtain a catalog; exact names keep the trust boundary at
+	// the configured topology.
+	if err := p.writeAutosignPolicy(ctx, jumpstartIP, agentNodes); err != nil {
+		return fmt.Errorf("write exact Puppet autosign policy: %w", err)
+	}
+
 	logging.Info("Installing Puppet Agent on all client nodes...")
 	if err := p.installAgents(ctx, agentNodes); err != nil {
 		return fmt.Errorf("install puppet agents: %w", err)
@@ -82,9 +91,6 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := p.installRuntimeSecretFiles(ctx); err != nil {
 		return fmt.Errorf("install runtime credentials for CMS and database exporter: %w", err)
 	}
-
-	logging.Info("Signing any pending agent certificates on Puppet Server...")
-	p.pool.RunCommand(ctx, jumpstartIP, "puppetserver ca sign --all 2>/dev/null || true")
 
 	logging.Info("Running first puppet agent catalog on all nodes...")
 	if err := p.runFirstCatalog(ctx, agentNodes); err != nil {
@@ -202,10 +208,9 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		[ -e /etc/puppetlabs/puppetserver/puppetserver ] || ln -sfn /etc/puppet/puppetserver /etc/puppetlabs/puppetserver/puppetserver
 		chown -R puppet:puppet /etc/puppet /etc/puppetlabs /var/lib/puppet 2>/dev/null || true
 
-		# Setup autosign.conf
-		echo "*.internal.local" > /etc/puppetlabs/puppet/autosign.conf
-		echo "*.main.local" >> /etc/puppetlabs/puppet/autosign.conf
-		chmod 644 /etc/puppetlabs/puppet/autosign.conf
+		# The exact autosign policy is written by the phase once the node
+		# list is known; never seed it with a wildcard.
+		install -m 0644 /dev/null /etc/puppetlabs/puppet/autosign.conf
 		ln -sf /etc/puppetlabs/puppet/autosign.conf /etc/puppet/autosign.conf
 
 		grep -q "puppet" /etc/hosts || echo "127.0.0.1 puppet" >> /etc/hosts
@@ -270,6 +275,43 @@ func (p *Phase) getAgentNodes() []config.NodeSpec {
 		}
 	}
 	return nodes
+}
+
+// writeAutosignPolicy replaces Puppet's wildcard autosign with the exact
+// certnames this deployment is allowed to bring up. The file is written before
+// the agents request their certificates, so no other host in either internal
+// domain can obtain a signed catalog.
+func (p *Phase) writeAutosignPolicy(ctx context.Context, jumpstartIP string, nodes []config.NodeSpec) error {
+	policy := autosignPolicy(p.cfg.Nodes.Jumpstart.FQDN, nodes)
+	const path = "/etc/puppetlabs/puppet/autosign.conf"
+	if err := p.pool.CopyContent(ctx, jumpstartIP, []byte(policy), path, 0644); err != nil {
+		return fmt.Errorf("copy autosign policy: %w", err)
+	}
+	if _, stderr, code, err := p.pool.RunCommand(ctx, jumpstartIP,
+		"chown root:root "+path+" && chmod 0644 "+path); err != nil || code != 0 {
+		return fmt.Errorf("secure autosign policy (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+// autosignPolicy returns one exact FQDN per line, sorted for deterministic
+// output. It intentionally never emits a wildcard.
+func autosignPolicy(jumpstartFQDN string, nodes []config.NodeSpec) string {
+	if strings.TrimSpace(jumpstartFQDN) == "" {
+		jumpstartFQDN = "jumpstart.internal.local"
+	}
+	names := map[string]struct{}{jumpstartFQDN: {}}
+	for _, n := range nodes {
+		if fqdn := strings.TrimSpace(n.FQDN); fqdn != "" {
+			names[fqdn] = struct{}{}
+		}
+	}
+	sorted := make([]string, 0, len(names))
+	for name := range names {
+		sorted = append(sorted, name)
+	}
+	sort.Strings(sorted)
+	return strings.Join(sorted, "\n") + "\n"
 }
 
 func (p *Phase) installAgents(ctx context.Context, nodes []config.NodeSpec) error {

@@ -1,6 +1,7 @@
 package puppet
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -31,5 +32,21 @@ func TestCatalogConcurrencyResolution(t *testing.T) {
 	}
 	if got < 4 || got > 8 {
 		t.Fatalf("auto concurrency = %d, want 4..8", got)
+	}
+}
+
+func TestAutosignPolicyIsExact(t *testing.T) {
+	policy := autosignPolicy("jumpstart.internal.local", []config.NodeSpec{
+		{FQDN: "internal-master1.internal.local"},
+		{FQDN: "main-lb1.main.local"},
+		{FQDN: "internal-master1.internal.local"}, // duplicate
+		{FQDN: ""}, // skipped
+	})
+	if strings.Contains(policy, "*") {
+		t.Fatalf("autosign policy must not contain a wildcard: %q", policy)
+	}
+	want := "internal-master1.internal.local\njumpstart.internal.local\nmain-lb1.main.local\n"
+	if policy != want {
+		t.Fatalf("autosign policy = %q, want %q", policy, want)
 	}
 }

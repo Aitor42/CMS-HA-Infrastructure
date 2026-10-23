@@ -2,6 +2,8 @@ package monitoring
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -122,6 +125,11 @@ func (p *Phase) Run(ctx context.Context) error {
 		logging.Warn("failed to reload prometheus after deploying alert rules: %v", rerr)
 	}
 
+	logging.Info("Configuring Grafana admin credentials...")
+	if err := p.configureGrafanaAdmin(ctx, monitorIP); err != nil {
+		return err
+	}
+
 	logging.Info("Verifying Prometheus and Grafana services...")
 	verifyCmd := "systemctl is-active prometheus && systemctl is-active grafana-server"
 	verifyErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
@@ -159,6 +167,49 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Success("Monitoring Setup completed successfully.")
+	return nil
+}
+
+// configureGrafanaAdmin installs a per-deployment Grafana admin password in a
+// root:grafana 0640 EnvironmentFile and restarts the service. The Puppet
+// drop-in loads that file, and the CLI reset makes the change effective even
+// when the Grafana database already exists. An operator-supplied value wins;
+// otherwise the phase generates 256 bits of randomness and only tells the
+// operator where to read it.
+func (p *Phase) configureGrafanaAdmin(ctx context.Context, monitorIP string) error {
+	password := strings.TrimSpace(p.cfg.Monitoring.GrafanaAdminPassword)
+	if password == "" {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			return fmt.Errorf("generate Grafana admin password: %w", err)
+		}
+		password = base64.RawURLEncoding.EncodeToString(raw)
+	}
+
+	const path = "/etc/grafana/grafana-admin.env"
+	content := "GF_SECURITY_ADMIN_PASSWORD=" + password + "\n"
+	if err := p.pool.CopyContent(ctx, monitorIP, []byte(content), path, 0640); err != nil {
+		return fmt.Errorf("write Grafana admin credential: %w", err)
+	}
+	// GF_SECURITY_ADMIN_PASSWORD is only honoured when Grafana creates the
+	// admin user; reset it explicitly so a re-run on an existing database does
+	// not silently keep admin/admin. The env file is still written so a fresh
+	// database starts with the same value before the CLI runs.
+	cmd := fmt.Sprintf(
+		"chown root:grafana %s && chmod 0640 %s && "+
+			"for i in $(seq 1 30); do systemctl is-active --quiet grafana-server && break; sleep 1; done; "+
+			"GRAFANA_CLI=$(command -v grafana 2>/dev/null || true); "+
+			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/sbin/grafana; "+
+			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/share/grafana/bin/grafana; "+
+			"\"$GRAFANA_CLI\" cli --homepath /usr/share/grafana --config /etc/grafana/grafana.ini "+
+			"admin reset-admin-password %s && systemctl restart grafana-server",
+		path, path, shell.Quote(password))
+	if _, stderr, code, err := p.pool.RunCommand(ctx, monitorIP, cmd); err != nil || code != 0 {
+		return fmt.Errorf("install Grafana admin credential (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
+	}
+	if p.cfg.Monitoring.GrafanaAdminPassword == "" {
+		logging.Info("Grafana admin password generated; read it with: sudo cat %s", path)
+	}
 	return nil
 }
 

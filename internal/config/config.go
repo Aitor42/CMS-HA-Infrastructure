@@ -62,8 +62,8 @@ type VMConfig struct {
 	// the PXE/ISO deliverable.
 	JumpstartImage string `yaml:"jumpstart_image"`
 	// JumpstartBaseImage is the cloud image used when JumpstartImage is
-	// "cloud". Empty looks for ubuntu-24.04-server-cloudimg-amd64.img in
-	// StorageDir.
+	// "cloud". Empty looks for noble-server-cloudimg-amd64.img (or the legacy
+	// ubuntu-24.04-server-cloudimg-amd64.img name) in StorageDir.
 	JumpstartBaseImage string `yaml:"jumpstart_base_image"`
 	// Provisioning selects how client nodes get their base OS. "pxe" (the
 	// default) keeps the Cobbler deliverable path; "cloud" boots a qcow2
@@ -209,9 +209,12 @@ type WordPressConfig struct {
 	AdminPassword string `yaml:"admin_password"`
 }
 
-// MonitoringConfig controls the monitoring exporters.
+// MonitoringConfig controls the monitoring exporters and the Grafana admin
+// credential. An empty GrafanaAdminPassword makes the monitoring phase
+// generate a per-deployment secret and reset the default admin account.
 type MonitoringConfig struct {
-	Exporters ExportersConfig `yaml:"exporters"`
+	Exporters            ExportersConfig `yaml:"exporters"`
+	GrafanaAdminPassword string          `yaml:"grafana_admin_password"`
 }
 
 // ExportersConfig pins the exporter versions used by the monitor.
@@ -751,6 +754,9 @@ func (c *Config) validateServices() error {
 	if err := c.validateBackup(); err != nil {
 		return err
 	}
+	if err := c.validateMonitoring(); err != nil {
+		return err
+	}
 	return c.validateTraffic()
 }
 
@@ -784,6 +790,15 @@ func (c *Config) validateBackup() error {
 		if sched != "" && !cronPattern.MatchString(sched) {
 			return fmt.Errorf("backup schedule %q contains unsupported characters", sched)
 		}
+	}
+	return nil
+}
+
+func (c *Config) validateMonitoring() error {
+	// The password is written to a systemd EnvironmentFile without quoting, so
+	// keep it to characters that cannot break or inject an environment line.
+	if pw := c.Monitoring.GrafanaAdminPassword; pw != "" && !grafanaPasswordPattern.MatchString(pw) {
+		return fmt.Errorf("monitoring.grafana_admin_password contains unsupported characters (use letters, digits, '.', '_', '~' or '-')")
 	}
 	return nil
 }
@@ -911,6 +926,7 @@ var stepVersionPattern = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){1,3}$`)
 var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var dbIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 var cronPattern = regexp.MustCompile(`^[0-9A-Za-z*,/ @-]+$`)
+var grafanaPasswordPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
 
 // validUnixUser matches a conservative portable POSIX user name (lowercase
 // letters, digits, underscore and hyphen, not starting with a digit or hyphen).

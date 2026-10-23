@@ -48,6 +48,12 @@ concurrency:
   group: integration-hosted-${{ github.ref }}
   cancel-in-progress: false
 
+# The job only needs to read the repository. It generates credentials inside
+# the runner and never writes back to GitHub, so do not hand GITHUB_TOKEN any
+# write scope.
+permissions:
+  contents: read
+
 env:
   BASE_CONFIG: config.ci.yaml
   # The workflow renders BASE_CONFIG into this throwaway copy, with freshly
@@ -66,7 +72,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Free disk space
         run: |
@@ -105,7 +113,7 @@ jobs:
           free -h
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
@@ -157,18 +165,39 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive timeout 900 \
             apt-get "${APT_OPTS[@]}" install -y -qq \
             qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virtinst \
-            xorriso dnsmasq-base bridge-utils openssh-server python3-yaml >/dev/null
+            xorriso dnsmasq-base bridge-utils openssh-server python3-yaml acl >/dev/null
 
-          # /dev/kvm is present but owned root:kvm with mode 0660.
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          # /dev/kvm is present but owned root:kvm with mode 0660. Grant the
+          # runner an ACL instead of making the device world-writable.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0660", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-          sudo chmod 666 /dev/kvm
+          if ! sudo setfacl -m u:"$USER":rw /dev/kvm; then
+            echo "::warning::/dev/kvm does not support ACLs; restricting it to the runner user"
+            sudo chown "$USER":root /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
 
           # libvirt must be able to traverse the home directory to reach
-          # ${HOME}/vm_storage, where the lab keeps its disk images.
-          chmod o+x "$HOME"
+          # ${HOME}/vm_storage, where the lab keeps its disk images. Grant the
+          # qemu account traverse/read only on that path instead of opening the
+          # whole home directory to every local user.
+          QEMU_USER=$(sudo awk -F= '/^[[:space:]]*user[[:space:]]*=/{gsub(/[" ]/,"",$2); print $2; exit}' \
+            /etc/libvirt/qemu.conf 2>/dev/null || true)
+          QEMU_USER=${QEMU_USER:-libvirt-qemu}
+          mkdir -p "$HOME/vm_storage"
+          if id "$QEMU_USER" >/dev/null 2>&1; then
+            if ! sudo setfacl -m u:"$QEMU_USER":x "$HOME" \
+              || ! sudo setfacl -m u:"$QEMU_USER":rx "$HOME/vm_storage"; then
+              echo "::warning::ACLs unsupported on $HOME; granting traverse only"
+              chmod o+x "$HOME"
+              chmod o+rx "$HOME/vm_storage"
+            fi
+          else
+            echo "::error::qemu user $QEMU_USER not found; cannot grant disk access safely"
+            exit 1
+          fi
 
           # Ubuntu ships AppArmor enabled; its libvirt profile is the classic
           # source of "qemu: could not open disk image" for disks outside
@@ -187,8 +216,12 @@ jobs:
             [ -S /var/run/libvirt/libvirt-sock ] && break
             sleep 1
           done
-          sudo chmod 0777 /var/run/libvirt/libvirt-sock \
-                            /var/run/libvirt/libvirt-sock-ro 2>/dev/null || true
+          if ! sudo setfacl -m u:"$USER":rw /var/run/libvirt/libvirt-sock; then
+            echo "::warning::libvirt socket does not support ACLs; scoping it to the runner group"
+            sudo chgrp "$USER" /var/run/libvirt/libvirt-sock
+            sudo chmod 0660 /var/run/libvirt/libvirt-sock
+          fi
+          sudo setfacl -m u:"$USER":rw /var/run/libvirt/libvirt-sock-ro 2>/dev/null || true
 
           # The router uses libvirt's NAT network as its WAN uplink; the lab's
           # own virbr-int / virbr-main networks are created by `phase init-vms`.
@@ -205,6 +238,9 @@ jobs:
           echo "==== kvm ===="
           sudo timeout 300 apt-get "${APT_OPTS[@]}" install -y -qq cpu-checker >/dev/null
           sudo kvm-ok
+          echo "==== device/socket ACLs ===="
+          getfacl -p /dev/kvm 2>/dev/null | sed -n '1,8p' || true
+          getfacl -p /var/run/libvirt/libvirt-sock 2>/dev/null | sed -n '1,8p' || true
           echo "==== listeners ===="
           ss -ltn | grep -E ':(22|16509)\b' || true
 
@@ -336,8 +372,11 @@ jobs:
             IMG="$HOME/vm_storage/ubuntu-24.04-server-cloudimg-amd64.img"
             if [ ! -s "$IMG" ]; then
               mkdir -p "$(dirname "$IMG")"
+              # Canonical publishes the Noble image as
+              # `noble-server-cloudimg-amd64.img`; the old
+              # `ubuntu-24.04-server-cloudimg-amd64.img` URL is a 404.
               curl -fL --retry 3 --retry-delay 5 -o "$IMG.tmp" \
-                https://cloud-images.ubuntu.com/noble/current/ubuntu-24.04-server-cloudimg-amd64.img
+                https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
               mv "$IMG.tmp" "$IMG"
             fi
           fi
@@ -450,8 +489,8 @@ jobs:
             echo "==== nodes: SSH authentication probe ===="
             for ip in 192.168.10.1 192.168.10.15 192.168.10.20; do
               echo "-- ubuntu@$ip"
-              timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=6 \
+              timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" -o ConnectTimeout=6 \
                 -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" \
                 'echo NODE_OK; sudo -n -H true && echo SUDO_OK || echo SUDO_DENIED' 2>&1 \
                 | grep -vE "^debug1: (Reading|Offering|Trying|Authentications)" \
@@ -481,7 +520,8 @@ jobs:
             echo "==== neighbours on virbr-int ===="
             ip neigh show dev virbr-int 2>/dev/null || true
             echo "==== router: netplan and networkd ===="
-            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" \
               -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.1 '
                 echo "-- /etc/netplan --"
                 sudo ls -l /etc/netplan 2>&1 || true
@@ -501,7 +541,8 @@ jobs:
                 sudo journalctl -u systemd-networkd --no-pager -n 40 2>&1 || true
               ' 2>&1 || true
             echo "==== jumpstart: netboot flags, services and logs ===="
-            ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" \
               -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.10 '
                 echo "-- netboot flags --"
                 for n in ufw-router internal-monitor internal-storage; do
@@ -529,8 +570,8 @@ jobs:
             guest() {
               ip="$1"; cmd="$2"
               echo "-- ubuntu@$ip"
-              timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+              timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" -o ConnectTimeout=8 \
                 -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" "$cmd" 2>&1 \
                 | tail -200 || true
             }
@@ -538,7 +579,8 @@ jobs:
             guest 192.168.10.12 'echo "[k3s]"; sudo systemctl is-active k3s; echo "[drbd role]"; sudo drbdadm role cms_data; echo "[drbd]"; sudo drbdadm status; echo "[mount]"; findmnt -n -o TARGET,SOURCE,FSTYPE /mnt/data/mariadb || echo not-mounted; echo "[boot unit]"; systemctl is-enabled drbd-cms-boot.service; sudo journalctl -u drbd-cms-boot.service --no-pager -n 15; echo "[textfile]"; sudo ls -l /var/lib/prometheus/node-exporter; echo "[textfile metric]"; curl -s -m 5 http://localhost:9100/metrics | grep -E "^cms_" || echo none; echo "[drbd metrics timer]"; systemctl is-active cms-drbd-metrics.timer; systemctl is-enabled cms-drbd-metrics.timer; echo "[drbd metrics journal]"; sudo journalctl -u cms-drbd-metrics --no-pager -n 10'
             guest 192.168.10.13 'echo "[k3s-agent]"; sudo systemctl is-active k3s-agent; echo "[journal]"; sudo journalctl -u k3s-agent --no-pager -n 30'
             guest 192.168.10.15 'echo "[nfs]"; sudo systemctl is-active nfs-kernel-server; echo "[exports]"; sudo exportfs -v'
-            guest 192.168.10.20 'echo "[units]"; systemctl is-active prometheus prometheus-node-exporter prometheus-alertmanager prometheus-blackbox-exporter grafana-server; echo "[prometheus]"; curl -sS -m 5 http://localhost:9090/-/ready; echo; echo "[grafana]"; curl -sS -m 5 http://localhost:3000/api/health; echo; echo "[grafana home]"; curl -sS -m 5 -u admin:admin http://localhost:3000/api/dashboards/home; echo; echo "[grafana env]"; systemctl show grafana-server -p Environment; echo "[prometheus files]"; sudo ls -l /etc/prometheus; echo "[remote write]"; sudo grep -c -- "--web.enable-remote-write-receiver" /etc/default/prometheus; echo "[k6 metrics]"; curl -sS -m 5 "http://localhost:9090/api/v1/query?query=count(k6_http_reqs_total)"; echo; echo "[config check]"; echo "(alert-rules.yml is deployed by the monitoring phase, so an early run reports it missing)"; sudo promtool check config /etc/prometheus/prometheus.yml 2>&1 | tail -5'
+            # shellcheck disable=SC2016 # $pw expands on the guest, not the runner
+            guest 192.168.10.20 'echo "[units]"; systemctl is-active prometheus prometheus-node-exporter prometheus-alertmanager prometheus-blackbox-exporter grafana-server; echo "[prometheus]"; curl -sS -m 5 http://localhost:9090/-/ready; echo; echo "[grafana]"; curl -sS -m 5 http://localhost:3000/api/health; echo; echo "[grafana home]"; pw=$(sudo sed -n "s/^GF_SECURITY_ADMIN_PASSWORD=//p" /etc/grafana/grafana-admin.env 2>/dev/null); curl -sS -m 5 -u "admin:${pw:-admin}" http://localhost:3000/api/dashboards/home; echo; echo "[grafana env]"; systemctl show grafana-server -p Environment | sed -E "s/(PASSWORD|SECRET|TOKEN)=[^ ]*/\\1=REDACTED/g"; echo "[prometheus files]"; sudo ls -l /etc/prometheus; echo "[remote write]"; sudo grep -c -- "--web.enable-remote-write-receiver" /etc/default/prometheus; echo "[k6 metrics]"; curl -sS -m 5 "http://localhost:9090/api/v1/query?query=count(k6_http_reqs_total)"; echo; echo "[config check]"; echo "(alert-rules.yml is deployed by the monitoring phase, so an early run reports it missing)"; sudo promtool check config /etc/prometheus/prometheus.yml 2>&1 | tail -5'
             guest 192.168.20.103 'echo "[units]"; systemctl is-active nginx keepalived prometheus-nginx-exporter; echo "[nginx -t]"; sudo nginx -t; echo "[vip]"; ip -4 -o addr show; echo "[keepalived]"; sudo journalctl -u keepalived --no-pager -n 30; echo "[vip https]"; curl -sk -m 8 -H "Host: cms.fake-enterprise.com" -o /dev/null -w "http_code=%{http_code}\n" https://192.168.20.100/; echo "[textfile]"; sudo ls -l /var/lib/prometheus/node-exporter; echo "[textfile metric]"; curl -s -m 5 http://localhost:9100/metrics | grep -E "^cms_" || echo none; echo "[keepalived metrics timer]"; systemctl is-active cms-keepalived-metrics.timer; systemctl is-enabled cms-keepalived-metrics.timer; echo "[keepalived metrics journal]"; sudo journalctl -u cms-keepalived-metrics --no-pager -n 10'
             guest 192.168.20.101 'echo "[units]"; systemctl is-active apache2 prometheus-apache-exporter; echo "[mounts]"; mount | grep -i nfs; echo "[apache log]"; sudo tail -20 /var/log/apache2/wordpress_error.log 2>/dev/null; echo "[db nodeport]"; timeout 5 bash -c "cat < /dev/null > /dev/tcp/192.168.10.11/30306" && echo mariadb-nodeport-open || echo mariadb-nodeport-closed'
           } >> "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
@@ -575,12 +617,12 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: integration-hosted-artifacts
           path: integration-artifacts/
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
       # Opt-in, and a real gate: this is the only place CI exercises the
       # teardown path (VMs, disks and networks removed from whatever state the

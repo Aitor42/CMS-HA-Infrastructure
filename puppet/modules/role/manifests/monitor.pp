@@ -264,7 +264,11 @@ class role::monitor {
     owner   => 'root',
     group   => 'root',
     mode    => '0644',
-    content => "[Service]\nEnvironment=GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/ha-overview.json\n",
+    # The monitoring phase writes the admin password to this file (0640
+    # root:grafana) after Puppet converges. The leading '-' keeps the unit
+    # bootable on a fresh node, before that phase has run; the CLI reset makes
+    # the password effective even on an existing database.
+    content => "[Service]\nEnvironmentFile=-/etc/grafana/grafana-admin.env\nEnvironment=GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/ha-overview.json\n",
     require => [
       Package['grafana'],
       File['/etc/systemd/system/grafana-server.service.d'],

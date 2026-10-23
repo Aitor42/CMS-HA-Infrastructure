@@ -11,7 +11,9 @@
 #
 # Key responsibilities:
 #   - Installs Puppet Server on jumpstart with reduced JVM heap (512 MB).
-#   - Configures autosign for *.internal.local and *.main.local domains.
+#   - DEPRECATED: does not configure wildcard autosign. The supported `cms-ha`
+#     phase writes the exact FQDNs from config.yaml; this v1 script copies a
+#     wildcard-free template and requires explicit certificate signing.
 #   - Installs puppet-agent on every node and triggers initial cert exchange.
 #   - Syncs all manifests and modules from the local puppet/ directory to the
 #     Puppet codedir on jumpstart (production environment).

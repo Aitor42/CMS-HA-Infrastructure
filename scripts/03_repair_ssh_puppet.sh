@@ -356,9 +356,11 @@ path.write_text("\n".join(out).rstrip() + "\n")
 PY
 
 grep -q "jumpstart.internal.local" /etc/hosts || echo "192.168.10.10 jumpstart.internal.local jumpstart puppet" >> /etc/hosts
+# DEPRECATED (v1) repair path. The supported cms-ha phase writes exact FQDNs;
+# this script deliberately leaves autosign empty rather than opening the whole
+# internal domain. Agents must be signed explicitly if this legacy path is used.
 cat > /etc/puppetlabs/puppet/autosign.conf <<'AUTOSIGN'
-*.internal.local
-*.main.local
+# exact certnames only; see the cms-ha Puppet phase
 AUTOSIGN
 
 chown -R puppet:puppet /etc/puppetlabs/puppet /etc/puppetlabs/code /opt/puppetlabs/server/data/puppetserver

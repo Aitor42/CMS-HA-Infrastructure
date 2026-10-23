@@ -843,11 +843,13 @@ func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOu
 // no dashboard, and a file on disk says nothing about whether Grafana loaded it
 // or whether its panels point at a datasource that exists.
 //
-// The API is queried with the lab's admin credentials (admin/admin, see
-// MANUAL): the datasource must be provisioned and default, every shipped
-// dashboard must be loaded with its panels pointing at that datasource, and the
-// HA overview must be the home dashboard so the first page in the browser shows
-// graphs instead of Grafana's welcome screen.
+// The API is queried with the deployment's admin credential, taken from
+// monitoring.grafana_admin_password or, when that is empty, from the
+// root:grafana env file the monitoring phase generated: the datasource must be
+// provisioned and default, every shipped dashboard must be loaded with its
+// panels pointing at that datasource, and the HA overview must be the home
+// dashboard so the first page in the browser shows graphs instead of Grafana's
+// welcome screen.
 func (v *Verifier) checkGrafanaProvisioning(ctx context.Context, monitorIP string) e2eOutcome {
 	o := e2eOutcome{label: "Grafana"}
 
@@ -893,10 +895,34 @@ func (v *Verifier) checkGrafanaProvisioning(ctx context.Context, monitorIP strin
 	return o
 }
 
+// grafanaAdminPassword returns the configured Grafana admin password, or reads
+// the per-deployment secret the monitoring phase wrote when the config leaves
+// it empty. The file is root:grafana 0640, so the read goes through the
+// verifier's existing sudo path.
+func (v *Verifier) grafanaAdminPassword(ctx context.Context, monitorIP string) (string, error) {
+	if pw := strings.TrimSpace(v.cfg.Monitoring.GrafanaAdminPassword); pw != "" {
+		return pw, nil
+	}
+	out, stderr, code, err := v.ssh.RunCommand(ctx, monitorIP,
+		"sudo sed -n 's/^GF_SECURITY_ADMIN_PASSWORD=//p' /etc/grafana/grafana-admin.env")
+	if err != nil || code != 0 {
+		return "", fmt.Errorf("read Grafana admin credential (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
+	}
+	pw := strings.TrimSpace(out)
+	if pw == "" {
+		return "", fmt.Errorf("grafana admin credential is empty: set monitoring.grafana_admin_password or run the monitoring phase")
+	}
+	return pw, nil
+}
+
 // inspectGrafana walks the Grafana API and returns the one-line summary the
 // phase prints. Every failure names the dashboard and panel at fault.
 func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped []dashboards.Dashboard) (string, error) {
-	status, body, err := grafanaGET(ctx, monitorIP, "/api/health")
+	password, err := v.grafanaAdminPassword(ctx, monitorIP)
+	if err != nil {
+		return "", err
+	}
+	status, body, err := grafanaGET(ctx, monitorIP, "/api/health", password)
 	if err != nil || status != http.StatusOK {
 		return "", fmt.Errorf("grafana health check failed (HTTP %d): %v", status, err)
 	}
@@ -912,12 +938,12 @@ func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped
 
 	// The datasource must exist with the UID the panels reference and be the
 	// default one; otherwise Grafana answers "Datasource not found".
-	status, body, err = grafanaGET(ctx, monitorIP, "/api/datasources")
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/datasources", password)
 	if err != nil {
 		return "", fmt.Errorf("listing Grafana datasources failed: %w", err)
 	}
 	if status == http.StatusUnauthorized {
-		return "", fmt.Errorf("grafana rejected the lab's admin credentials (admin/admin): the dashboards cannot be inspected")
+		return "", fmt.Errorf("grafana rejected the deployment's admin credentials: the dashboards cannot be inspected")
 	}
 	if status != http.StatusOK {
 		return "", fmt.Errorf("listing Grafana datasources failed (HTTP %d): %s", status, strings.TrimSpace(string(body)))
@@ -948,7 +974,7 @@ func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped
 	}
 
 	// Grafana must have loaded every shipped dashboard.
-	status, body, err = grafanaGET(ctx, monitorIP, "/api/search?type=dash-db")
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/search?type=dash-db", password)
 	if err != nil || status != http.StatusOK {
 		return "", fmt.Errorf("listing Grafana dashboards failed (HTTP %d): %v", status, err)
 	}
@@ -969,7 +995,7 @@ func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped
 			return "", fmt.Errorf("dashboard %q (%s) is not loaded by Grafana", d.Title, d.UID)
 		}
 
-		status, body, err := grafanaGET(ctx, monitorIP, "/api/dashboards/uid/"+url.PathEscape(d.UID))
+		status, body, err := grafanaGET(ctx, monitorIP, "/api/dashboards/uid/"+url.PathEscape(d.UID), password)
 		if err != nil || status != http.StatusOK {
 			return "", fmt.Errorf("reading dashboard %q failed (HTTP %d): %v", d.Title, status, err)
 		}
@@ -1011,7 +1037,7 @@ func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped
 	}
 
 	// First open in the browser: the HA overview, not the welcome page.
-	home, err := v.readHomeDashboard(ctx, monitorIP)
+	home, err := v.readHomeDashboard(ctx, monitorIP, password)
 	if err != nil {
 		return "", err
 	}
@@ -1029,8 +1055,8 @@ func (v *Verifier) inspectGrafana(ctx context.Context, monitorIP string, shipped
 // home dashboard is a saved dashboard (the shape Grafana 13 returns). Both are
 // resolved to the dashboard they point at, so the check asks the same question
 // whichever shape the installed Grafana uses.
-func (v *Verifier) readHomeDashboard(ctx context.Context, monitorIP string) (dashboards.Dashboard, error) {
-	status, body, err := grafanaGET(ctx, monitorIP, "/api/dashboards/home")
+func (v *Verifier) readHomeDashboard(ctx context.Context, monitorIP, password string) (dashboards.Dashboard, error) {
+	status, body, err := grafanaGET(ctx, monitorIP, "/api/dashboards/home", password)
 	if err != nil || status != http.StatusOK {
 		return dashboards.Dashboard{}, fmt.Errorf("reading Grafana's home dashboard failed (HTTP %d): %v", status, err)
 	}
@@ -1050,7 +1076,7 @@ func (v *Verifier) readHomeDashboard(ctx context.Context, monitorIP string) (das
 	if uid == "" {
 		return dashboards.Dashboard{}, fmt.Errorf("grafana's home dashboard redirect %q is not a /d/<uid>/<slug> URL", home.RedirectURI)
 	}
-	status, body, err = grafanaGET(ctx, monitorIP, "/api/dashboards/uid/"+url.PathEscape(uid))
+	status, body, err = grafanaGET(ctx, monitorIP, "/api/dashboards/uid/"+url.PathEscape(uid), password)
 	if err != nil || status != http.StatusOK {
 		return dashboards.Dashboard{}, fmt.Errorf("resolving the home dashboard %q (uid %s) failed (HTTP %d): %v", home.RedirectURI, uid, status, err)
 	}
@@ -1113,7 +1139,7 @@ func panelQueries(p dashboards.Panel) string {
 }
 
 // grafanaGET performs an authenticated GET against the monitor's Grafana.
-func grafanaGET(ctx context.Context, monitorIP, path string) (int, []byte, error) {
+func grafanaGET(ctx context.Context, monitorIP, path, password string) (int, []byte, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, functionalTimeout)
 	defer cancel()
 
@@ -1122,7 +1148,7 @@ func grafanaGET(ctx context.Context, monitorIP, path string) (int, []byte, error
 	if err != nil {
 		return 0, nil, err
 	}
-	req.SetBasicAuth("admin", "admin")
+	req.SetBasicAuth("admin", password)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

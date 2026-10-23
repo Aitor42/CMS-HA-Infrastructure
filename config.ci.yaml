@@ -35,7 +35,8 @@ vm:
   libvirt_uri: "qemu:///system"
   # Jumpstart install path: "iso" (default, the PXE/autoinstall deliverable) or
   # "cloud" (opt-in: boot a qcow2 overlay of the Ubuntu cloud image). For cloud,
-  # put ubuntu-24.04-server-cloudimg-amd64.img in storage_dir or set
+  # put noble-server-cloudimg-amd64.img (or the legacy
+  # ubuntu-24.04-server-cloudimg-amd64.img name) in storage_dir or set
   # jumpstart_base_image. The cloud path is for iteration and CI; it does not
   # replace the ISO/PXE gate.
   jumpstart_image: "iso"
@@ -219,6 +220,10 @@ wordpress:
   admin_password: ""
 
 monitoring:
+  # Empty means the monitoring phase generates a random per-deployment
+  # password and stores it on the monitor node at
+  # /etc/grafana/grafana-admin.env (root:grafana 0640).
+  grafana_admin_password: ""
   exporters:
     nginx_version: "1.4.1"
     apache_version: "1.0.9"
