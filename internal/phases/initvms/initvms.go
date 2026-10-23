@@ -437,9 +437,19 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		nets = append(nets, libvirt.NetworkOpt{Network: "default", Mac: p.cfg.Nodes.Jumpstart.MACWAN})
 	}
 
+	// The ISO path needs the installer's extra RAM; the cloud image is already
+	// installed and boots straight into the runtime size. Resizing it later is
+	// not an option: `deploy` has no post-provision shrink step for the
+	// jumpstart, so a cloud guest left at RAMInstallMB would keep that
+	// footprint for the whole run.
+	jumpstartRAM := p.cfg.Nodes.Jumpstart.RAMInstallMB
+	if mode == "cloud" {
+		jumpstartRAM = p.cfg.Nodes.Jumpstart.RuntimeRAMMB()
+	}
+
 	installOpts := libvirt.VirtInstallOpts{
 		Name:          p.cfg.Nodes.Jumpstart.Name,
-		RAM:           p.cfg.Nodes.Jumpstart.RAMInstallMB,
+		RAM:           jumpstartRAM,
 		VCPUs:         p.cfg.Nodes.Jumpstart.VCPUs,
 		Networks:      nets,
 		OSVariant:     "ubuntu24.04",

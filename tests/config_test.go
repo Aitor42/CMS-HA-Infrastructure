@@ -282,6 +282,25 @@ func TestConfig_ClientProvisioningMode(t *testing.T) {
 	}
 }
 
+func TestConfig_RuntimeRAMMB(t *testing.T) {
+	cases := []struct {
+		name string
+		node config.NodeDetail
+		want int
+	}{
+		{"final wins", config.NodeDetail{RAMInstallMB: 3072, RAMFinalMB: 1024}, 1024},
+		{"install fallback", config.NodeDetail{RAMInstallMB: 3072}, 3072},
+		{"zero fallback", config.NodeDetail{}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.node.RuntimeRAMMB(); got != tc.want {
+				t.Errorf("RuntimeRAMMB() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConfig_Validate(t *testing.T) {
 	validCfg := func() *config.Config {
 		return &config.Config{

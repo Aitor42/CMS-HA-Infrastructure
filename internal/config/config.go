@@ -168,6 +168,21 @@ type NodeDetail struct {
 	DRBDDiskGB   int    `yaml:"drbd_disk_gb"`
 }
 
+// RuntimeRAMMB returns the RAM a guest runs with once its OS is installed.
+//
+// The PXE path boots a guest with RAMInstallMB because Subiquity needs the
+// headroom, then shrinks it to RAMFinalMB. A cloud-booted guest has no
+// installer, so it has to start at the runtime size directly: booting the
+// whole topology at the install size would overcommit the host and nothing
+// would shrink it afterwards. Partial configs and tests may leave
+// RAMFinalMB unset, so fall back to the install size.
+func (n NodeDetail) RuntimeRAMMB() int {
+	if n.RAMFinalMB > 0 {
+		return n.RAMFinalMB
+	}
+	return n.RAMInstallMB
+}
+
 // HotdesksConf controls the optional hotdesk cluster.
 type HotdesksConf struct {
 	Count        int `yaml:"count"`

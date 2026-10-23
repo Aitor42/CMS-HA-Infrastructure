@@ -116,8 +116,14 @@ func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Cl
 		return err
 	}
 
+	// There is no installer to wait for, so boot at the production size: the
+	// PXE path uses RAMInstallMB and shrinks each guest afterwards, but a cloud
+	// guest never goes through that resize. Using the install size here would
+	// keep the whole topology overcommitted (39.9 GB vs 13.1 GB in the hosted
+	// config) and the host would OOM while the guests boot.
+	ram := node.RuntimeRAMMB()
 	logging.Info("Creating cloud VM: %s (RAM: %d MB, vCPUs: %d, Disk: %d GB)",
-		node.Name, node.RAMInstallMB, node.VCPUs, node.DiskGB)
+		node.Name, ram, node.VCPUs, node.DiskGB)
 
 	diskPath := filepath.Join(cfg.VM.StorageDir, node.Name+".qcow2")
 	if err := EnsureDiskPathAvailable(diskPath); err != nil {
@@ -137,7 +143,7 @@ func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Cl
 
 	if err := lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
 		Name:          node.Name,
-		RAM:           node.RAMInstallMB,
+		RAM:           ram,
 		VCPUs:         node.VCPUs,
 		Disks:         disks,
 		Networks:      nets,
