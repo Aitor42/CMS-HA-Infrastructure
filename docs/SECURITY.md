@@ -119,7 +119,7 @@ and CERT-EU publish for the case where a node has not been patched yet.
 `php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3`, for whether Apache
 loads `mod_php`, and for the mitigations, and **fails the phase** when any
 pinned package is older than the floor or a mitigation is missing
-(`internal/utils/verify_functional.go`, `checkPHPSecurityPatch`). Checking the
+(`internal/verify/verify_functional.go`, `checkPHPSecurityPatch`). Checking the
 Apache SAPI as well as the CLI matters: a patched CLI alone would leave
 `mod_php` serving the vulnerable library. The version comparison is delegated
 to `dpkg --compare-versions` on the node itself, so the answer follows
@@ -134,7 +134,7 @@ Puppet and Go copies drift):
 | Where | What to change |
 |-------|----------------|
 | `puppet/modules/role/manifests/cms_frontend.pp` | `$php_patched_version` |
-| `internal/utils/verify_functional.go` | `phpPatchedPackage` |
+| `internal/verify/verify_functional.go` | `phpPatchedPackage` |
 | `docs/SOFTWARE_BASELINE.md` | the *PHP Engine* row |
 
 ---

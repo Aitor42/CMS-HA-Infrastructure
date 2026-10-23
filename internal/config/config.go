@@ -986,6 +986,18 @@ func (c *Config) PrimaryLB() NodeDetail {
 	return c.Nodes.LBs[0]
 }
 
+// FirstMaster returns the first master with an address. Verification, drills
+// and failover all need one reachable control-plane node and previously kept
+// their own copy of this loop.
+func (c *Config) FirstMaster() (NodeDetail, bool) {
+	for _, m := range c.Nodes.Masters {
+		if m.IP != "" {
+			return m, true
+		}
+	}
+	return NodeDetail{}, false
+}
+
 // LBVIP returns the keepalived floating address clients (and the router DNAT)
 // use to reach the CMS.
 func (c *Config) LBVIP() string {

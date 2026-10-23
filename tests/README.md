@@ -51,12 +51,15 @@ would require exporting internal helpers purely for testing.
 | `internal/phases/traffic/traffic_internal_test.go` | `resolveBaseURL`, `buildArgs`, `firstExistingFile` |
 | `internal/ssh/client_internal_test.go` | `shellQuote`, `remoteCommand`, host-key TOFU, elevated writes |
 | `internal/ssh/knownhosts_internal_test.go` | `removeHostsFromKnownHosts` |
-| `internal/utils/bootorder_internal_test.go` | `reorderBootElements` |
-| `internal/utils/install_batches_internal_test.go` | `planInstallBatches`, `chunkInstallNodes` |
-| `internal/utils/verify_functional_http_internal_test.go` | CMS/load-balancer/monitoring probes |
-| `internal/utils/verify_functional_internal_test.go` | probe parsers, dashboard and PHP checks |
-| `internal/utils/verify_internal_test.go` | `countReadyNodes` |
-| `internal/utils/vmcreate_internal_test.go` | `clientVMDefinition` |
+| `internal/hypervisor/bootorder_internal_test.go` | `reorderBootElements` |
+| `internal/hypervisor/install_by_batches_internal_test.go` | `planInstallBatches`, `chunkInstallNodes` |
+| `internal/verify/verify_functional_http_internal_test.go` | CMS/load-balancer/monitoring probes |
+| `internal/verify/verify_functional_internal_test.go` | probe parsers, dashboard and PHP checks |
+| `internal/verify/verify_internal_test.go` | `countReadyNodes` |
+| `internal/httpcheck/httpcheck_test.go` | `Get` (body, Host header, timeout) and `LBReachable` |
+| `internal/prom/prom_test.go` | Prometheus sample parsing |
+| `internal/drills/drills_test.go` | CronJob creation, wait, diagnostics and cleanup |
+| `internal/hypervisor/vmcreate_internal_test.go` | `clientVMDefinition` |
 
 Any assertion that can be made through the public API belongs here instead: the
 checkpoint `State` round-trip, the `TrafficVHost`/`K6Image` accessors and the

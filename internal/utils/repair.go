@@ -8,6 +8,7 @@ import (
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -88,7 +89,7 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s ssh.Executor) error {
 				logging.Warn("failed to start k3s on %s (exit %d): %v %s", res.Host, res.ExitCode, res.Err, strings.TrimSpace(res.Output))
 			}
 		}
-		if !waitFor(ctx, 90*time.Second, 3*time.Second, func() bool {
+		if !retry.Wait(ctx, 90*time.Second, 3*time.Second, func() bool {
 			out, _, code, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes --no-headers")
 			return err == nil && code == 0 && strings.TrimSpace(out) != ""
 		}) {
@@ -109,7 +110,7 @@ func RepairK8s(ctx context.Context, cfg *config.Config, s ssh.Executor) error {
 				logging.Warn("failed to start k3s-agent on %s (exit %d): %v %s", res.Host, res.ExitCode, res.Err, strings.TrimSpace(res.Output))
 			}
 		}
-		if len(masterIPs) > 0 && !waitFor(ctx, 120*time.Second, 3*time.Second, func() bool {
+		if len(masterIPs) > 0 && !retry.Wait(ctx, 120*time.Second, 3*time.Second, func() bool {
 			out, _, code, err := s.RunCommand(ctx, masterIPs[0], "kubectl get nodes --no-headers")
 			return err == nil && code == 0 && strings.TrimSpace(out) != "" && !strings.Contains(out, "NotReady")
 		}) {

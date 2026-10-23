@@ -11,6 +11,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/verify"
 )
 
 func newTestPool(t *testing.T) *ssh.Pool {
@@ -46,7 +47,7 @@ func TestUtils_NewVerifier(t *testing.T) {
 	s := &ssh.Pool{}
 	l := libvirt.NewClient("qemu:///system")
 
-	v := utils.NewVerifier(cfg, s, l)
+	v := verify.NewVerifier(cfg, s, l)
 	if v == nil {
 		t.Fatalf("expected non-nil Verifier")
 	}
@@ -119,7 +120,7 @@ func TestUtils_VerifyAll_Concurrent(t *testing.T) {
 	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
-	v := utils.NewVerifier(cfg, s, l)
+	v := verify.NewVerifier(cfg, s, l)
 	// Some checks honour the context and only return when it expires, so this
 	// budget is the test's wall time. It only has to outlive the fan-out, not
 	// any real check: the dummy IPs make every probe fail immediately.

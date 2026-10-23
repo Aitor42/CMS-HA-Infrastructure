@@ -1,4 +1,4 @@
-package utils
+package verify
 
 import (
 	"context"
@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/httpcheck"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/prom"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 )
@@ -736,7 +738,7 @@ func (v *Verifier) checkBackupStore(ctx context.Context) e2eOutcome {
 		o.detail = "disabled"
 		return o
 	}
-	master, ok := firstMaster(v.cfg)
+	master, ok := v.cfg.FirstMaster()
 	if !ok {
 		o.detail = "no master node with an address is configured"
 		return o
@@ -766,7 +768,7 @@ func (v *Verifier) checkBackupStore(ctx context.Context) e2eOutcome {
 func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOutcome {
 	o := e2eOutcome{label: "Prometheus probes"}
 
-	status, body, err := httpGet(ctx, base+"/api/v1/rules", "", functionalTimeout, false)
+	status, body, err := httpcheck.Get(ctx, base+"/api/v1/rules", "", functionalTimeout, false)
 	if err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("GET %s/api/v1/rules failed (HTTP %d): %v", base, status, err)
 		return o
@@ -782,12 +784,12 @@ func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOu
 	}
 
 	query := url.Values{"query": {"probe_success"}}
-	status, body, err = httpGet(ctx, base+"/api/v1/query?"+query.Encode(), "", functionalTimeout, false)
+	status, body, err = httpcheck.Get(ctx, base+"/api/v1/query?"+query.Encode(), "", functionalTimeout, false)
 	if err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("query probe_success failed (HTTP %d): %v", status, err)
 		return o
 	}
-	values, err := prometheusValues(body)
+	values, err := prom.Values(body)
 	if err != nil {
 		o.detail = fmt.Sprintf("the probe_success payload is unreadable: %v", err)
 		return o
@@ -819,7 +821,7 @@ func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOu
 		{"cms_drbd_connected", "the DRBD textfile publisher on internal-master1/2"},
 		{"cms_keepalived_vip_present", "the keepalived textfile publisher on main-lb1/2"},
 	} {
-		samples, err := prometheusSeries(ctx, base, series.name)
+		samples, err := prom.Series(ctx, base, series.name)
 		if err != nil {
 			o.detail = fmt.Sprintf("%s: %v", series.name, err)
 			return o
@@ -833,21 +835,6 @@ func (v *Verifier) checkMonitoringProbes(ctx context.Context, base string) e2eOu
 	o.pass = true
 	o.detail = fmt.Sprintf("%d rule(s) in %d group(s), %d/%d blackbox probes up, DRBD and keepalived metrics present", rules, groups, up, len(values))
 	return o
-}
-
-// prometheusSeries evaluates an instant query and returns its samples. It is
-// used for "this series must exist" checks, where an empty result is a failure
-// with a different cause than a transport error.
-func prometheusSeries(ctx context.Context, base, expr string) ([]float64, error) {
-	query := url.Values{"query": {expr}}
-	status, body, err := httpGet(ctx, base+"/api/v1/query?"+query.Encode(), "", functionalTimeout, false)
-	if err != nil {
-		return nil, fmt.Errorf("query %s failed: %w", expr, err)
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("query %s failed (HTTP %d)", expr, status)
-	}
-	return prometheusValues(body)
 }
 
 // checkGrafanaProvisioning proves the Grafana an operator opens really shows
@@ -1290,40 +1277,4 @@ func countAlertRules(body string) (groups, rules int, err error) {
 		rules += len(group.Rules)
 	}
 	return groups, rules, nil
-}
-
-// prometheusValues extracts every sample value of a Prometheus query result.
-// phase08 only needs the aggregate count of a query, but a functional check has
-// to look at each series, because every blackbox probe has to be up.
-func prometheusValues(body string) ([]float64, error) {
-	var res struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result []struct {
-				Value []any `json:"value"`
-			} `json:"result"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(body), &res); err != nil {
-		return nil, err
-	}
-	if res.Status != "success" {
-		return nil, fmt.Errorf("status %q", res.Status)
-	}
-	values := make([]float64, 0, len(res.Data.Result))
-	for _, sample := range res.Data.Result {
-		if len(sample.Value) < 2 {
-			return nil, fmt.Errorf("sample %v carries no value", sample.Value)
-		}
-		raw, ok := sample.Value[1].(string)
-		if !ok {
-			return nil, fmt.Errorf("sample value %v is not a string", sample.Value[1])
-		}
-		f, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return nil, fmt.Errorf("sample value %q: %w", raw, err)
-		}
-		values = append(values, f)
-	}
-	return values, nil
 }

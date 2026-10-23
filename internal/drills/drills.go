@@ -1,4 +1,4 @@
-package utils
+package drills
 
 import (
 	"context"
@@ -10,7 +10,10 @@ import (
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/httpcheck"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/prom"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -53,7 +56,7 @@ func RunDrills(ctx context.Context, cfg *config.Config, pool ssh.Executor, opts 
 // then restore into a throwaway MariaDB) and proves that Prometheus received
 // the freshness metrics the alert rules read.
 func runBackupDrill(ctx context.Context, cfg *config.Config, pool ssh.Executor) error {
-	master, ok := firstMaster(cfg)
+	master, ok := cfg.FirstMaster()
 	if !ok {
 		return fmt.Errorf("no master node with an address is configured")
 	}
@@ -82,8 +85,8 @@ func runBackupDrill(ctx context.Context, cfg *config.Config, pool ssh.Executor) 
 		"cms_backup_last_success_timestamp_seconds",
 		"cms_backup_restore_last_success_timestamp_seconds",
 	} {
-		if !waitFor(ctx, 90*time.Second, 5*time.Second, func() bool {
-			values, qerr := prometheusSeries(ctx, base, series)
+		if !retry.Wait(ctx, 90*time.Second, 5*time.Second, func() bool {
+			values, qerr := prom.Series(ctx, base, series)
 			if qerr != nil || len(values) == 0 {
 				return false
 			}
@@ -109,7 +112,7 @@ func runCronJob(ctx context.Context, pool ssh.Executor, host, cron, prefix strin
 	if out, errOut, code, err := pool.RunCommand(ctx, host, cmd); err != nil || code != 0 {
 		return "", fmt.Errorf("create job from cronjob/%s (exit %d): %v %s%s", cron, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
 	}
-	if !waitFor(ctx, timeout, 5*time.Second, func() bool {
+	if !retry.Wait(ctx, timeout, 5*time.Second, func() bool {
 		out, _, _, err := pool.RunCommand(ctx, host, fmt.Sprintf("kubectl get job %s -n cms -o jsonpath='{.status.succeeded}'", name))
 		return err == nil && strings.TrimSpace(out) == "1"
 	}) {
@@ -185,7 +188,7 @@ func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool ssh.Execut
 	if _, _, code, err := pool.RunCommand(ctx, lb.IP, "systemctl is-active nginx"); err != nil || code != 0 {
 		return fmt.Errorf("nginx is not active on %s after the certificate renewal", lb.Name)
 	}
-	if !checkLBReachability(ctx, lb.IP, cfg.TrafficVHost()) {
+	if !httpcheck.LBReachable(ctx, lb.IP, cfg.TrafficVHost()) {
 		return fmt.Errorf("%s does not answer HTTPS after the certificate renewal", lb.Name)
 	}
 	logging.Success("Drill: %s rotated its certificate over mTLS and reloaded nginx", lb.Name)
@@ -205,10 +208,10 @@ func checkNoFiringAlerts(ctx context.Context, cfg *config.Config) error {
 
 	var firing []string
 	var queryErr error
-	ok := waitFor(ctx, 90*time.Second, 5*time.Second, func() bool {
+	ok := retry.Wait(ctx, 90*time.Second, 5*time.Second, func() bool {
 		firing = firing[:0]
 		queryErr = nil
-		status, body, err := httpGet(ctx, base+"/api/v1/query?"+query.Encode(), "", functionalTimeout, false)
+		status, body, err := httpcheck.Get(ctx, base+"/api/v1/query?"+query.Encode(), "", prom.Timeout, false)
 		if err != nil {
 			queryErr = err
 			return false
@@ -248,13 +251,4 @@ func checkNoFiringAlerts(ctx context.Context, cfg *config.Config) error {
 	}
 	logging.Success("Drill: no alert is firing on the healthy lab")
 	return nil
-}
-
-func firstMaster(cfg *config.Config) (config.NodeDetail, bool) {
-	for _, m := range cfg.Nodes.Masters {
-		if m.IP != "" {
-			return m, true
-		}
-	}
-	return config.NodeDetail{}, false
 }

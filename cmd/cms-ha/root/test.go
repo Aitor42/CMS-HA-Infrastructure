@@ -1,6 +1,7 @@
 package root
 
 import (
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/drills"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -57,7 +58,7 @@ the assertion that no alert is firing on a healthy lab.`,
 
 			skipBackup, _ := cmd.Flags().GetBool("skip-backup")
 			skipTLS, _ := cmd.Flags().GetBool("skip-tls")
-			return utils.RunDrills(cmd.Context(), cfg, pool, utils.DrillsOptions{
+			return drills.RunDrills(cmd.Context(), cfg, pool, drills.DrillsOptions{
 				SkipBackup: skipBackup,
 				SkipTLS:    skipTLS,
 			})

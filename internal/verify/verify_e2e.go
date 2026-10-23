@@ -1,4 +1,4 @@
-package utils
+package verify
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/httpcheck"
 )
 
 // This file implements the verifier's end-to-end check: it asks the deployed
@@ -185,13 +187,13 @@ func (v *Verifier) checkPrometheus(ctx context.Context, monitorIP string) e2eOut
 	o := e2eOutcome{label: "Prometheus"}
 	base := "http://" + monitorIP + ":9090"
 
-	if status, _, err := httpGet(ctx, base+"/-/healthy", "", e2eTimeout, false); err != nil || status != http.StatusOK {
+	if status, _, err := httpcheck.Get(ctx, base+"/-/healthy", "", e2eTimeout, false); err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("GET %s/-/healthy failed (HTTP %d): %v", base, status, err)
 		return o
 	}
 
 	query := url.Values{"query": {"count(up == 1)"}}
-	status, body, err := httpGet(ctx, base+"/api/v1/query?"+query.Encode(), "", e2eTimeout, false)
+	status, body, err := httpcheck.Get(ctx, base+"/api/v1/query?"+query.Encode(), "", e2eTimeout, false)
 	if err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("query failed (HTTP %d): %v", status, err)
 		return o
@@ -223,7 +225,7 @@ func (v *Verifier) checkGrafana(ctx context.Context, monitorIP string) e2eOutcom
 	o := e2eOutcome{label: "Grafana"}
 	endpoint := "http://" + monitorIP + ":3000/api/health"
 
-	status, body, err := httpGet(ctx, endpoint, "", e2eTimeout, false)
+	status, body, err := httpcheck.Get(ctx, endpoint, "", e2eTimeout, false)
 	if err != nil || status != http.StatusOK {
 		o.detail = fmt.Sprintf("GET %s failed (HTTP %d): %v", endpoint, status, err)
 		return o
@@ -260,41 +262,6 @@ func httpGetWithClient(ctx context.Context, client *http.Client, rawURL, hostHea
 	if hostHeader != "" {
 		req.Host = hostHeader
 	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
-	if err != nil {
-		return resp.StatusCode, "", err
-	}
-	return resp.StatusCode, string(body), nil
-}
-
-// httpGet is a one-shot GET with a per-request timeout. insecure skips TLS
-// verification for endpoints whose certificate comes from the project's own CA.
-func httpGet(ctx context.Context, rawURL, hostHeader string, timeout time.Duration, insecure bool) (int, string, error) {
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return 0, "", err
-	}
-	if hostHeader != "" {
-		req.Host = hostHeader
-	}
-
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if insecure {
-		// #nosec G402 -- the lab serves its own internally-issued certificate.
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
-	}
-	client := &http.Client{Timeout: timeout, Transport: transport}
-	defer client.CloseIdleConnections()
 
 	resp, err := client.Do(req)
 	if err != nil {

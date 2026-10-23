@@ -2,13 +2,12 @@ package utils
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/httpcheck"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
@@ -111,7 +110,7 @@ func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error
 			if err := f.libvirt.Destroy(ctx, name); err != nil {
 				return fmt.Errorf("force power-off %s: %w", name, err)
 			}
-			if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+			if !retry.Wait(ctx, 30*time.Second, 2*time.Second, func() bool {
 				st, derr := f.libvirt.DomainState(ctx, name)
 				return derr == nil && st == "shut off"
 			}) {
@@ -153,7 +152,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	// reschedule and the container start (which may have to pull the MariaDB
 	// image on a master that never ran it). It is generous on purpose: a
 	// slow-but-correct failover must not be recorded as a broken one.
-	mariadbRunning := waitFor(ctx, 480*time.Second, 5*time.Second, func() bool {
+	mariadbRunning := retry.Wait(ctx, 480*time.Second, 5*time.Second, func() bool {
 		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP,
 			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
 		if err != nil {
@@ -168,8 +167,8 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 
 	// Only then check the CMS: every WordPress request needs the database, so
 	// the VIP is expected to serve again as soon as MariaDB is back.
-	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
+		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the database recovered")
@@ -187,7 +186,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 		// back as the Secondary. A node that keeps the Primary role it had before
 		// the restart is a split brain — the pod runs on master2 while master1
 		// also believes it owns the volume.
-		if !waitFor(ctx, 120*time.Second, 5*time.Second, func() bool {
+		if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
 			out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "drbdadm role cms_data")
 			return err == nil && strings.TrimSpace(out) == "Primary/Secondary"
 		}) {
@@ -249,7 +248,7 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
 		return false
 	}
-	if !waitFor(ctx, 30*time.Second, 2*time.Second, func() bool {
+	if !retry.Wait(ctx, 30*time.Second, 2*time.Second, func() bool {
 		state, derr := f.libvirt.DomainState(ctx, primary.Name)
 		return derr == nil && state == "shut off"
 	}) {
@@ -261,7 +260,7 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 	// The survivor has to fence the dead domain (the fence helper exits 0 when
 	// it is already off) and promote itself. Same generous budget as scenario 1:
 	// a slow-but-correct failover must not be recorded as a broken one.
-	mariadbRunning := waitFor(ctx, 480*time.Second, 5*time.Second, func() bool {
+	mariadbRunning := retry.Wait(ctx, 480*time.Second, 5*time.Second, func() bool {
 		out, _, _, err := f.ssh.RunCommand(ctx, standby.IP,
 			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
 		return err == nil && strings.Contains(out, standby.Name) && strings.Contains(out, "Running")
@@ -270,8 +269,8 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 		pass = false
 		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running on %s after the power cut", standby.Name))
 	}
-	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
+		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the power-cut failover")
@@ -289,7 +288,7 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 		// metadata must end up as the Secondary, with the survivor as the only
 		// writer. The budget covers the boot guard, the reconnect and the resync
 		// after-sb-1pri triggers.
-		if !waitFor(ctx, 180*time.Second, 5*time.Second, func() bool {
+		if !retry.Wait(ctx, 180*time.Second, 5*time.Second, func() bool {
 			out, _, _, err := f.ssh.RunCommand(ctx, standby.IP, "drbdadm role cms_data")
 			return err == nil && strings.TrimSpace(out) == "Primary/Secondary"
 		}) {
@@ -326,8 +325,8 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	// Verify HTTP / HTTPS reachability (routes to cms2, via the VIP). The window
 	// covers nginx noticing the dead backend and the surviving frontend serving
 	// the request on its own.
-	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
+		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200/301/302 after cms1 shutdown")
@@ -372,7 +371,7 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	// hostPath, so the workers host no long-running pod that could move. What a
 	// worker loss must not do is take the database or the CMS down, so assert
 	// exactly that instead of a reschedule this design never performs.
-	if !waitFor(ctx, 120*time.Second, 5*time.Second, func() bool {
+	if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
 		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl --request-timeout=10s get pods -n cms | grep mariadb")
 		return err == nil && strings.Contains(out, "Running")
 	}) {
@@ -380,8 +379,8 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 		logging.Warn("MariaDB pod is not Running after worker1 was shut down")
 		f.logFailoverDiagnostics(ctx, "MariaDB pod is not Running after the worker failover")
 	}
-	if !waitFor(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return checkLBReachability(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
+		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on the Load Balancer VIP after worker1 was shut down")
@@ -472,9 +471,9 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 	// The survivor must both acquire the address and serve the CMS through it.
 	// Waiting on the address alone would pass while nginx is still down, and
 	// waiting on HTTPS alone could be answered by a stale connection.
-	if !waitFor(ctx, 90*time.Second, 2*time.Second, func() bool {
+	if !retry.Wait(ctx, 90*time.Second, 2*time.Second, func() bool {
 		return f.lbHoldsVIP(ctx, survivor.IP, vip) &&
-			checkLBReachability(ctx, vip, f.cfg.TrafficVHost())
+			httpcheck.LBReachable(ctx, vip, f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("%s did not take over the VIP %s after %s was shut down", survivor.Name, vip, holder.Name)
@@ -491,9 +490,9 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 
 	// After the reboot exactly one balancer must own the VIP again. keepalived
 	// preempts back to the higher-priority node, so give it time to settle.
-	if !waitFor(ctx, 120*time.Second, 5*time.Second, func() bool {
+	if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
 		return f.countVIPHolders(ctx, vip) == 1 &&
-			checkLBReachability(ctx, vip, f.cfg.TrafficVHost())
+			httpcheck.LBReachable(ctx, vip, f.cfg.TrafficVHost())
 	}) {
 		pass = false
 		logging.Warn("VIP %s is not owned by exactly one balancer after %s recovered", vip, holder.Name)
@@ -600,64 +599,12 @@ func (f *FailoverTester) printSkipped(name string) {
 	logging.Warn("Scenario: %-25s | Status: %-4s | Duration: %s", name, "SKIP", "0s")
 }
 
-// waitFor polls fn until it returns true, the context is cancelled or the
-// timeout elapses. It replaces blind fixed sleeps so a failover that completes
-// early is detected immediately instead of after an arbitrary delay.
-//
-// The attempt count reproduces the old deadline loop exactly: the first probe
-// runs at once, then one probe per interval, plus one final probe after the
-// deadline in case it lands just past it.
-func waitFor(ctx context.Context, timeout, interval time.Duration, fn func() bool) bool {
-	if interval <= 0 {
-		interval = time.Millisecond
-	}
-	attempts := int(timeout/interval) + 2
-	if attempts < 1 {
-		attempts = 1
-	}
-	err := retry.PollContext(ctx, retry.Config{MaxAttempts: attempts, Interval: interval}, func(context.Context) (bool, error) {
-		return fn(), nil
-	})
-	return err == nil
-}
-
 // waitForSSH blocks until host accepts a trivial SSH command or the timeout
 // elapses. Used after restoring a VM so the next scenario starts as soon as the
 // node is back, rather than after a fixed delay.
 func (f *FailoverTester) waitForSSH(ctx context.Context, host string, timeout time.Duration) {
-	waitFor(ctx, timeout, 5*time.Second, func() bool {
+	retry.Wait(ctx, timeout, 5*time.Second, func() bool {
 		_, _, code, err := f.ssh.RunCommand(ctx, host, "true")
 		return err == nil && code == 0
 	})
-}
-
-// lbHTTPClient is shared across reachability probes so its connection pool is
-// reused instead of being rebuilt on every call.
-var lbHTTPClient = &http.Client{
-	Timeout: 10 * time.Second,
-	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // #nosec G402 -- test failover on lab LB
-	},
-}
-
-func checkLBReachability(ctx context.Context, lbIP, vhost string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://%s", lbIP), nil)
-	if err == nil {
-		req.Host = vhost
-		resp, err := lbHTTPClient.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
-		}
-	}
-	reqHTTP, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s", lbIP), nil)
-	if err == nil {
-		reqHTTP.Host = vhost
-		resp, err := lbHTTPClient.Do(reqHTTP)
-		if err == nil {
-			defer resp.Body.Close()
-			return resp.StatusCode == 200 || resp.StatusCode == 301 || resp.StatusCode == 302
-		}
-	}
-	return false
 }

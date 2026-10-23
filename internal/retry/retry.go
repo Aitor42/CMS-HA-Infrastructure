@@ -150,3 +150,24 @@ func PollContext(ctx context.Context, cfg Config, fn func(context.Context) (bool
 
 	return fmt.Errorf("poll max attempts (%d) reached without success", cfg.MaxAttempts)
 }
+
+// Wait polls fn until it returns true, ctx is cancelled or timeout elapses.
+// It is the boolean variant of Poll for callers that only need to know whether
+// the condition was observed, such as failover and drill scenarios.
+//
+// The attempt count reproduces a deadline loop: the first probe runs at once,
+// then one probe per interval, plus one final probe that may land just past the
+// deadline.
+func Wait(ctx context.Context, timeout, interval time.Duration, fn func() bool) bool {
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	attempts := int(timeout/interval) + 2
+	if attempts < 1 {
+		attempts = 1
+	}
+	err := PollContext(ctx, Config{MaxAttempts: attempts, Interval: interval}, func(context.Context) (bool, error) {
+		return fn(), nil
+	})
+	return err == nil
+}
