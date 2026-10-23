@@ -82,6 +82,11 @@ deploy-resume: build ## Resume deployment with pre-installed VMs (phases 01-08)
 	@echo "▶ Resuming deployment (skipping VM creation)..."
 	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create
 
+.PHONY: deploy-fast
+deploy-fast: build ## Full deploy from cloud images (opt-in, not the PXE gate)
+	@echo "▶ Starting fast cloud-image deployment..."
+	./$(BINARY) -c $(CONFIG) deploy --fast-provisioning
+
 .PHONY: deploy-dry-run
 deploy-dry-run: build ## Dry-run deployment (no commands executed)
 	@echo "▶ Dry-run deployment..."

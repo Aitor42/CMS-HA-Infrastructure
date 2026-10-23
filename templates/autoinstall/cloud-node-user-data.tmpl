@@ -1,0 +1,66 @@
+#cloud-config
+# Cloud-image variant for client nodes. Unlike the jumpstart template this one
+# renders the exact NIC list the topology assigned to the node: internal nodes
+# have one interface, main-network nodes have one, and the router has three.
+
+hostname: {{ .Hostname }}
+preserve_hostname: false
+manage_etc_hosts: true
+
+users:
+  - name: ubuntu
+    gecos: Ubuntu
+    groups: [adm, sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    shell: /bin/bash
+    lock_passwd: false
+    passwd: "{{ .PasswordHash }}"
+    ssh_authorized_keys:
+      - {{ .PubKey }}
+
+ssh_pwauth: false
+disable_root: true
+
+# Puppet owns package state from phase 04 onwards. The cloud image already has
+# the server packages, so a boot-time apt update only delays SSH readiness.
+package_update: false
+package_upgrade: false
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/01-permitrootlogin.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+  - path: /etc/sudoers.d/90-cms-ha
+    permissions: "0440"
+    content: |
+      Defaults:ubuntu !requiretty
+      Defaults log_output
+
+network:
+  version: 2
+  ethernets:
+{{ range .Interfaces }}    {{ .Name }}:
+      match:
+        macaddress: "{{ .MAC }}"
+{{ if .DHCP }}      dhcp4: true
+      dhcp4-overrides:
+        route-metric: {{ .Metric }}
+        use-dns: true
+{{ else }}      addresses:
+        - {{ .IP }}/24
+      nameservers:
+        addresses:
+          - {{ .DNS }}
+{{ if .Gateway }}      routes:
+        - to: default
+          via: {{ .Gateway }}
+          metric: {{ .Metric }}
+{{ end }}{{ end }}{{ end }}
+
+runcmd:
+  # Match the installer path: the random password and the root account are
+  # locked; SSH key auth is the only way in.
+  - [passwd, -l, ubuntu]
+  - [passwd, -l, root]
+  - [systemctl, enable, --now, ssh]

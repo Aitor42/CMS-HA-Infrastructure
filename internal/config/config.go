@@ -65,6 +65,11 @@ type VMConfig struct {
 	// "cloud". Empty looks for ubuntu-24.04-server-cloudimg-amd64.img in
 	// StorageDir.
 	JumpstartBaseImage string `yaml:"jumpstart_base_image"`
+	// Provisioning selects how client nodes get their base OS. "pxe" (the
+	// default) keeps the Cobbler deliverable path; "cloud" boots a qcow2
+	// overlay of JumpstartBaseImage with per-node cloud-init and is the
+	// opt-in fast path for iteration and CI.
+	Provisioning string `yaml:"provisioning"`
 }
 
 // JumpstartImageMode returns the configured jumpstart install path, defaulting
@@ -74,6 +79,15 @@ func (c *Config) JumpstartImageMode() string {
 		return mode
 	}
 	return "iso"
+}
+
+// ClientProvisioningMode returns how client nodes are installed, defaulting to
+// the PXE path so the deliverable remains the default.
+func (c *Config) ClientProvisioningMode() string {
+	if mode := strings.ToLower(strings.TrimSpace(c.VM.Provisioning)); mode != "" {
+		return mode
+	}
+	return "pxe"
 }
 
 // SSHConfig controls the deploy account, key and host-key verification.
@@ -632,6 +646,11 @@ func (c *Config) validateDeploy() error {
 	case "iso", "cloud":
 	default:
 		return fmt.Errorf("vm.jumpstart_image must be \"iso\" or \"cloud\" (got %q)", c.VM.JumpstartImage)
+	}
+	switch c.ClientProvisioningMode() {
+	case "pxe", "cloud":
+	default:
+		return fmt.Errorf("vm.provisioning must be \"pxe\" or \"cloud\" (got %q)", c.VM.Provisioning)
 	}
 	if c.SSH.User != "" && !validUnixUser.MatchString(c.SSH.User) {
 		return fmt.Errorf("ssh.user is not a valid Unix user name: %q", c.SSH.User)

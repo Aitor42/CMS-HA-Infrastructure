@@ -42,7 +42,7 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 		return nil
 	}
 
-	node, nets, extraDisks, err := clientVMDefinition(ctx, cfg, lv, name)
+	node, nets, extraDisks, err := ClientVMDefinition(ctx, cfg, lv, name)
 	if err != nil {
 		return err
 	}
@@ -87,6 +87,81 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 	return applyBootOrder(ctx, lv, node.Name)
 }
 
+// CreateCloudClientVM defines and boots one client node from an existing
+// cloud-image overlay and a per-node cloud-init seed. It is the opt-in fast
+// path: unlike CreateClientVM there is no PXE boot and no installer to wait
+// for, so the guest starts serving as soon as cloud-init has configured it.
+func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client, name, baseImage, seedISO string) error {
+	if name == "" {
+		return fmt.Errorf("client VM with an empty name")
+	}
+	if baseImage == "" {
+		return fmt.Errorf("cloud base image for %s is empty", name)
+	}
+	if seedISO == "" {
+		return fmt.Errorf("cloud-init seed for %s is empty", name)
+	}
+
+	exists, err := lv.DomainExistsChecked(ctx, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		logging.Info("VM %s already exists; leaving it intact (use --recreate to replace it)", name)
+		return nil
+	}
+
+	node, nets, extraDisks, err := ClientVMDefinition(ctx, cfg, lv, name)
+	if err != nil {
+		return err
+	}
+
+	logging.Info("Creating cloud VM: %s (RAM: %d MB, vCPUs: %d, Disk: %d GB)",
+		node.Name, node.RAMInstallMB, node.VCPUs, node.DiskGB)
+
+	diskPath := filepath.Join(cfg.VM.StorageDir, node.Name+".qcow2")
+	if err := EnsureDiskPathAvailable(diskPath); err != nil {
+		return err
+	}
+	for _, disk := range extraDisks {
+		if err := EnsureDiskPathAvailable(disk.Path); err != nil {
+			return err
+		}
+	}
+	if err := libvirt.CreateOverlayDisk(ctx, diskPath, baseImage, node.DiskGB); err != nil {
+		return fmt.Errorf("failed to create %s overlay disk: %w", node.Name, err)
+	}
+
+	disks := []libvirt.DiskOpt{{Path: diskPath}, {Path: seedISO}}
+	disks = append(disks, extraDisks...)
+
+	if err := lv.VirtInstall(ctx, libvirt.VirtInstallOpts{
+		Name:          node.Name,
+		RAM:           node.RAMInstallMB,
+		VCPUs:         node.VCPUs,
+		Disks:         disks,
+		Networks:      nets,
+		Import:        true,
+		BootOrder:     []string{"hd"},
+		OSVariant:     "ubuntu24.04",
+		GraphicsNone:  true,
+		NoAutoConsole: true,
+		NoWait:        true,
+	}); err != nil {
+		return err
+	}
+
+	// libvirt runs qemu as its own user, so the disks and the seed must be
+	// readable by it.
+	_ = os.Chmod(diskPath, 0666)
+	_ = os.Chmod(seedISO, 0644)
+	for _, disk := range extraDisks {
+		_ = os.Chmod(disk.Path, 0666)
+	}
+
+	return nil
+}
+
 // applyBootOrder makes sure the guest that was just created boots its disk
 // before its NIC, restarting it when the definition had to change.
 //
@@ -121,12 +196,13 @@ func applyBootOrder(ctx context.Context, lv *libvirt.Client, name string) error 
 	return nil
 }
 
-// clientVMDefinition maps a node name to its definition and to the virtual
-// networks and extra disks the topology assigns to it. The router is the only
-// node with three NICs (internal, main and a WAN uplink) and a master may
-// carry the extra disk DRBD replicates, so both need the node details rather
-// than the summary the topology exposes elsewhere.
-func clientVMDefinition(ctx context.Context, cfg *config.Config, lv *libvirt.Client, name string) (config.NodeDetail, []libvirt.NetworkOpt, []libvirt.DiskOpt, error) {
+// ClientVMDefinition maps a node name to its definition and to the virtual
+// networks and extra disks the topology assigns to it. It is exported so the
+// cloud provisioning path can render the same NIC list the PXE path creates.
+// The router is the only node with three NICs (internal, main and a WAN uplink)
+// and a master may carry the extra disk DRBD replicates, so both need the node
+// details rather than the summary the topology exposes elsewhere.
+func ClientVMDefinition(ctx context.Context, cfg *config.Config, lv *libvirt.Client, name string) (config.NodeDetail, []libvirt.NetworkOpt, []libvirt.DiskOpt, error) {
 	if router := cfg.Nodes.Router; name == router.Name {
 		wanNet := "default"
 		if !lv.NetExists(ctx, "default") {

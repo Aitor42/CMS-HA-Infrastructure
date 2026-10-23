@@ -34,6 +34,9 @@ type Options struct {
 	// JumpstartImage overrides vm.jumpstart_image for one run: "iso" or
 	// "cloud". Empty keeps the configured value (ISO by default).
 	JumpstartImage string
+	// FastProvisioning installs client nodes from the cloud image instead of
+	// PXE. It is the opt-in fast path; the PXE/Cobbler gate stays the default.
+	FastProvisioning bool
 }
 
 // Phase implements the VM initialization phase (Phase 00).
@@ -312,6 +315,29 @@ type autoinstallData struct {
 	WANIfaceConfigCloud string
 }
 
+// cloudNodeData is the cloud-init user-data for a client node created through
+// the fast path. Interfaces is built from the NICs the topology assigns to the
+// node, so internal, main and router nodes all share one template.
+type cloudNodeData struct {
+	Hostname     string
+	PasswordHash string
+	PubKey       string
+	Interfaces   []cloudInterface
+}
+
+// cloudInterface is one cloud-init ethernet stanza. DHCP is used for the WAN
+// uplink; every lab-facing NIC gets a fixed address so the node is reachable
+// before any DHCP server exists.
+type cloudInterface struct {
+	Name    string
+	MAC     string
+	IP      string
+	Gateway string
+	DNS     string
+	DHCP    bool
+	Metric  int
+}
+
 // deployJumpstart provisions the Jumpstart VM via cloud-init autoinstall.
 func (p *Phase) deployJumpstart(ctx context.Context) error {
 	logging.Info("Deploying Jumpstart VM...")
@@ -517,28 +543,52 @@ func (p *Phase) createJumpstartSeed(ctx context.Context, mode string, data autoi
 	}
 
 	seedDir := filepath.Join(p.cfg.VM.StorageDir, seedDirName)
+	seedISO := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
+	if err := p.writeSeed(ctx, seedDir, seedISO, metaData, userData); err != nil {
+		return "", err
+	}
+	return seedISO, nil
+}
+
+// createCloudNodeSeed renders the per-node cloud-init user-data and packs it in
+// its own seed ISO. A shared seed would give every VM the same hostname and
+// address, so the fast path pays one tiny ISO per node.
+func (p *Phase) createCloudNodeSeed(ctx context.Context, name string, data cloudNodeData) (string, error) {
+	userData, err := renderTemplate("templates/autoinstall/cloud-node-user-data.tmpl", data)
+	if err != nil {
+		return "", fmt.Errorf("render cloud-node user-data: %w", err)
+	}
+	metaData := fmt.Sprintf("instance-id: cms-ha-%s-%d\nlocal-hostname: %s\n", name, time.Now().UnixNano(), data.Hostname)
+	seedDir := filepath.Join(p.cfg.VM.StorageDir, "cloud-init-"+name)
+	seedISO := filepath.Join(p.cfg.VM.StorageDir, name+"-seed.iso")
+	if err := p.writeSeed(ctx, seedDir, seedISO, metaData, userData); err != nil {
+		return "", err
+	}
+	return seedISO, nil
+}
+
+// writeSeed writes the NoCloud files and turns them into a cidata ISO.
+func (p *Phase) writeSeed(ctx context.Context, seedDir, seedISO, metaData string, userData []byte) error {
 	if err := os.MkdirAll(seedDir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create %s dir: %w", seedDirName, err)
+		return fmt.Errorf("failed to create %s dir: %w", filepath.Base(seedDir), err)
 	}
 	if err := os.WriteFile(filepath.Join(seedDir, "user-data"), userData, 0600); err != nil {
-		return "", fmt.Errorf("failed to write user-data: %w", err)
+		return fmt.Errorf("failed to write user-data: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(seedDir, "meta-data"), []byte(metaData), 0600); err != nil {
-		return "", fmt.Errorf("failed to write meta-data: %w", err)
+		return fmt.Errorf("failed to write meta-data: %w", err)
 	}
-
-	seedISO := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
 	if err := libvirt.CreateISO(ctx, seedISO, seedDir, "cidata"); err != nil {
-		return "", fmt.Errorf("failed to create seed ISO: %w", err)
+		return fmt.Errorf("failed to create seed ISO: %w", err)
 	}
 	_ = os.Chmod(seedISO, 0644)
 	logging.Success("Cloud-init seed ISO created: %s", seedISO)
-	return seedISO, nil
+	return nil
 }
 
 // renderTemplate renders one embedded cloud-init template. It is separate from
 // createJumpstartSeed so tests can assert the rendered YAML without xorrisofs.
-func renderTemplate(path string, data autoinstallData) ([]byte, error) {
+func renderTemplate(path string, data any) ([]byte, error) {
 	content, err := cms.TemplatesFS.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -586,8 +636,32 @@ func findCloudImage(dir, configured string) (string, error) {
 	return "", fmt.Errorf("no Ubuntu 24.04 cloud image found in %s; download ubuntu-24.04-server-cloudimg-amd64.img from https://cloud-images.ubuntu.com/noble/current/ or set vm.jumpstart_base_image", dir)
 }
 
-// deployClientNodes provisions all client nodes via PXE boot.
+// clientProvisioningMode resolves how client nodes are installed: the flag
+// wins, then vm.provisioning, then the PXE default.
+func (p *Phase) clientProvisioningMode() (string, error) {
+	if p.opts.FastProvisioning {
+		return "cloud", nil
+	}
+	switch mode := p.cfg.ClientProvisioningMode(); mode {
+	case "pxe", "cloud":
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid vm.provisioning %q: want \"pxe\" or \"cloud\"", mode)
+	}
+}
+
+// deployClientNodes provisions all client nodes, either through PXE (the
+// deliverable path) or from the cloud image (the opt-in fast path).
 func (p *Phase) deployClientNodes(ctx context.Context) error {
+	mode, err := p.clientProvisioningMode()
+	if err != nil {
+		return err
+	}
+	logging.Info("Client install path: %s", mode)
+	if mode == "cloud" {
+		return p.deployCloudClientNodes(ctx)
+	}
+
 	logging.Info("Deploying client nodes...")
 
 	// The jumpstart is installed from its ISO rather than over PXE, so it is
@@ -605,6 +679,113 @@ func (p *Phase) deployClientNodes(ctx context.Context) error {
 
 	logging.Success("All client nodes deployed")
 	return nil
+}
+
+// deployCloudClientNodes provisions every client node from one cloud image:
+// each VM gets a qcow2 overlay and a per-node cloud-init seed ISO, so the OS is
+// ready as soon as the guest boots instead of waiting for a PXE install.
+func (p *Phase) deployCloudClientNodes(ctx context.Context) error {
+	logging.Info("Deploying client nodes from the cloud image...")
+
+	baseImage, err := findCloudImage(p.cfg.VM.StorageDir, p.cfg.VM.JumpstartBaseImage)
+	if err != nil {
+		return err
+	}
+	logging.Info("Using Ubuntu cloud image: %s", baseImage)
+
+	pubKey, err := p.ensureSSHKey(p.cfg.SSH.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("SSH key setup failed: %w", err)
+	}
+	passHash, err := generateRandomPasswordHash()
+	if err != nil {
+		return fmt.Errorf("generate admin password hash: %w", err)
+	}
+
+	for _, node := range p.cfg.AllNodes() {
+		if node.Name == "" || node.Name == p.cfg.Nodes.Jumpstart.Name {
+			continue
+		}
+		detail, nets, _, err := hypervisor.ClientVMDefinition(ctx, p.cfg, p.lv, node.Name)
+		if err != nil {
+			return fmt.Errorf("resolve VM %s: %w", node.Name, err)
+		}
+		data := cloudNodeData{
+			Hostname:     detail.Name,
+			PasswordHash: passHash,
+			PubKey:       pubKey,
+			Interfaces:   cloudInterfaces(p.cfg, detail, nets),
+		}
+		seedISO, err := p.createCloudNodeSeed(ctx, detail.Name, data)
+		if err != nil {
+			return fmt.Errorf("prepare cloud-init for %s: %w", detail.Name, err)
+		}
+		if err := hypervisor.CreateCloudClientVM(ctx, p.cfg, p.lv, detail.Name, baseImage, seedISO); err != nil {
+			return fmt.Errorf("failed to create VM %s: %w", detail.Name, err)
+		}
+	}
+
+	logging.Success("All client nodes deployed from the cloud image")
+	return nil
+}
+
+// cloudInterfaces translates the topology's NIC list into cloud-init ethernet
+// stanzas. The cloud image has no DHCP server to lean on before the jumpstart is
+// configured, so lab-facing NICs get fixed addresses; only the WAN uplink uses
+// DHCP.
+func cloudInterfaces(cfg *config.Config, node config.NodeDetail, nets []libvirt.NetworkOpt) []cloudInterface {
+	ifaces := make([]cloudInterface, 0, len(nets))
+	for i, net := range nets {
+		iface := cloudInterface{
+			Name:   fmt.Sprintf("net%d", i),
+			MAC:    net.Mac,
+			Metric: 200,
+		}
+		switch net.Network {
+		case "internal":
+			iface.IP = node.IP
+			if node.Name == cfg.Nodes.Router.Name {
+				iface.IP = cfg.Network.Internal.Gateway
+			}
+			if node.Name != cfg.Nodes.Router.Name {
+				iface.Gateway = cfg.Network.Internal.Gateway
+			}
+			iface.DNS = cfg.Nodes.Jumpstart.IP
+		case "main":
+			iface.IP = node.IPMain
+			if iface.IP == "" {
+				iface.IP = node.IP
+			}
+			if node.Name == cfg.Nodes.Router.Name {
+				iface.IP = cfg.Network.Main.Gateway
+			} else {
+				iface.Gateway = cfg.Network.Main.Gateway
+			}
+			iface.DNS = cfg.Nodes.Jumpstart.IPMain
+			if iface.DNS == "" {
+				iface.DNS = cfg.Nodes.Jumpstart.IP
+			}
+		default:
+			// The WAN uplink (libvirt "default") is the only interface that
+			// uses DHCP and a lower route metric, matching the jumpstart.
+			iface.DHCP = true
+			iface.Metric = 100
+		}
+		if iface.DNS == "" {
+			iface.DNS = firstNonEmpty(iface.Gateway, cfg.Nodes.Jumpstart.IP)
+		}
+		ifaces = append(ifaces, iface)
+	}
+	return ifaces
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // CleanupOptions specifies options for the cleanup operation.
@@ -698,15 +879,24 @@ func (p *Phase) destroyVM(ctx context.Context, name, state string, exists bool) 
 	for _, disk := range []string{
 		filepath.Join(p.cfg.VM.StorageDir, name+".qcow2"),
 		filepath.Join(p.cfg.VM.StorageDir, name+"-drbd.qcow2"),
+		filepath.Join(p.cfg.VM.StorageDir, name+"-seed.iso"),
 	} {
 		if err := os.Remove(disk); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove disk %s: %w", disk, err)
 		}
 	}
+	if err := os.RemoveAll(filepath.Join(p.cfg.VM.StorageDir, "cloud-init-"+name)); err != nil {
+		return fmt.Errorf("remove cloud-init dir for %s: %w", name, err)
+	}
 	if name == p.cfg.Nodes.Jumpstart.Name {
 		seed := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
 		if err := os.Remove(seed); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("remove seed ISO: %w", err)
+		}
+		for _, dir := range []string{"autoinstall", "cloud-init"} {
+			if err := os.RemoveAll(filepath.Join(p.cfg.VM.StorageDir, dir)); err != nil {
+				return fmt.Errorf("remove %s dir: %w", dir, err)
+			}
 		}
 	}
 	return nil

@@ -111,6 +111,18 @@ curl -LO https://cloud-images.ubuntu.com/noble/current/ubuntu-24.04-server-cloud
 
 Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the client install and every later phase are unchanged; the ISO/PXE run remains the gate, so measure both with `--timings-file` before changing the default.
 
+**Opt-in: cloud-image client nodes.** `--fast-provisioning` applies the same base image to every client node, so the lab skips the PXE installs entirely. Each VM gets a qcow2 overlay and its own cloud-init seed ISO (hostname, MACs, static addresses, SSH key); everything from `03-repair-ssh` onwards is unchanged. Use it on `deploy`, or persist the choice for clients with `vm.provisioning: cloud`:
+
+```bash
+# Jumpstart + all clients from the cloud image; PXE is not used
+./cms-ha deploy --fast-provisioning
+
+# Client nodes only, reusing an existing jumpstart
+./cms-ha phase init-vms --nodes-only --fast-provisioning
+```
+
+Fast provisioning needs the cloud image from the previous step. The Cobbler and `vm install-batches` steps can be skipped in this mode because no node boots the installer; `deploy` still runs the Cobbler phases so later phases see the same topology. The PXE run with `vm.provisioning: pxe` remains the deliverable gate; measure both with `--timings-file`.
+
 ### Step 2: Sequential Installation and RAM Adjustment (Batches)
 
 Run the command that automates the creation and installation of client nodes in sequential batches:

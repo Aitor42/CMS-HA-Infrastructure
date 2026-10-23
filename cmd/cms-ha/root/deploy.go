@@ -6,11 +6,12 @@ import (
 )
 
 var (
-	skipVMCreate bool
-	fromPhase    string
-	resume       bool
-	stateFile    string
-	timingsFile  string
+	skipVMCreate     bool
+	fromPhase        string
+	resume           bool
+	stateFile        string
+	timingsFile      string
+	fastProvisioning bool
 )
 
 var deployCmd = &cobra.Command{
@@ -36,13 +37,14 @@ var deployCmd = &cobra.Command{
 		}
 
 		opts := deploy.DeployOpts{
-			SkipVMCreate: skipVMCreate,
-			DryRun:       dryRun, // from root.go
-			FromPhase:    fromPhase,
-			Resume:       resume,
-			StateFile:    stateFile,
-			TimingsFile:  timingsFile,
-			ConfigFile:   configPath,
+			SkipVMCreate:     skipVMCreate,
+			DryRun:           dryRun, // from root.go
+			FromPhase:        fromPhase,
+			Resume:           resume,
+			StateFile:        stateFile,
+			TimingsFile:      timingsFile,
+			ConfigFile:       configPath,
+			FastProvisioning: fastProvisioning,
 		}
 
 		return orchestrator.Deploy(cmd.Context(), opts)
@@ -55,5 +57,6 @@ func init() {
 	deployCmd.Flags().BoolVar(&resume, "resume", false, "Skip the phases already completed in the checkpoint file")
 	deployCmd.Flags().StringVar(&stateFile, "state-file", deploy.DefaultStateFile, "Checkpoint file recording phase progress")
 	deployCmd.Flags().StringVar(&timingsFile, "timings-file", "", "Write per-phase timing data as JSON to this file")
+	deployCmd.Flags().BoolVar(&fastProvisioning, "fast-provisioning", false, "Install the jumpstart and client nodes from the cloud image (opt-in fast path; PXE stays the default)")
 	rootCmd.AddCommand(deployCmd)
 }

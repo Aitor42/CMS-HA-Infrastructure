@@ -39,6 +39,10 @@ vm:
   # jumpstart_base_image. The cloud path is for iteration and CI; it does not
   # replace the ISO/PXE gate.
   jumpstart_image: "iso"
+  # Client install path: "pxe" (default, Cobbler deliverable) or "cloud"
+  # (opt-in: qcow2 overlays of the same base image plus per-node cloud-init).
+  # `deploy --fast-provisioning` switches both this and the jumpstart for one run.
+  provisioning: "pxe"
 
 ssh:
   # Non-root deploy account created by every installer (Cobbler autoinstall and

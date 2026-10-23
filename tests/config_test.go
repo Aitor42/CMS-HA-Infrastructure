@@ -265,6 +265,23 @@ func TestConfig_JumpstartImageMode(t *testing.T) {
 	}
 }
 
+func TestConfig_ClientProvisioningMode(t *testing.T) {
+	cases := []struct {
+		set  string
+		want string
+	}{
+		{"", "pxe"},
+		{"pxe", "pxe"},
+		{" Cloud ", "cloud"},
+	}
+	for _, tc := range cases {
+		cfg := &config.Config{VM: config.VMConfig{Provisioning: tc.set}}
+		if got := cfg.ClientProvisioningMode(); got != tc.want {
+			t.Errorf("ClientProvisioningMode(%q) = %q, want %q", tc.set, got, tc.want)
+		}
+	}
+}
+
 func TestConfig_Validate(t *testing.T) {
 	validCfg := func() *config.Config {
 		return &config.Config{
@@ -314,6 +331,14 @@ func TestConfig_Validate(t *testing.T) {
 		cfg.VM.JumpstartImage = "pxe"
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for an unknown jumpstart image")
+		}
+	})
+
+	t.Run("invalid client provisioning", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.Provisioning = "fast"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an unknown client provisioning mode")
 		}
 	})
 

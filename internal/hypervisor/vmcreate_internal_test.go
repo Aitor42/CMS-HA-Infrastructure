@@ -54,9 +54,9 @@ func TestClientVMDefinition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.node, func(t *testing.T) {
-			node, nets, extraDisks, err := clientVMDefinition(context.Background(), cfg, nil, tt.node)
+			node, nets, extraDisks, err := ClientVMDefinition(context.Background(), cfg, nil, tt.node)
 			if err != nil {
-				t.Fatalf("clientVMDefinition(%q): %v", tt.node, err)
+				t.Fatalf("ClientVMDefinition(%q): %v", tt.node, err)
 			}
 			if node.Name != tt.node {
 				t.Errorf("node = %q, want %q", node.Name, tt.node)
@@ -87,7 +87,7 @@ func TestClientVMDefinition(t *testing.T) {
 
 func TestClientVMDefinitionRejectsUnknownNode(t *testing.T) {
 	cfg := clientVMTestConfig()
-	if _, _, _, err := clientVMDefinition(context.Background(), cfg, nil, "internal-nope"); err == nil {
+	if _, _, _, err := ClientVMDefinition(context.Background(), cfg, nil, "internal-nope"); err == nil {
 		t.Fatal("expected an error for a node outside the configured topology")
 	}
 }

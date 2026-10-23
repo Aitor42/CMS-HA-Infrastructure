@@ -51,6 +51,9 @@ type DeployOpts struct {
 	TimingsFile string
 	// ConfigFile is the configuration path recorded in the timing report.
 	ConfigFile string
+	// FastProvisioning uses the cloud image for the jumpstart and every client
+	// node. It is the opt-in fast path; PXE/Cobbler remains the default.
+	FastProvisioning bool
 }
 
 // Deploy runs the entire deployment pipeline.
@@ -184,14 +187,21 @@ func (o *Orchestrator) BuildPhaseList(opts DeployOpts) []phases.Phase {
 	var list []phases.Phase
 
 	if !opts.SkipVMCreate {
-		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{JumpstartOnly: true}))
+		jumpstartOpts := initvms.Options{JumpstartOnly: true}
+		if opts.FastProvisioning {
+			jumpstartOpts.JumpstartImage = "cloud"
+		}
+		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, jumpstartOpts))
 	}
 	list = append(list,
 		cobbler.NewPhase(o.Cfg, o.SSH),
 		registernodes.NewPhase(o.Cfg, o.SSH),
 	)
 	if !opts.SkipVMCreate {
-		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{NodesOnly: true}))
+		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{
+			NodesOnly:        true,
+			FastProvisioning: opts.FastProvisioning,
+		}))
 	}
 	list = append(list,
 		repairssh.NewPhase(o.Cfg, o.SSH),

@@ -45,6 +45,7 @@ would require exporting internal helpers purely for testing.
 | `internal/dashboards/check_queries_internal_test.go` | `checkQueries` (runtime Prometheus gate) |
 | `internal/deploy/state_internal_test.go` | `phaseKey`, `planRun` (checkpoint planning) |
 | `internal/phases/backup/backup_test.go` | `garageRunArgs`, `ensureGarageConfig` |
+| `internal/phases/initvms/initvms_internal_test.go` | cloud-image selection, cloud interface mapping and rendered client user-data |
 | `internal/phases/kubernetes/kubernetes_internal_test.go` | `countNonEmptyLines`, `isTransientAPIError` |
 | `internal/phases/pki/pki_internal_test.go` | `stepReleaseURLs`, `quoteURLs` |
 | `internal/phases/routerbootstrap/routerbootstrap_test.go` | `netplanBootstrapScript`, `netplanRestoreScript`, `withPrefix` |
@@ -59,7 +60,7 @@ would require exporting internal helpers purely for testing.
 | `internal/httpcheck/httpcheck_test.go` | `Get` (body, Host header, timeout) and `LBReachable` |
 | `internal/prom/prom_test.go` | Prometheus sample parsing |
 | `internal/drills/drills_test.go` | CronJob creation, wait, diagnostics and cleanup |
-| `internal/hypervisor/vmcreate_internal_test.go` | `clientVMDefinition` |
+| `internal/hypervisor/vmcreate_internal_test.go` | `ClientVMDefinition` |
 
 Any assertion that can be made through the public API belongs here instead: the
 checkpoint `State` round-trip, the `TrafficVHost`/`K6Image` accessors and the
