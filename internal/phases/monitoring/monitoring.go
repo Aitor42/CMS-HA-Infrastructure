@@ -18,6 +18,12 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// monitoringVerifyCommand proves both services are active and that Grafana's
+// HTTP listener is actually accepting requests. A unit can be active while its
+// listener is still starting, which made the end-to-end check flaky.
+const monitoringVerifyCommand = "systemctl is-active prometheus && systemctl is-active grafana-server && " +
+	"curl -fsS --max-time 2 http://127.0.0.1:3000/api/health >/dev/null"
+
 // Phase implements the Monitoring setup phase.
 type Phase struct {
 	cfg  *config.Config
@@ -131,13 +137,18 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Verifying Prometheus and Grafana services...")
-	verifyCmd := "systemctl is-active prometheus && systemctl is-active grafana-server"
-	verifyErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+	// `systemctl is-active` only proves the process started. Grafana 13 loads
+	// bundled plugins before it binds the HTTP listener, which can take tens of
+	// seconds on the 1-vCPU monitor; the e2e check then races the listener and
+	// reports a transient connection refused. Wait for the health endpoint so
+	// the phase hands a ready Grafana to verification.
+	verifyCmd := monitoringVerifyCommand
+	verifyErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 12, Interval: 5 * time.Second, Timeout: 90 * time.Second}, func(attemptCtx context.Context) error {
 		_, _, _, rerr := p.pool.RunCommand(attemptCtx, monitorIP, verifyCmd)
 		return rerr
 	})
 	if verifyErr != nil {
-		return fmt.Errorf("monitoring services not active: %w", verifyErr)
+		return fmt.Errorf("monitoring services not ready: %w", verifyErr)
 	}
 
 	// The blackbox exporter is best-effort: its absence is a monitoring gap,
