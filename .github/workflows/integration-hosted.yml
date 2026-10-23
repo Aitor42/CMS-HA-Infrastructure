@@ -371,9 +371,11 @@ jobs:
             EFFECTIVE_JUMPSTART_IMAGE="$JUMPSTART_IMAGE"
           fi
 
-          # The cloud jumpstart is opt-in: download the ~600 MB base image once
-          # and let init-vms boot a qcow2 overlay instead of running Subiquity.
-          # The ISO path stays the default and remains the deliverable gate.
+          # The hosted workflow defaults to the cloud jumpstart: download the
+          # ~600 MB base image once and let init-vms boot a qcow2 overlay
+          # instead of running Subiquity. The CLI/config default is still ISO,
+          # and the ISO/PXE path remains the deliverable gate (dispatch with
+          # jumpstart_image=iso and fast_provisioning=false).
           if [ "$EFFECTIVE_JUMPSTART_IMAGE" = "cloud" ]; then
             IMG="$HOME/vm_storage/ubuntu-24.04-server-cloudimg-amd64.img"
             if [ ! -s "$IMG" ]; then
