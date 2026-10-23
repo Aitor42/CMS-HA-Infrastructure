@@ -114,14 +114,24 @@ jobs:
         run: |
           set -x
           # The runner image ships third-party APT sources (Microsoft, Azure
-          # CLI, Docker...) that periodically stop refreshing — a 403 or an
-          # unsigned InRelease there aborts `apt-get update`, and with it the
-          # hypervisor install, even though nothing this job needs comes from
-          # them. Disable only the sources apt cannot fetch and retry; a
-          # genuine Ubuntu archive outage still fails the step, as it should.
+          # CLI, Docker...) that periodically stop refreshing. A 403 or an
+          # unsigned InRelease there aborts `apt-get update`; a stalled host can
+          # hold it for many minutes. Nothing in this step comes from those
+          # sources, so disable them up front and keep only the Ubuntu archive.
+          for src in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            [ -f "$src" ] || continue
+            if grep -qiE 'packages\.microsoft\.com|packages\.azure\.com|download\.docker\.com|packages\.cloud\.google\.com|apt\.releases\.hashicorp\.com' "$src"; then
+              echo "::warning::disabling $src (third-party source not needed by this job)"
+              sudo sed -i -E 's/^[^#[:space:]]/#&/' "$src"
+            fi
+          done
+
+          # apt's own timeouts are generous. Bound every call so a slow mirror
+          # fails the step in minutes instead of holding the runner for hours.
+          APT_OPTS=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1)
           updated=0
           for attempt in 1 2 3; do
-            if sudo apt-get update -qq 2>/tmp/apt-update.err; then
+            if sudo timeout 180 apt-get "${APT_OPTS[@]}" update -qq 2>/tmp/apt-update.err; then
               updated=1
               break
             fi
@@ -144,7 +154,8 @@ jobs:
             echo "::error::apt-get update failed and no unreachable third-party source could be disabled"
             exit 1
           fi
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          sudo DEBIAN_FRONTEND=noninteractive timeout 900 \
+            apt-get "${APT_OPTS[@]}" install -y -qq \
             qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virtinst \
             xorriso dnsmasq-base bridge-utils openssh-server python3-yaml >/dev/null
 
@@ -192,7 +203,7 @@ jobs:
           virsh version
           virsh net-list --all
           echo "==== kvm ===="
-          sudo apt-get install -y -qq cpu-checker >/dev/null
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" install -y -qq cpu-checker >/dev/null
           sudo kvm-ok
           echo "==== listeners ===="
           ss -ltn | grep -E ':(22|16509)\b' || true
@@ -205,20 +216,47 @@ jobs:
 
       - name: Download the Ubuntu 24.04 server ISO
         run: |
+          set -o pipefail
           mkdir -p "$HOME/vm_storage"
           BASE="https://releases.ubuntu.com/24.04"
           # Do not hardcode a point release: the name changes with every LTS
           # update and old ones eventually disappear from the mirror.
-          ISO_NAME="$(curl -fsSL "$BASE/" \
+          ISO_NAME="$(curl -fsSL --max-time 60 "$BASE/" \
             | grep -oE 'ubuntu-24\.04(\.[0-9]+)?-live-server-amd64\.iso' \
             | sort -u | sort -V | tail -n 1)"
           test -n "$ISO_NAME"
           echo "Downloading $ISO_NAME"
-          curl -fL --retry 3 --retry-delay 5 -o "$HOME/vm_storage/$ISO_NAME" \
-            "$BASE/$ISO_NAME"
-          ls -lh "$HOME/vm_storage/"
+
+          # releases.ubuntu.com normally serves this 4 GB file in seconds, but
+          # one bad edge took 2h22m on run 39765306172 and 40m on 39747321026.
+          # Try the official host and three independent mirrors, and abort a
+          # transfer that stays below 5 MiB/s for 30s instead of letting a bad
+          # mirror hold the whole job. The mirror list is only a fallback: the
+          # normal case still downloads from the official host.
+          ISO_PATH="$HOME/vm_storage/$ISO_NAME"
+          ok=0
+          for url in \
+            "$BASE/$ISO_NAME" \
+            "https://mirrors.edge.kernel.org/ubuntu-releases/24.04/$ISO_NAME" \
+            "https://ftp.osuosl.org/pub/ubuntu-releases/24.04/$ISO_NAME" \
+            "https://mirror.leaseweb.com/ubuntu-releases/24.04/$ISO_NAME"; do
+            echo "Trying $url"
+            rm -f "$ISO_PATH"
+            if curl -fL --connect-timeout 30 --max-time 1200 \
+                 --speed-limit 5242880 --speed-time 30 \
+                 -o "$ISO_PATH" "$url"; then
+              ok=1
+              break
+            fi
+            echo "::warning::download failed or stayed below 5 MiB/s: $url"
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::could not download the 4 GB ISO at a usable speed"
+            exit 1
+          fi
+          ls -lh "$ISO_PATH"
           # A truncated download would fail much later, inside Cobbler.
-          SIZE=$(stat -c %s "$HOME/vm_storage/$ISO_NAME")
+          SIZE=$(stat -c %s "$ISO_PATH")
           test "$SIZE" -gt 1000000000
 
       - name: Render the CI configuration with fresh credentials
