@@ -1,0 +1,19 @@
+version: 2
+ethernets:
+{{ range .Interfaces }}  {{ .Name }}:
+    match:
+      macaddress: "{{ .MAC }}"
+{{ if .DHCP }}    dhcp4: true
+    dhcp4-overrides:
+      route-metric: {{ .Metric }}
+      use-dns: true
+{{ else }}    addresses:
+      - {{ .IP }}/24
+    nameservers:
+      addresses:
+        - {{ .DNS }}
+{{ if .Gateway }}    routes:
+      - to: default
+        via: {{ .Gateway }}
+        metric: {{ .Metric }}
+{{ end }}{{ end }}{{ end }}

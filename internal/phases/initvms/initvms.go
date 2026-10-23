@@ -309,9 +309,8 @@ type autoinstallData struct {
 	MACMain         string
 	IPMain          string
 	WANIfaceConfig  string
-	// WANIfaceConfigCloud is the same optional WAN stanza indented for the
-	// cloud-init template, where network.ethernets sits one level higher than
-	// under autoinstall.
+	// WANIfaceConfigCloud is the same optional WAN stanza for the standalone
+	// NoCloud network-config file, where ethernets sits at the document root.
 	WANIfaceConfigCloud string
 }
 
@@ -384,7 +383,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	wanIfaceConfigCloud := ""
 	if hasDefaultNet {
 		wanIfaceConfig = fmt.Sprintf("\n      net2:\n        match:\n          macaddress: \"%s\"\n        dhcp4: true\n        dhcp4-overrides:\n          route-metric: 100\n          use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
-		wanIfaceConfigCloud = fmt.Sprintf("\n    net2:\n      match:\n        macaddress: \"%s\"\n      dhcp4: true\n      dhcp4-overrides:\n        route-metric: 100\n        use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
+		wanIfaceConfigCloud = fmt.Sprintf("\n  net2:\n    match:\n      macaddress: \"%s\"\n    dhcp4: true\n    dhcp4-overrides:\n      route-metric: 100\n      use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
 	}
 
 	data := autoinstallData{
@@ -552,9 +551,17 @@ func (p *Phase) createJumpstartSeed(ctx context.Context, mode string, data autoi
 		return "", fmt.Errorf("render %s: %w", templatePath, err)
 	}
 
+	var networkConfig []byte
+	if mode == "cloud" {
+		networkConfig, err = renderTemplate("templates/autoinstall/cloud-network-config.tmpl", data)
+		if err != nil {
+			return "", fmt.Errorf("render cloud network-config: %w", err)
+		}
+	}
+
 	seedDir := filepath.Join(p.cfg.VM.StorageDir, seedDirName)
 	seedISO := filepath.Join(p.cfg.VM.StorageDir, "seed.iso")
-	if err := p.writeSeed(ctx, seedDir, seedISO, metaData, userData); err != nil {
+	if err := p.writeSeed(ctx, seedDir, seedISO, metaData, userData, networkConfig); err != nil {
 		return "", err
 	}
 	return seedISO, nil
@@ -568,17 +575,24 @@ func (p *Phase) createCloudNodeSeed(ctx context.Context, name string, data cloud
 	if err != nil {
 		return "", fmt.Errorf("render cloud-node user-data: %w", err)
 	}
+	networkConfig, err := renderTemplate("templates/autoinstall/cloud-node-network-config.tmpl", data)
+	if err != nil {
+		return "", fmt.Errorf("render cloud node network-config: %w", err)
+	}
 	metaData := fmt.Sprintf("instance-id: cms-ha-%s-%d\nlocal-hostname: %s\n", name, time.Now().UnixNano(), data.Hostname)
 	seedDir := filepath.Join(p.cfg.VM.StorageDir, "cloud-init-"+name)
 	seedISO := filepath.Join(p.cfg.VM.StorageDir, name+"-seed.iso")
-	if err := p.writeSeed(ctx, seedDir, seedISO, metaData, userData); err != nil {
+	if err := p.writeSeed(ctx, seedDir, seedISO, metaData, userData, networkConfig); err != nil {
 		return "", err
 	}
 	return seedISO, nil
 }
 
-// writeSeed writes the NoCloud files and turns them into a cidata ISO.
-func (p *Phase) writeSeed(ctx context.Context, seedDir, seedISO, metaData string, userData []byte) error {
+// writeSeed writes the NoCloud files and turns them into a cidata ISO. The
+// network-config file is separate from user-data: cloud-init explicitly does
+// not read network configuration from user-data, and a missing file would make
+// the cloud image fall back to DHCP instead of the topology's static address.
+func (p *Phase) writeSeed(ctx context.Context, seedDir, seedISO, metaData string, userData, networkConfig []byte) error {
 	if err := os.MkdirAll(seedDir, 0700); err != nil {
 		return fmt.Errorf("failed to create %s dir: %w", filepath.Base(seedDir), err)
 	}
@@ -587,6 +601,11 @@ func (p *Phase) writeSeed(ctx context.Context, seedDir, seedISO, metaData string
 	}
 	if err := os.WriteFile(filepath.Join(seedDir, "meta-data"), []byte(metaData), 0600); err != nil {
 		return fmt.Errorf("failed to write meta-data: %w", err)
+	}
+	if len(networkConfig) > 0 {
+		if err := os.WriteFile(filepath.Join(seedDir, "network-config"), networkConfig, 0600); err != nil {
+			return fmt.Errorf("failed to write network-config: %w", err)
+		}
 	}
 	if err := libvirt.CreateISO(ctx, seedISO, seedDir, "cidata"); err != nil {
 		return fmt.Errorf("failed to create seed ISO: %w", err)

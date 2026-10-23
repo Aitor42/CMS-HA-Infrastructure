@@ -39,27 +39,9 @@ write_files:
       Defaults:ubuntu !requiretty
       Defaults log_output
 
-network:
-  version: 2
-  ethernets:
-    net0:
-      match:
-        macaddress: "{{ .MACInternal }}"
-      addresses:
-        - {{ .IPInternal }}/24
-      nameservers:
-        addresses:
-          - {{ .IPInternal }}
-      routes:
-        - to: default
-          via: {{ .GatewayInternal }}
-          metric: 200
-    net1:
-      match:
-        macaddress: "{{ .MACMain }}"
-      addresses:
-        - {{ .IPMain }}/24
-{{ if .WANIfaceConfigCloud }}{{ .WANIfaceConfigCloud }}{{ end }}
+# Network configuration is not a user-data key: cloud-init ignores `network:`
+# here and falls back to DHCP. The NoCloud datasource consumes the separate
+# `network-config` file written next to this user-data.
 
 runcmd:
   # Match the installer path: the random password and the root account are

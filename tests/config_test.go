@@ -524,6 +524,14 @@ func TestConfig_Validate(t *testing.T) {
 			t.Fatal("expected error for a scheme-less traffic.prometheus_rw_url")
 		}
 	})
+
+	t.Run("unsafe Grafana admin password is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Monitoring.GrafanaAdminPassword = "bad password\nGF_SECURITY_ADMIN_USER=attacker"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a Grafana password that breaks the EnvironmentFile")
+		}
+	})
 }
 
 // TestConfig_ValidatePartial guards the relaxed validation used by commands

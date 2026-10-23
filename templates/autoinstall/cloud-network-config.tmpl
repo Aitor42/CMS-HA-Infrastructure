@@ -1,0 +1,20 @@
+version: 2
+ethernets:
+  net0:
+    match:
+      macaddress: "{{ .MACInternal }}"
+    addresses:
+      - {{ .IPInternal }}/24
+    nameservers:
+      addresses:
+        - {{ .IPInternal }}
+    routes:
+      - to: default
+        via: {{ .GatewayInternal }}
+        metric: 200
+  net1:
+    match:
+      macaddress: "{{ .MACMain }}"
+    addresses:
+      - {{ .IPMain }}/24
+{{ if .WANIfaceConfigCloud }}{{ .WANIfaceConfigCloud }}{{ end }}

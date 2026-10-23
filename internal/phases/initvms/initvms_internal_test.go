@@ -122,7 +122,7 @@ func TestRenderCloudUserData(t *testing.T) {
 		GatewayInternal:     "192.168.10.1",
 		MACMain:             "52:54:00:10:02:0a",
 		IPMain:              "192.168.20.10",
-		WANIfaceConfigCloud: "\n    net2:\n      match:\n        macaddress: \"52:54:00:10:00:09\"\n      dhcp4: true",
+		WANIfaceConfigCloud: "\n  net2:\n    match:\n      macaddress: \"52:54:00:10:00:09\"\n    dhcp4: true",
 	}
 
 	out, err := renderTemplate("templates/autoinstall/cloud-user-data.tmpl", data)
@@ -139,10 +139,6 @@ func TestRenderCloudUserData(t *testing.T) {
 		"#cloud-config",
 		"hostname: jumpstart",
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
-		"macaddress: \"52:54:00:10:00:01\"",
-		"macaddress: \"52:54:00:10:02:0a\"",
-		"net2:",
-		"192.168.20.10/24",
 		"ALL=(ALL) NOPASSWD:ALL",
 	} {
 		if !strings.Contains(string(out), want) {
@@ -152,8 +148,53 @@ func TestRenderCloudUserData(t *testing.T) {
 	if strings.Contains(string(out), "autoinstall:") {
 		t.Error("cloud image user-data must not contain the Subiquity autoinstall block")
 	}
+	// cloud-init does not read network configuration from user-data. Keeping it
+	// here would silently fall back to DHCP and break the static topology.
+	if _, ok := doc["network"]; ok {
+		t.Errorf("cloud user-data must not contain a network block:\n%s", out)
+	}
 	if doc["hostname"] != "jumpstart" {
 		t.Errorf("parsed hostname = %v, want jumpstart", doc["hostname"])
+	}
+
+	netOut, err := renderTemplate("templates/autoinstall/cloud-network-config.tmpl", data)
+	if err != nil {
+		t.Fatalf("render network-config: %v", err)
+	}
+	var netDoc struct {
+		Version   int `yaml:"version"`
+		Ethernets map[string]struct {
+			Match struct {
+				MAC string `yaml:"macaddress"`
+			} `yaml:"match"`
+			Addresses []string `yaml:"addresses"`
+		} `yaml:"ethernets"`
+	}
+	if err := yaml.Unmarshal(netOut, &netDoc); err != nil {
+		t.Fatalf("rendered cloud network-config is not valid YAML: %v\n%s", err, netOut)
+	}
+	if netDoc.Version != 2 {
+		t.Errorf("network-config version = %d, want 2", netDoc.Version)
+	}
+	for name, mac := range map[string]string{
+		"net0": "52:54:00:10:00:01",
+		"net1": "52:54:00:10:02:0a",
+		"net2": "52:54:00:10:00:09",
+	} {
+		iface, ok := netDoc.Ethernets[name]
+		if !ok {
+			t.Errorf("network-config is missing %s", name)
+			continue
+		}
+		if iface.Match.MAC != mac {
+			t.Errorf("%s MAC = %q, want %q", name, iface.Match.MAC, mac)
+		}
+	}
+	if got := netDoc.Ethernets["net0"].Addresses; len(got) != 1 || got[0] != "192.168.10.10/24" {
+		t.Errorf("net0 addresses = %v, want [192.168.10.10/24]", got)
+	}
+	if got := netDoc.Ethernets["net1"].Addresses; len(got) != 1 || got[0] != "192.168.20.10/24" {
+		t.Errorf("net1 addresses = %v, want [192.168.20.10/24]", got)
 	}
 }
 
@@ -275,14 +316,49 @@ func TestRenderCloudNodeUserData(t *testing.T) {
 	for _, want := range []string{
 		"#cloud-config",
 		"hostname: internal-master1",
-		"macaddress: \"52:54:00:10:01:11\"",
-		"192.168.10.11/24",
-		"via: 192.168.10.1",
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("rendered user-data does not contain %q:\n%s", want, out)
 		}
+	}
+	if _, ok := doc["network"]; ok {
+		t.Errorf("cloud-node user-data must not contain a network block:\n%s", out)
+	}
+
+	netOut, err := renderTemplate("templates/autoinstall/cloud-node-network-config.tmpl", data)
+	if err != nil {
+		t.Fatalf("render network-config: %v", err)
+	}
+	var netDoc struct {
+		Version   int `yaml:"version"`
+		Ethernets map[string]struct {
+			Match struct {
+				MAC string `yaml:"macaddress"`
+			} `yaml:"match"`
+			Addresses []string `yaml:"addresses"`
+			Routes    []struct {
+				To     string `yaml:"to"`
+				Via    string `yaml:"via"`
+				Metric int    `yaml:"metric"`
+			} `yaml:"routes"`
+		} `yaml:"ethernets"`
+	}
+	if err := yaml.Unmarshal(netOut, &netDoc); err != nil {
+		t.Fatalf("rendered cloud-node network-config is not valid YAML: %v\n%s", err, netOut)
+	}
+	iface, ok := netDoc.Ethernets["net0"]
+	if !ok {
+		t.Fatalf("network-config is missing net0:\n%s", netOut)
+	}
+	if iface.Match.MAC != "52:54:00:10:01:11" {
+		t.Errorf("net0 MAC = %q, want 52:54:00:10:01:11", iface.Match.MAC)
+	}
+	if len(iface.Addresses) != 1 || iface.Addresses[0] != "192.168.10.11/24" {
+		t.Errorf("net0 addresses = %v, want [192.168.10.11/24]", iface.Addresses)
+	}
+	if len(iface.Routes) != 1 || iface.Routes[0].To != "default" || iface.Routes[0].Via != "192.168.10.1" || iface.Routes[0].Metric != 200 {
+		t.Errorf("net0 routes = %+v, want one default route via 192.168.10.1 metric 200", iface.Routes)
 	}
 }
 
@@ -302,12 +378,13 @@ func TestRenderCloudNodeUserDataShapes(t *testing.T) {
 	}
 	for name, ifaces := range cases {
 		t.Run(name, func(t *testing.T) {
-			out, err := renderTemplate("templates/autoinstall/cloud-node-user-data.tmpl", cloudNodeData{
+			data := cloudNodeData{
 				Hostname:     name,
 				PasswordHash: "$6$rounds=4096$salt$hash",
 				PubKey:       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 				Interfaces:   ifaces,
-			})
+			}
+			out, err := renderTemplate("templates/autoinstall/cloud-node-user-data.tmpl", data)
 			if err != nil {
 				t.Fatalf("renderTemplate: %v", err)
 			}
@@ -315,13 +392,54 @@ func TestRenderCloudNodeUserDataShapes(t *testing.T) {
 			if err := yaml.Unmarshal(out, &doc); err != nil {
 				t.Fatalf("rendered user-data is not valid YAML: %v\n%s", err, out)
 			}
-			for _, iface := range ifaces {
-				if !strings.Contains(string(out), iface.MAC) {
-					t.Errorf("rendered user-data does not contain MAC %s:\n%s", iface.MAC, out)
-				}
+			if _, ok := doc["network"]; ok {
+				t.Errorf("cloud-node user-data must not contain a network block:\n%s", out)
 			}
-			if len(ifaces) > 1 && strings.Count(string(out), "\n      routes:") > 1 {
-				t.Errorf("router rendered more than one default route:\n%s", out)
+
+			netOut, err := renderTemplate("templates/autoinstall/cloud-node-network-config.tmpl", data)
+			if err != nil {
+				t.Fatalf("render network-config: %v", err)
+			}
+			var netDoc struct {
+				Version   int `yaml:"version"`
+				Ethernets map[string]struct {
+					Match struct {
+						MAC string `yaml:"macaddress"`
+					} `yaml:"match"`
+					Addresses []string `yaml:"addresses"`
+					DHCP4     bool     `yaml:"dhcp4"`
+					Routes    []struct {
+						To  string `yaml:"to"`
+						Via string `yaml:"via"`
+					} `yaml:"routes"`
+				} `yaml:"ethernets"`
+			}
+			if err := yaml.Unmarshal(netOut, &netDoc); err != nil {
+				t.Fatalf("rendered network-config is not valid YAML: %v\n%s", err, netOut)
+			}
+			if netDoc.Version != 2 {
+				t.Errorf("network-config version = %d, want 2", netDoc.Version)
+			}
+			if len(netDoc.Ethernets) != len(ifaces) {
+				t.Errorf("network-config has %d interfaces, want %d:\n%s", len(netDoc.Ethernets), len(ifaces), netOut)
+			}
+			routes := 0
+			for _, iface := range ifaces {
+				got, ok := netDoc.Ethernets[iface.Name]
+				if !ok {
+					t.Errorf("network-config is missing %s:\n%s", iface.Name, netOut)
+					continue
+				}
+				if got.Match.MAC != iface.MAC {
+					t.Errorf("%s MAC = %q, want %q", iface.Name, got.Match.MAC, iface.MAC)
+				}
+				if iface.DHCP != got.DHCP4 {
+					t.Errorf("%s dhcp4 = %v, want %v", iface.Name, got.DHCP4, iface.DHCP)
+				}
+				routes += len(got.Routes)
+			}
+			if routes > 1 {
+				t.Errorf("network-config has %d default routes, want at most one:\n%s", routes, netOut)
 			}
 		})
 	}
