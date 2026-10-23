@@ -17,12 +17,18 @@ name: Integration (KVM lab, hosted)
 # 16, ~12.7 GB of guest RAM) and why it is manual only: a full run takes tens
 # of minutes and holds a whole runner for the duration. The full 16-VM
 # topology is still covered by `integration.yml` on a self-hosted `kvm` runner.
+#
+# The dispatch defaults favour the fast cloud path (cloud jumpstart + cloud
+# clients): it is the quickest way to exercise deploy/verify/failover on the
+# hosted runner. The PXE/Cobbler deliverable is still the gate; reproduce it
+# here with `jumpstart_image=iso` and `fast_provisioning=false`, or run the
+# self-hosted `integration.yml` workflow.
 
 on:
   workflow_dispatch:
     inputs:
       stage:
-        description: "provision = stop after the PXE phases; full = deploy + verify + failover"
+        description: "provision = stop after provisioning; full = deploy + verify + failover"
         type: choice
         options: ["full", "provision"]
         default: "full"
@@ -35,14 +41,14 @@ on:
         type: boolean
         default: false
       jumpstart_image:
-        description: "Jumpstart install path: iso (deliverable) or cloud (opt-in fast boot)"
+        description: "Jumpstart install path: cloud (default fast boot) or iso (PXE/Cobbler gate)"
         type: choice
-        options: ["iso", "cloud"]
-        default: "iso"
+        options: ["cloud", "iso"]
+        default: "cloud"
       fast_provisioning:
-        description: "Provision client nodes from the cloud image instead of PXE (opt-in fast path)"
+        description: "Provision client nodes from the cloud image (default fast path; set false for the PXE gate)"
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: integration-hosted-${{ github.ref }}

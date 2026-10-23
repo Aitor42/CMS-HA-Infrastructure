@@ -100,7 +100,7 @@ On the hypervisor terminal, create the virtual networks and install the central 
 ./cms-ha phase register-nodes
 ```
 
-**Opt-in: cloud-image jumpstart.** The ISO/autoinstall path above is the deliverable and stays the default. For iteration, `--jumpstart-image cloud` (or `vm.jumpstart_image: cloud` for a persistent choice) boots a qcow2 overlay of the official Ubuntu cloud image instead: the base system is already installed, cloud-init applies the same hostname, MACs, IPs and SSH key, and the node is reachable in well under a minute instead of ~4 minutes. The run pays for the base image once and shares it read-only across overlays:
+**Cloud-image jumpstart (hosted workflow default).** The ISO/autoinstall path above is the CLI/config default and the deliverable. The hosted `Integration (KVM lab, hosted)` workflow defaults to `jumpstart_image=cloud` because it is the fastest way to exercise the rest of the pipeline. For local iteration, `--jumpstart-image cloud` (or `vm.jumpstart_image: cloud` for a persistent choice) boots a qcow2 overlay of the official Ubuntu cloud image instead: the base system is already installed, cloud-init applies the same hostname, MACs, IPs and SSH key, and the node is reachable in well under a minute instead of ~4 minutes. The run pays for the base image once and shares it read-only across overlays:
 
 ```bash
 cd "${HOME}/vm_storage"
@@ -109,9 +109,9 @@ curl -LO https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd
 ./cms-ha phase init-vms --jumpstart-only --jumpstart-image cloud
 ```
 
-Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the client install and every later phase are unchanged; the ISO/PXE run remains the gate, so measure both with `--timings-file` before changing the default.
+Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the client install and every later phase are unchanged. The ISO/PXE run remains the gate: use the self-hosted `Integration (KVM lab)` workflow, or dispatch the hosted one with `jumpstart_image=iso` and `fast_provisioning=false`. Measure both with `--timings-file` before changing the CLI/config default.
 
-**Opt-in: cloud-image client nodes.** `--fast-provisioning` applies the same base image to every client node, so the lab skips the PXE installs entirely. Each VM gets a qcow2 overlay and its own cloud-init seed ISO (hostname, MACs, static addresses, SSH key); everything from `03-repair-ssh` onwards is unchanged. Use it on `deploy`, or persist the choice for clients with `vm.provisioning: cloud`:
+**Cloud-image client nodes (hosted workflow default).** `--fast-provisioning` applies the same base image to every client node, so the lab skips the PXE installs entirely. Each VM gets a qcow2 overlay and its own cloud-init seed ISO (hostname, MACs, static addresses, SSH key); everything from `03-repair-ssh` onwards is unchanged. The hosted workflow defaults to `fast_provisioning=true`; the CLI/config default remains PXE. Use it on `deploy`, or persist the choice for clients with `vm.provisioning: cloud`:
 
 ```bash
 # Jumpstart + all clients from the cloud image; PXE is not used
@@ -121,7 +121,7 @@ Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the cl
 ./cms-ha phase init-vms --nodes-only --fast-provisioning
 ```
 
-Fast provisioning needs the cloud image from the previous step. The Cobbler and `vm install-batches` steps can be skipped in this mode because no node boots the installer; `deploy` still runs the Cobbler phases so later phases see the same topology. The PXE run with `vm.provisioning: pxe` remains the deliverable gate; measure both with `--timings-file`.
+Fast provisioning needs the cloud image from the previous step. The Cobbler and `vm install-batches` steps can be skipped in this mode because no node boots the installer; `deploy` still runs the Cobbler phases so later phases see the same topology. The PXE run with `vm.provisioning: pxe` remains the deliverable gate; the hosted workflow reproduces it with `jumpstart_image=iso` and `fast_provisioning=false`. Measure both with `--timings-file`.
 
 ### Step 2: Sequential Installation and RAM Adjustment (Batches)
 
@@ -276,7 +276,11 @@ It requires `/dev/kvm`, a working libvirt connection and a container runtime
 The same driver runs on a GitHub-hosted runner through
 `.github/workflows/integration-hosted.yml` (manual as well). Hosted runners
 expose nested KVM but are small (4 vCPU, 15 GiB), so that workflow deploys
-`config.ci.yaml` (no hotdesks) and installs clients in batches of four.
+`config.ci.yaml` (no hotdesks) and installs clients in batches of four. Its
+dispatch defaults to the fast cloud path (`jumpstart_image=cloud`,
+`fast_provisioning=true`); the PXE/Cobbler deliverable gate is the self-hosted
+workflow, or a hosted dispatch with `jumpstart_image=iso` and
+`fast_provisioning=false`.
 
 ---
 

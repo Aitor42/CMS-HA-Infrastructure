@@ -316,8 +316,8 @@ The Go orchestrator keeps the pipeline fast and safe:
 
 - **SSH connection pool** (`internal/ssh`) — one authenticated client per IP, safe for concurrent use, with in-memory SFTP uploads.
 - **Bounded parallelism** — clients converge in parallel (window from `deploy.puppet_concurrency`, auto 4–8 by CPU count) after the jumpstart node, so Puppet Server, DNS and Cobbler are up first. The CMS frontends converge sequentially because the first one creates the WordPress schema.
-- **Opt-in fast jumpstart** — `phase init-vms --jumpstart-image cloud` boots a qcow2 overlay of the Ubuntu cloud image for iteration and CI. The ISO/PXE path stays the default and remains the deliverable gate.
-- **Opt-in fast provisioning** — `deploy --fast-provisioning` (or `vm.provisioning: cloud`) installs the jumpstart and every client node from the same cloud image, with per-node cloud-init for hostname, MACs, static addresses and SSH key. It skips the PXE installs for iteration; the PXE/Cobbler run stays the nightly/manual gate.
+- **Fast jumpstart (hosted workflow default)** — `phase init-vms --jumpstart-image cloud` boots a qcow2 overlay of the Ubuntu cloud image for iteration and CI. The CLI/config default remains ISO/PXE, and the ISO/PXE path remains the deliverable gate; the hosted workflow defaults to cloud because it is the fastest way to exercise the rest of the pipeline.
+- **Fast provisioning (hosted workflow default)** — `deploy --fast-provisioning` (or `vm.provisioning: cloud`) installs the jumpstart and every client node from the same cloud image, with per-node cloud-init for hostname, MACs, static addresses and SSH key. The CLI/config default remains PXE; the hosted workflow defaults to `fast_provisioning=true` for speed. The PXE/Cobbler run remains the deliverable gate (self-hosted `integration.yml`, or a hosted dispatch with `jumpstart_image=iso` and `fast_provisioning=false`).
 - **Self-healing** — stale Puppet certificates are revoked, re-signed and the catalog is re-run; broken DRBD/K3s state aborts the deploy instead of reporting success.
 - **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository.
 - **Checkpoints** — `deploy.state` lets `--resume` and `--from-phase` continue after a failure.
@@ -515,7 +515,10 @@ The same driver also runs on a standard `ubuntu-latest` runner through
 expose nested KVM, so the lab is genuinely virtualised, but it is small — 4
 vCPU and 15 GiB of RAM — which is why that workflow deploys `config.ci.yaml`
 (the shipped topology without the hotdesks) and provisions the clients in
-batches instead of booting every guest at once.
+batches instead of booting every guest at once. Its dispatch defaults to the
+fast cloud path (`jumpstart_image=cloud`, `fast_provisioning=true`); the
+PXE/Cobbler deliverable gate is still the self-hosted workflow or a hosted
+dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 
 ---
 
