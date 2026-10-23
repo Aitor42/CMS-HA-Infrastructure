@@ -67,6 +67,28 @@ func TestInstallCobblerRebuildsStaleMirror(t *testing.T) {
 	}
 }
 
+func TestInstallCobblerRecreatesObjectsWithoutRebuild(t *testing.T) {
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			if strings.Contains(cmd, `echo "mirror=$fresh objects=$objects"`) {
+				return "mirror=1 objects=0\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	p := &Phase{cfg: &config.Config{}, pool: fake}
+
+	if err := p.installCobbler(t.Context(), "192.168.10.10"); err != nil {
+		t.Fatalf("installCobbler: %v", err)
+	}
+	if hasScriptWith(fake.Scripts, "rsync -a ") {
+		t.Error("fresh mirror was rebuilt even though only the objects were missing")
+	}
+	if !hasScriptWith(fake.Scripts, "cobbler profile add") {
+		t.Error("missing profile was not recreated")
+	}
+}
+
 func TestEnsureProfileUsesListForExistenceChecks(t *testing.T) {
 	fake := &testutil.FakeExecutor{}
 	p := &Phase{pool: fake}
