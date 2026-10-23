@@ -90,7 +90,15 @@ func (p *Phase) Run(ctx context.Context) error {
 func (p *Phase) installDRBD(ctx context.Context, pair []config.NodeDetail) error {
 	logging.Info("Installing DRBD utils and kernel module on master nodes...")
 	installCmd := ssh.AptLockWaitSnippet + `
-apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils "linux-modules-extra-$(uname -r)"
+apt-get update
+# The PXE seed already ships linux-modules-extra, and older kernels may no
+# longer have that exact package in the archive. Only install it when the
+# running kernel really lacks drbd.ko; the cloud image is the case that needs
+# it.
+if ! modinfo drbd >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "linux-modules-extra-$(uname -r)"
+fi
+DEBIAN_FRONTEND=noninteractive apt-get install -y drbd-utils
 `
 
 	for _, r := range p.pool.RunParallel(ctx, []string{pair[0].IP, pair[1].IP}, installCmd) {
