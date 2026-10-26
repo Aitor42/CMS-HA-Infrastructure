@@ -7,7 +7,7 @@
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go)](cmd/cms-ha/)
 [![IaC](https://img.shields.io/badge/IaC-Ansible_%7C_Go_CLI-blueviolet?style=for-the-badge)](ansible/)
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=for-the-badge)](.github/workflows/ci.yml)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)]()
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 **Zero-touch infrastructure for a high-availability Content Management System.**<br/>
 *16 VMs · 2 segmented networks · 14 deployment steps · single Go binary · idempotent*
