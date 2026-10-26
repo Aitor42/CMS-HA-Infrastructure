@@ -297,7 +297,22 @@ jobs:
             exit 1
           fi
           ls -lh "$ISO_PATH"
-          # A truncated download would fail much later, inside Cobbler.
+          # A truncated download would fail much later, inside Cobbler. Verify
+          # the published checksum before handing the ISO to libvirt/Cobbler.
+          SUMS="$(mktemp)"
+          curl -fsSL --max-time 60 "$BASE/SHA256SUMS" -o "$SUMS"
+          EXPECTED="$(awk -v iso="$ISO_NAME" '{ f=$2; sub(/^\*/, "", f); if (f == iso) { print $1; exit } }' "$SUMS")"
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::no SHA256 entry for $ISO_NAME in $BASE/SHA256SUMS"
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "$ISO_PATH" | awk '{print $1}')"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::SHA256 mismatch for $ISO_NAME: expected $EXPECTED, got $ACTUAL"
+            exit 1
+          fi
+          echo "✔ SHA256 verified: $ISO_NAME"
+          rm -f "$SUMS"
           SIZE=$(stat -c %s "$ISO_PATH")
           test "$SIZE" -gt 1000000000
 
@@ -380,11 +395,26 @@ jobs:
             IMG="$HOME/vm_storage/ubuntu-24.04-server-cloudimg-amd64.img"
             if [ ! -s "$IMG" ]; then
               mkdir -p "$(dirname "$IMG")"
-              # Canonical publishes the Noble image as
-              # `noble-server-cloudimg-amd64.img`; the old
+              CLOUD_BASE="https://cloud-images.ubuntu.com/noble/current"
+              CLOUD_NAME="noble-server-cloudimg-amd64.img"
+              # Canonical publishes the Noble image under this name; the old
               # `ubuntu-24.04-server-cloudimg-amd64.img` URL is a 404.
               curl -fL --retry 3 --retry-delay 5 -o "$IMG.tmp" \
-                https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+                "$CLOUD_BASE/$CLOUD_NAME"
+              SUMS="$(mktemp)"
+              curl -fsSL --max-time 60 "$CLOUD_BASE/SHA256SUMS" -o "$SUMS"
+              EXPECTED="$(awk -v img="$CLOUD_NAME" '{ f=$2; sub(/^\*/, "", f); if (f == img) { print $1; exit } }' "$SUMS")"
+              if [ -z "$EXPECTED" ]; then
+                echo "::error::no SHA256 entry for $CLOUD_NAME in $CLOUD_BASE/SHA256SUMS"
+                exit 1
+              fi
+              ACTUAL="$(sha256sum "$IMG.tmp" | awk '{print $1}')"
+              if [ "$EXPECTED" != "$ACTUAL" ]; then
+                echo "::error::SHA256 mismatch for $CLOUD_NAME: expected $EXPECTED, got $ACTUAL"
+                exit 1
+              fi
+              echo "✔ SHA256 verified: $CLOUD_NAME"
+              rm -f "$SUMS"
               mv "$IMG.tmp" "$IMG"
             fi
           fi
