@@ -577,7 +577,8 @@ The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pul
 
 | Job | Tool | Scope |
 |:----|:-----|:------|
-| **Go Build & Test** | `go build` + `go vet` + `go test` | CLI binary compilation + unit tests |
+| **Go Build & Test** | `go build` + `go vet` + `go test` + coverage | CLI binary compilation, unit tests, 40% global coverage floor and (on PRs) a 40% changed-line gate; `go-coverage` artifact |
+| Workflow Lint | actionlint + yamllint | Workflow syntax and pinned-action hygiene |
 | Shell Lint | ShellCheck + `bash -n` | All `.sh` scripts |
 | YAML Lint | yamllint | Kubernetes manifests, monitoring configs |
 | K8s Validation | kubeconform | Kubernetes manifests against v1.29 schemas |
