@@ -45,6 +45,10 @@ CONFIG      ?= config.yaml
 # Aggregate coverage gate. Keep this conservative until the phase packages
 # have local tests; the number is raised as coverage improves.
 COVERAGE_MIN ?= 40.0
+# Changed-line gate: refactors move code, so keep this below the global floor
+# and let the tool skip lines that have no coverage block (comments/blanks).
+DIFF_COVERAGE_MIN ?= 40.0
+BASE ?= origin/main
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BUILD
@@ -80,6 +84,12 @@ coverage-check: test-cover ## Fail if aggregate coverage is below COVERAGE_MIN
 		if (total < min) { printf "✖ coverage %.1f%% is below the %.1f%% minimum\n", total, min; exit 1 } \
 		printf "✔ coverage %.1f%% (minimum %.1f%%)\n", total, min \
 	}'
+
+.PHONY: coverage-diff
+coverage-diff: ## Enforce coverage on changed Go lines (requires coverage.out)
+	@test -f coverage.out || { echo "✖ coverage.out missing; run make test-cover first"; exit 1; }
+	@echo "▶ Checking changed-line coverage against $(BASE)..."
+	$(GO) run ./tools/diffcoverage -base "$(BASE)" -profile coverage.out -min "$(DIFF_COVERAGE_MIN)"
 
 .PHONY: clean
 clean: ## Remove build artifacts
