@@ -2,6 +2,8 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -33,22 +35,31 @@ const (
 // k3sInstallCommand downloads the pinned K3s binary, verifies its SHA-256 and
 // installs it before invoking the upstream setup script. envPrefix is used for
 // the worker's K3S_TOKEN/K3S_URL exports; execArgs becomes INSTALL_K3S_EXEC.
-func k3sInstallCommand(execArgs, envPrefix string) string {
+func k3sInstallCommand(execArgs, envPrefix string, skipStart bool) string {
 	url := "https://github.com/k3s-io/k3s/releases/download/" + strings.ReplaceAll(k3sVersion, "+", "%2B") + "/k3s"
+	skip := ""
+	if skipStart {
+		// The upstream unit uses Type=notify with TimeoutStartSec=0. If the
+		// agent cannot authenticate, `systemctl restart` waits forever for a
+		// readiness notification. Skip the start here and start it with
+		// --no-block below; waitForNodesReady bounds the failure instead.
+		skip = "INSTALL_K3S_SKIP_START=true "
+	}
 	return fmt.Sprintf(`set -euo pipefail
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" %q
+curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 --retry-delay 2 -o "$tmp" %q
 printf '%%s  %%s\n' %q "$tmp" | sha256sum -c -
 install -m 0755 "$tmp" /usr/local/bin/k3s
-%s curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=%q sh -
-`, url, k3sSHA256, envPrefix, execArgs)
+%s curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD=true %sINSTALL_K3S_EXEC=%q sh -
+`, url, k3sSHA256, envPrefix, skip, execArgs)
 }
 
 // Phase implements the Kubernetes setup phase.
 type Phase struct {
-	cfg  *config.Config
-	pool ssh.Executor
+	cfg       *config.Config
+	pool      ssh.Executor
+	joinToken string
 }
 
 // NewPhase creates a new Kubernetes Phase.
@@ -77,6 +88,9 @@ func (p *Phase) Run(ctx context.Context) error {
 		return err
 	}
 	if err := p.joinControlPlane(ctx, master1); err != nil {
+		return err
+	}
+	if err := p.refreshJoinToken(ctx, master1); err != nil {
 		return err
 	}
 	if err := p.joinWorkers(ctx, master1); err != nil {
@@ -121,7 +135,7 @@ func (p *Phase) validateConfig() error {
 // the join token and puts it on every node that will join.
 func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s on Master 1 (cluster-init)...")
-	initCmd := k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP), "")
+	initCmd := k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP), "", false)
 	if err := runChecked(ctx, p.pool, master1.IP, initCmd, "install K3s on master1"); err != nil {
 		return err
 	}
@@ -140,7 +154,33 @@ func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDe
 	if err != nil {
 		return err
 	}
+	p.joinToken = token
 	return p.distributeJoinToken(ctx, token)
+}
+
+// refreshJoinToken re-reads the node token after the control-plane servers have
+// joined and redistributes it. Server joins can take long enough that a token
+// read before they converge is stale on the workers; re-reading makes the
+// worker join use the token the API server is actually validating.
+func (p *Phase) refreshJoinToken(ctx context.Context, master1 config.NodeDetail) error {
+	logging.Info("Refreshing K3s join token after control-plane join...")
+	token, err := p.readJoinToken(ctx, master1)
+	if err != nil {
+		return err
+	}
+	if p.joinToken != "" && token != p.joinToken {
+		logging.Warn("K3s join token changed after control-plane join (was %s, now %s); redistributing",
+			tokenFingerprint(p.joinToken), tokenFingerprint(token))
+	}
+	p.joinToken = token
+	return p.distributeJoinToken(ctx, token)
+}
+
+// tokenFingerprint returns a short, non-reversible identifier for logs. The
+// token itself must never be logged.
+func tokenFingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:6])
 }
 
 func (p *Phase) readJoinToken(ctx context.Context, master1 config.NodeDetail) (string, error) {
@@ -208,7 +248,7 @@ func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail)
 		m := m
 		serverJoinTasks[m.IP] = func(ctx context.Context, pool ssh.Executor) error {
 			logging.Info("Installing K3s on %s (server join)...", m.Name)
-			joinCmd := k3sInstallCommand(fmt.Sprintf("server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP, joinTokenPath, m.IP), "")
+			joinCmd := k3sInstallCommand(fmt.Sprintf("server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP, joinTokenPath, m.IP), "", true) + "systemctl daemon-reload\nsystemctl start k3s --no-block\n"
 			return runChecked(ctx, pool, m.IP, joinCmd, "join K3s "+m.Name)
 		}
 	}
@@ -228,7 +268,7 @@ func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) erro
 	logging.Info("Installing K3s Agents on Workers...")
 	const joinTokenPath = "/root/.k3s-join-token"
 	envPrefix := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443;", joinTokenPath, master1.IP)
-	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", envPrefix)
+	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", envPrefix, true) + "systemctl daemon-reload\nsystemctl start k3s-agent --no-block\n"
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
 		if w.IP != "" {

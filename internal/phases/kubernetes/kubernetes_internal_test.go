@@ -85,7 +85,7 @@ func TestIsTransientAPIError(t *testing.T) {
 }
 
 func TestK3sInstallCommandPinsVerifiedBinary(t *testing.T) {
-	cmd := k3sInstallCommand("server --cluster-init", "")
+	cmd := k3sInstallCommand("server --cluster-init", "", false)
 	for _, want := range []string{
 		"v1.29.9%2Bk3s1/k3s",
 		k3sSHA256,
@@ -100,5 +100,36 @@ func TestK3sInstallCommandPinsVerifiedBinary(t *testing.T) {
 	}
 	if strings.Contains(cmd, "INSTALL_K3S_CHANNEL") {
 		t.Error("k3s install command must not resolve a channel")
+	}
+	for _, want := range []string{"--connect-timeout 15", "--max-time 180", "--max-time 60"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("k3s install command is missing timeout %q:\n%s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "INSTALL_K3S_SKIP_START=true") {
+		t.Error("server install must wait for readiness")
+	}
+}
+
+func TestK3sAgentInstallSkipsBlockingStart(t *testing.T) {
+	cmd := k3sInstallCommand("--flannel-iface enp1s0", "export K3S_TOKEN=test;", true)
+	if !strings.Contains(cmd, "INSTALL_K3S_SKIP_START=true") {
+		t.Errorf("k3s agent command is missing INSTALL_K3S_SKIP_START=true:\n%s", cmd)
+	}
+	if strings.Contains(cmd, "systemctl restart") {
+		t.Error("k3s agent install must not block on systemctl restart")
+	}
+}
+
+func TestTokenFingerprintIsStableAndShort(t *testing.T) {
+	got := tokenFingerprint("K10test::server:token")
+	if len(got) != 12 {
+		t.Errorf("fingerprint length = %d, want 12", len(got))
+	}
+	if got != tokenFingerprint("K10test::server:token") {
+		t.Error("fingerprint is not stable")
+	}
+	if got == tokenFingerprint("K10other::server:token") {
+		t.Error("different tokens produced the same fingerprint")
 	}
 }
