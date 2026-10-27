@@ -27,7 +27,7 @@ This project covers the **fully automated design, implementation, and provisioni
 | **Block Replication** | DRBD 9.x | Synchronous Protocol C replication ensuring zero data loss between master nodes |
 | **Bare-metal Provisioning** | Cobbler 3.3.x | PXE + autoinstall for fully unattended Ubuntu deployment across all nodes |
 | **Configuration Management** | Puppet 8.x | Declarative, idempotent configuration with an agent/server model |
-| **Observability** | Prometheus 2.x + Grafana 11.x | Industry-standard monitoring stack with exporters for every service layer |
+| **Observability** | Prometheus 2.x + Grafana 13.2.4 | Industry-standard monitoring stack with exporters for every service layer |
 | **Firewall** | UFW | iptables abstraction layer — auditable, scriptable, and easy to maintain |
 
 The network is segmented into two subnets (`internal` and `main`) connected by a UFW router/firewall. The Jumpstart node (Cobbler + Puppet Server) has dual-homed presence in both networks to provision all nodes.
@@ -98,7 +98,7 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 | **WordPress** | 6.x | Content Management System (CMS) |
 | **Apache** | 2.4.x | Web server for CMS frontends |
 | **Prometheus** | 2.x | Infrastructure and service metrics collection |
-| **Grafana** | 11.x | Metrics visualisation and operational dashboards |
+| **Grafana** | 13.2.4 | Metrics visualisation and operational dashboards |
 | **UFW** | — | Network segmentation and per-node firewalling |
 | **DRBD** | 9.x | High availability — synchronous block-level replication |
 

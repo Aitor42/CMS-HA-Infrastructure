@@ -160,8 +160,11 @@ class role::monitor {
     require => File['/etc/apt/sources.list.d/grafana.list'],
   }
 
+  # Keep this pinned: the Grafana APT repository serves a moving `stable`
+  # channel, and an unpinned package makes deploys non-reproducible. Update
+  # this version together with docs/SOFTWARE_BASELINE.md.
   package { 'grafana':
-    ensure  => installed,
+    ensure  => '13.2.4',
     require => Exec['grafana-apt-update'],
   }
 

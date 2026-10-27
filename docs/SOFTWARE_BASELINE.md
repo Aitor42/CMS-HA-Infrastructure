@@ -49,7 +49,7 @@ In a virtualised environment, device firmware selection is critical for compatib
 | **drbd-utils** | 9.27.0 | DRBD management tools and CLI | `rpcbind`, `keyutils` | [LINBIT GitHub](https://github.com/LINBIT/) | `master1`, `master2` |
 | **Prometheus** | 2.45.3 | Time-series metrics collection engine | Static Go binaries | [Prometheus](https://prometheus.io/) | `internal-monitor` |
 | **Alertmanager** | 0.23.0 | Alert routing, grouping and deduplication for Prometheus | `prometheus-alertmanager` (APT) | [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/) | `internal-monitor` |
-| **Grafana** | 11.x | Data visualisation and operational dashboards | prometheus-datasource | [Grafana Labs](https://grafana.com/) | `internal-monitor` |
+| **Grafana** | 13.2.4 | Data visualisation and operational dashboards | prometheus-datasource | [Grafana Labs](https://grafana.com/) | `internal-monitor` |
 | **blackbox_exporter** | 0.24.x | End-to-end HTTP/TCP reachability probes (LB and CMS frontends) | None (standalone) | [Prometheus blackbox](https://github.com/prometheus/blackbox_exporter) | `internal-monitor` |
 | **UFW** | 0.36.2 | Perimeter and per-node firewall management | `iptables`, `nftables`, `python3` | [Launchpad UFW](https://launchpad.net/ufw) | `ufw-router`, all nodes |
 | **step-ca** | 0.30.2 | Private Certificate Authority for internal PKI | step CLI, SQLite | [Smallstep CA](https://github.com/smallstep/certificates) | `jumpstart` |

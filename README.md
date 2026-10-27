@@ -140,7 +140,7 @@ graph TB
 | Block Replication | DRBD | 9.x | Synchronous Protocol C replication |
 | Metrics Collection | Prometheus | 2.x | Time-series monitoring with exporters |
 | Alerting | Prometheus alert rules (19) + Alertmanager | 2.x / 0.23 | Availability, DRBD/etcd quorum, keepalived, service & backup health; routed and deduplicated by Alertmanager |
-| Dashboards | Grafana | 11.x | Metrics visualisation and dashboards |
+| Dashboards | Grafana | 13.2.4 | Metrics visualisation and dashboards |
 | Firewall | UFW | — | Perimeter and per-node iptables rules |
 | PKI / TLS | step-ca | 0.27.x | Internal Certificate Authority |
 | Infrastructure Provisioning | Ansible + community.libvirt | 2.16 | Declarative network/VM creation from `config.yaml` |
@@ -350,7 +350,7 @@ Example output from a fully converged environment:
 ✓ Phase 05 - Prometheus & Grafana: [PASS]
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
-✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v11.0.0))
+✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v13.2.4))
 ✓ Phase 10 - Stack functional checks (CMS pages, REST API, frontends, load balancers, MariaDB, backup store, probes, Grafana): [PASS]
 ✓ Completed phase: Infrastructure Verification in 21.37s
 ```
