@@ -16,6 +16,9 @@ prueba
 /cms-ha
 vendor/
 
+# Secret/key rotation backups
+config.yaml.bak-*
+
 # Age encryption keys
 *.age-key
 age-key.txt

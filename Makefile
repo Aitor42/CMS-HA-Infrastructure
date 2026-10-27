@@ -301,7 +301,7 @@ lint-k8s: ## Validate Kubernetes manifests (kustomize render + kubeconform)
 	fi
 
 .PHONY: security
-security: ## Security scan: gosec (Go SAST) + govulncheck (deps) + Trivy (fs)
+security: ## Security scan: gosec + govulncheck + Gitleaks + Trivy
 	@echo "▶ Security scan..."
 	@if command -v gosec >/dev/null 2>&1; then \
 		gosec -severity high -confidence medium -exclude-dir=tests ./... && \
@@ -313,6 +313,11 @@ security: ## Security scan: gosec (Go SAST) + govulncheck (deps) + Trivy (fs)
 		govulncheck ./...; \
 	else \
 		echo "  ℹ govulncheck not installed — skipping (go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
+	fi
+	@if command -v gitleaks >/dev/null 2>&1; then \
+		gitleaks detect --source . --no-git --config .gitleaks.toml --redact --no-banner --exit-code 1; \
+	else \
+		echo "  ℹ gitleaks not installed — skipping (install v8.30.1 from GitHub releases)"; \
 	fi
 	@if command -v trivy >/dev/null 2>&1; then \
 		echo "  · dependencies & secrets (blocking on HIGH/CRITICAL)"; \
@@ -393,6 +398,10 @@ secrets-encrypt: build ## Encrypt sensitive fields in config.yaml
 .PHONY: secrets-decrypt
 secrets-decrypt: build ## Decrypt and display config
 	./$(BINARY) -c $(CONFIG) secrets decrypt
+
+.PHONY: secrets-rotate
+secrets-rotate: build ## Rotate the age key and re-encrypt config.yaml (keeps backups)
+	./$(BINARY) -c $(CONFIG) secrets rotate
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CLEANUP

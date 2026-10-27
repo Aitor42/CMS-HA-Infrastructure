@@ -63,6 +63,13 @@ type decrypter struct {
 // newDecrypter reads and parses the age identity at keyPath.
 func newDecrypter(keyPath string) (*decrypter, error) {
 	cleanedKeyPath := filepath.Clean(ExpandPath(keyPath))
+	info, err := os.Stat(cleanedKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat key file: %w", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("age key file %s has mode %04o; chmod 600 before use (group/other access is not allowed)", cleanedKeyPath, perm)
+	}
 	keyData, err := os.ReadFile(cleanedKeyPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file: %w", err)
@@ -158,45 +165,38 @@ func processYAMLNode(node *yaml.Node, process func(string) (string, error)) erro
 	return nil
 }
 
-// EncryptConfig reads the config file, encrypts sensitive fields, and writes it back.
-func EncryptConfig(configPath, publicKey string) error {
-	cleanedConfigPath := filepath.Clean(ExpandPath(configPath))
-	data, err := os.ReadFile(cleanedConfigPath)
-	if err != nil {
-		return fmt.Errorf("failed to read config: %w", err)
-	}
-
-	// Shared-config setups often place a symlink in the repo pointing to the
-	// real config: write to the resolved target instead of replacing the link.
-	target := cleanedConfigPath
-	if info, lerr := os.Lstat(cleanedConfigPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-		if resolved, err := filepath.EvalSymlinks(cleanedConfigPath); err == nil {
-			target = resolved
+// configTarget resolves symlinks so shared-config setups write to the real
+// file instead of replacing the link with a regular file.
+func configTarget(configPath string) string {
+	cleaned := filepath.Clean(ExpandPath(configPath))
+	if info, err := os.Lstat(cleaned); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if resolved, err := filepath.EvalSymlinks(cleaned); err == nil {
+			return resolved
 		}
 	}
+	return cleaned
+}
 
+// readConfigRoot reads and parses a config file, returning its resolved target.
+func readConfigRoot(configPath string) (string, *yaml.Node, error) {
+	target := configTarget(configPath)
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read config: %w", err)
+	}
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("failed to parse yaml: %w", err)
+		return "", nil, fmt.Errorf("failed to parse yaml: %w", err)
 	}
+	return target, &root, nil
+}
 
-	err = processYAMLNode(&root, func(s string) (string, error) {
-		if strings.TrimSpace(s) == "" {
-			return s, nil
-		}
-		if IsEncrypted(s) {
-			return s, nil
-		}
-		return EncryptValue(s, publicKey)
-	})
-	if err != nil {
-		return err
-	}
-
+// writeConfigRoot atomically replaces the config with the encoded YAML tree.
+func writeConfigRoot(target string, root *yaml.Node) error {
 	buf := &bytes.Buffer{}
 	encoder := yaml.NewEncoder(buf)
 	encoder.SetIndent(2)
-	if err := encoder.Encode(&root); err != nil {
+	if err := encoder.Encode(root); err != nil {
 		return fmt.Errorf("failed to encode yaml: %w", err)
 	}
 
@@ -225,8 +225,68 @@ func EncryptConfig(configPath, publicKey string) error {
 		_ = os.Remove(tmpFile)
 		return fmt.Errorf("failed to replace config: %w", err)
 	}
-
 	return nil
+}
+
+// EncryptConfig reads the config file, encrypts sensitive fields, and writes it back.
+func EncryptConfig(configPath, publicKey string) error {
+	target, root, err := readConfigRoot(configPath)
+	if err != nil {
+		return err
+	}
+	err = processYAMLNode(root, func(s string) (string, error) {
+		if strings.TrimSpace(s) == "" {
+			return s, nil
+		}
+		if IsEncrypted(s) {
+			return s, nil
+		}
+		return EncryptValue(s, publicKey)
+	})
+	if err != nil {
+		return err
+	}
+	return writeConfigRoot(target, root)
+}
+
+// PublicKeyFromPrivate derives the age recipient from a private identity.
+func PublicKeyFromPrivate(privateKey string) (string, error) {
+	identity, err := age.ParseX25519Identity(strings.TrimSpace(privateKey))
+	if err != nil {
+		return "", fmt.Errorf("invalid private age key: %w", err)
+	}
+	return identity.Recipient().String(), nil
+}
+
+// RekeyConfig decrypts every secret field with oldKeyPath and re-encrypts it
+// with newPublicKey. Plaintext secret fields are encrypted with the new key.
+// The config is written atomically only after every value decrypts correctly.
+func RekeyConfig(configPath, oldKeyPath, newPublicKey string) error {
+	target, root, err := readConfigRoot(configPath)
+	if err != nil {
+		return err
+	}
+	decrypter, err := newDecrypter(oldKeyPath)
+	if err != nil {
+		return err
+	}
+	err = processYAMLNode(root, func(s string) (string, error) {
+		if strings.TrimSpace(s) == "" {
+			return s, nil
+		}
+		plain := s
+		if IsEncrypted(s) {
+			plain, err = decrypter.decrypt(s)
+			if err != nil {
+				return "", err
+			}
+		}
+		return EncryptValue(plain, newPublicKey)
+	})
+	if err != nil {
+		return err
+	}
+	return writeConfigRoot(target, root)
 }
 
 // LoadAutoEncrypt encrypts non-empty plaintext secret fields in the config

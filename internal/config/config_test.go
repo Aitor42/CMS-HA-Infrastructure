@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -372,5 +373,96 @@ func TestSecretsRoundTrip(t *testing.T) {
 	}
 	if got, err := DecryptValue("plain text", keyPath); err != nil || got != "plain text" {
 		t.Fatalf("plaintext DecryptValue = %q, %v", got, err)
+	}
+
+	insecureKey := filepath.Join(t.TempDir(), "insecure.key")
+	if err := os.WriteFile(insecureKey, []byte(privateKey), 0600); err != nil {
+		t.Fatalf("write insecure key: %v", err)
+	}
+	if err := os.Chmod(insecureKey, 0644); err != nil {
+		t.Fatalf("chmod insecure key: %v", err)
+	}
+	if _, err := DecryptValue(encrypted, insecureKey); err == nil || !strings.Contains(err.Error(), "chmod 600") {
+		t.Fatalf("world-readable key was not rejected: %v", err)
+	}
+}
+
+func TestRekeyConfig(t *testing.T) {
+	oldPublic, oldPrivate, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(old): %v", err)
+	}
+	newPublic, newPrivate, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(new): %v", err)
+	}
+	if got, err := PublicKeyFromPrivate(newPrivate); err != nil || got != newPublic {
+		t.Fatalf("PublicKeyFromPrivate = %q, %v; want %q", got, err, newPublic)
+	}
+
+	dir := t.TempDir()
+	oldKeyPath := filepath.Join(dir, "old.key")
+	newKeyPath := filepath.Join(dir, "new.key")
+	if err := os.WriteFile(oldKeyPath, []byte(oldPrivate), 0600); err != nil {
+		t.Fatalf("write old key: %v", err)
+	}
+	if err := os.WriteFile(newKeyPath, []byte(newPrivate), 0600); err != nil {
+		t.Fatalf("write new key: %v", err)
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database:\n  user: cms\n  password: db-secret\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := RekeyConfig(configPath, oldKeyPath, newPublic); err != nil {
+		t.Fatalf("RekeyConfig: %v", err)
+	}
+	rekeyed, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read rekeyed config: %v", err)
+	}
+	if strings.Contains(string(rekeyed), "db-secret") {
+		t.Fatal("rekeyed config still contains the plaintext secret")
+	}
+	if !strings.Contains(string(rekeyed), "ENC[age,") {
+		t.Fatal("rekeyed config does not contain an encrypted secret")
+	}
+	cfg, err := LoadWithKey(configPath, newKeyPath)
+	if err != nil {
+		t.Fatalf("load with new key: %v", err)
+	}
+	if cfg.Database.Password != "db-secret" {
+		t.Fatalf("decrypted password = %q", cfg.Database.Password)
+	}
+	if cfg.Database.User != "cms" {
+		t.Fatalf("non-secret field changed: %q", cfg.Database.User)
+	}
+	if _, err := LoadWithKey(configPath, oldKeyPath); err == nil {
+		t.Fatal("old key still decrypts the rekeyed config")
+	}
+
+	// A failed rekey must not touch the file.
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read before failed rekey: %v", err)
+	}
+	wrongKey := filepath.Join(dir, "wrong.key")
+	wrongPublic, wrongPrivate, err := GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(wrong): %v", err)
+	}
+	_ = wrongPublic
+	if err := os.WriteFile(wrongKey, []byte(wrongPrivate), 0600); err != nil {
+		t.Fatalf("write wrong key: %v", err)
+	}
+	if err := RekeyConfig(configPath, wrongKey, oldPublic); err == nil {
+		t.Fatal("RekeyConfig succeeded with the wrong old key")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read after failed rekey: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("failed rekey modified the config file")
 	}
 }

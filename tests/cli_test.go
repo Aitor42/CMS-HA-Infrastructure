@@ -40,6 +40,16 @@ func TestCLI_CommandRegistration(t *testing.T) {
 	}
 }
 
+func TestCLI_SecretsSubcommands(t *testing.T) {
+	rootCmd := root.GetRootCmd()
+	for _, sub := range []string{"encrypt", "decrypt", "generate-key", "rotate"} {
+		cmd, _, err := rootCmd.Find([]string{"secrets", sub})
+		if err != nil || cmd == nil || cmd.Name() != sub {
+			t.Errorf("expected secrets subcommand %q to be registered", sub)
+		}
+	}
+}
+
 func TestCLI_PhaseSubcommands(t *testing.T) {
 	rootCmd := root.GetRootCmd()
 	phaseSubcommands := []string{

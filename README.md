@@ -172,7 +172,7 @@ CMS-HA-Infrastructure/
 │       ├── test.go                  # cms-ha test failover (chaos engineering)
 │       ├── traffic.go               # cms-ha traffic       (k6 load test)
 │       ├── repair.go                # cms-ha repair k8s|clocks
-│       ├── secrets.go               # cms-ha secrets encrypt|decrypt|generate-key
+│       ├── secrets.go               # cms-ha secrets encrypt|decrypt|generate-key|rotate
 │       └── ...                      # backup, status, lint
 │
 ├── internal/                        # Core Go packages (not importable externally)
@@ -321,7 +321,7 @@ The Go orchestrator keeps the pipeline fast and safe:
 - **Fast jumpstart (hosted workflow default)** — `phase init-vms --jumpstart-image cloud` boots a qcow2 overlay of the Ubuntu cloud image for iteration and CI. The CLI/config default remains ISO/PXE, and the ISO/PXE path remains the deliverable gate; the hosted workflow defaults to cloud because it is the fastest way to exercise the rest of the pipeline.
 - **Fast provisioning (hosted workflow default)** — `deploy --fast-provisioning` (or `vm.provisioning: cloud`) installs the jumpstart and every client node from the same cloud image, with per-node cloud-init for hostname, MACs, static addresses and SSH key. The CLI/config default remains PXE; the hosted workflow defaults to `fast_provisioning=true` for speed. The PXE/Cobbler run remains the deliverable gate (self-hosted `integration.yml`, or a hosted dispatch with `jumpstart_image=iso` and `fast_provisioning=false`).
 - **Self-healing** — stale Puppet certificates are revoked, re-signed and the catalog is re-run; broken DRBD/K3s state aborts the deploy instead of reporting success.
-- **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository.
+- **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository. `cms-ha secrets rotate` rekeys the config and keeps timestamped backups; `gitleaks` scans the tree in CI.
 - **Checkpoints** — `deploy.state` lets `--resume` and `--from-phase` continue after a failure. A `deploy.state.lock` file makes a second concurrent deploy fail fast instead of corrupting the checkpoint.
 
 ---

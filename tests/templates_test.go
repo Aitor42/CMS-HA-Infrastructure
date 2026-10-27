@@ -229,8 +229,7 @@ func TestTemplates_EmbeddedNginxConfig(t *testing.T) {
 func TestTemplates_CasperHelperSingleSource(t *testing.T) {
 	// The helper that forces casper's NFS-over-TCP mount must exist as a single
 	// canonical copy (templates/cobbler/, embedded in the binary and uploaded by
-	// the Go phase). The legacy shell script has to consume that same file; a
-	// second copy under scripts/ had already drifted from it.
+	// the Go phase). The removed v1 suite had a second copy that drifted from it.
 	data, err := cms.TemplatesFS.ReadFile("templates/cobbler/casper_initrd_tcp.sh")
 	if err != nil {
 		t.Fatalf("failed to read embedded casper helper: %v", err)

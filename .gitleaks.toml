@@ -1,0 +1,14 @@
+# Gitleaks configuration.
+#
+# Keep the upstream rules; the only local exception is the hosted integration
+# diagnostic that probes Grafana with a password read from the guest's
+# EnvironmentFile at runtime. The value is a shell expansion, not a committed
+# credential.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Hosted diagnostics use a runtime Grafana password variable"
+paths = ['''.github/workflows/integration-hosted.yml''']
+regexTarget = "match"
+regexes = ['''curl -sS -m 5 -u "admin:\$\{pw:-admin\}"''']

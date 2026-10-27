@@ -23,7 +23,7 @@ func TestLint_FindModuleRoot(t *testing.T) {
 
 // TestLint_FindFiles uses a throwaway tree instead of the repository so the
 // assertion only tests the walk itself (recursion, pattern matching and the
-// skip list), not whether scripts/ still happens to contain a .sh file.
+// skip list), not which .sh files happen to exist in the repository.
 func TestLint_FindFiles(t *testing.T) {
 	root := t.TempDir()
 	files := []string{

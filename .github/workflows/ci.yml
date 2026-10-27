@@ -22,6 +22,8 @@ env:
   ANSIBLE_LINT_VERSION: "26.10.1"
   PUPPET_LINT_VERSION: "5.1.1"
   ACTIONLINT_VERSION: "v1.7.12"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -289,13 +291,13 @@ jobs:
             ansible/playbooks/provision.yml
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 7. Security Scanning — gosec + govulncheck + Trivy
+  # 7. Security Scanning — gosec + govulncheck + Gitleaks + Trivy
   #    Gate: no HIGH/CRITICAL findings in code (gosec), dependencies
-  #    (govulncheck/Trivy vuln) or secrets (Trivy). Kubernetes misconfig is
-  #    reported but not blocking (see docs/SECURITY.md).
+  #    (govulncheck/Trivy vuln) or committed secrets (Gitleaks/Trivy).
+  #    Kubernetes misconfig is reported but not blocking (see docs/SECURITY.md).
   # ─────────────────────────────────────────────────────────────────────────────
   security-scan:
-    name: Security Scan (gosec, govulncheck, Trivy)
+    name: Security Scan (gosec, govulncheck, Gitleaks, Trivy)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -333,6 +335,15 @@ jobs:
         run: |
           go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           govulncheck ./...
+
+      - name: Gitleaks — committed secrets
+        run: |
+          curl -fsSL --retry 3 \
+            -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar xz -C /usr/local/bin -f /tmp/gitleaks.tar.gz gitleaks
+          gitleaks detect --source . --no-git --config .gitleaks.toml --redact --no-banner --exit-code 1
 
       - name: Trivy — dependencies & secrets (BLOCKING on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
