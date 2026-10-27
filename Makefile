@@ -39,6 +39,9 @@ ANSIBLE_DIR   := $(PROJECT_DIR)/ansible
 
 # ── Configurable variables ───────────────────────────────────────────────────
 CONFIG      ?= config.yaml
+# Aggregate coverage gate. Keep this conservative until the phase packages
+# have local tests; the number is raised as coverage improves.
+COVERAGE_MIN ?= 40.0
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BUILD
@@ -66,6 +69,14 @@ test-cover: ## Run Go tests with cross-package coverage (coverage.out)
 	@echo "▶ Running tests with coverage..."
 	$(GO) test -coverpkg=./... -coverprofile=coverage.out ./...
 	@$(GO) tool cover -func=coverage.out | tail -1
+
+.PHONY: coverage-check
+coverage-check: test-cover ## Fail if aggregate coverage is below COVERAGE_MIN
+	@total=$$($(GO) tool cover -func=coverage.out | tail -1 | awk '{print $$3}' | tr -d '%'); \
+	awk -v total="$$total" -v min="$(COVERAGE_MIN)" 'BEGIN { \
+		if (total < min) { printf "✖ coverage %.1f%% is below the %.1f%% minimum\n", total, min; exit 1 } \
+		printf "✔ coverage %.1f%% (minimum %.1f%%)\n", total, min \
+	}'
 
 .PHONY: clean
 clean: ## Remove build artifacts
