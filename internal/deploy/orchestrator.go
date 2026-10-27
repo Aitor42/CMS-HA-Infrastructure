@@ -51,6 +51,9 @@ type DeployOpts struct {
 	TimingsFile string
 	// ConfigFile is the configuration path recorded in the timing report.
 	ConfigFile string
+	// RunID identifies this invocation in logs, timings.json and the checkpoint.
+	// Empty means generate one from the current UTC time.
+	RunID string
 	// FastProvisioning uses the cloud image for the jumpstart and every client
 	// node. It is the opt-in fast path; PXE/Cobbler remains the default.
 	FastProvisioning bool
@@ -58,12 +61,19 @@ type DeployOpts struct {
 
 // Deploy runs the entire deployment pipeline.
 func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr error) {
+	runID := opts.RunID
+	if runID == "" {
+		runID = newRunID()
+	}
+	logging.SetRunID(runID)
+	logging.Info("Deployment run ID: %s", runID)
+
 	timer := logging.PhaseStart(topLevelTimer)
 	defer timer.End()
 
 	var timings *timingsRecorder
 	if opts.TimingsFile != "" {
-		timings = newTimingsRecorder(opts.TimingsFile, opts.ConfigFile, o.SSH)
+		timings = newTimingsRecorder(opts.TimingsFile, opts.ConfigFile, runID, o.SSH)
 		defer func() {
 			status := "completed"
 			if retErr != nil {
@@ -100,6 +110,7 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 		if state, err = LoadState(statePath); err != nil {
 			return err
 		}
+		state.RunID = runID
 	}
 
 	if !opts.DryRun {

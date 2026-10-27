@@ -42,6 +42,7 @@ type StepTiming struct {
 // Timings is the JSON document written by --timings-file.
 type Timings struct {
 	Version   int           `json:"version"`
+	RunID     string        `json:"run_id,omitempty"`
 	Config    string        `json:"config,omitempty"`
 	StartedAt time.Time     `json:"started_at"`
 	TotalMS   int64         `json:"total_ms"`
@@ -57,6 +58,7 @@ type Timings struct {
 type timingsRecorder struct {
 	mu      sync.Mutex
 	path    string
+	runID   string
 	config  string
 	start   time.Time
 	phases  []PhaseTiming
@@ -66,12 +68,13 @@ type timingsRecorder struct {
 }
 
 // newTimingsRecorder starts recording. It returns nil when path is empty.
-func newTimingsRecorder(path, configName string, pool *ssh.Pool) *timingsRecorder {
+func newTimingsRecorder(path, configName, runID string, pool *ssh.Pool) *timingsRecorder {
 	if path == "" {
 		return nil
 	}
 	r := &timingsRecorder{
 		path:   path,
+		runID:  runID,
 		config: configName,
 		start:  time.Now().UTC(),
 		pool:   pool,
@@ -159,6 +162,7 @@ func (r *timingsRecorder) write(status string) error {
 	r.mu.Lock()
 	doc := Timings{
 		Version:   timingsVersion,
+		RunID:     r.runID,
 		Config:    r.config,
 		StartedAt: r.start,
 		TotalMS:   time.Since(r.start).Milliseconds(),

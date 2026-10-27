@@ -24,11 +24,20 @@ const DefaultStateFile = "deploy.state"
 // (notably re-running VM creation and the Puppet convergence).
 type State struct {
 	Version         int       `json:"version"`
+	RunID           string    `json:"run_id,omitempty"`
 	Status          string    `json:"status"` // running | completed | failed
 	StartedAt       time.Time `json:"started_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 	CompletedPhases []string  `json:"completed_phases"`
 	LastError       string    `json:"last_error,omitempty"`
+}
+
+// newRunID returns a sortable, unique-enough identifier for one deploy
+// invocation. The timestamp makes runs easy to order in an artifact list; the
+// nanosecond suffix keeps two runs started in the same second distinct.
+func newRunID() string {
+	now := time.Now().UTC()
+	return fmt.Sprintf("%s-%06d", now.Format("20060102T150405Z"), now.Nanosecond()%1000000)
 }
 
 // LoadState reads a checkpoint file. A missing file is not an error: it returns

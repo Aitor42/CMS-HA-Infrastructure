@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,24 @@ func SetVerbose(v bool) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
 	})))
+}
+
+// runID is the current deployment/run identifier. It is attached to structured
+// debug records so a log line can be correlated with timings.json and the
+// checkpoint without parsing the human-readable prefix.
+var runID atomic.Value
+
+// SetRunID sets the identifier attached to subsequent structured log records.
+func SetRunID(id string) {
+	runID.Store(id)
+}
+
+// RunID returns the current identifier, or an empty string when none is set.
+func RunID() string {
+	if v := runID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // FormatMsg formats a message if format arguments are provided.
@@ -61,10 +80,13 @@ func Error(msg string, args ...any) {
 // progress must use Info/Success/Warn/Error so it always prints.
 func Debug(msg string, args ...any) {
 	if len(args) > 0 {
-		slog.Debug(fmt.Sprintf(msg, args...))
-		return
+		msg = fmt.Sprintf(msg, args...)
 	}
-	slog.Debug(msg)
+	attrs := []any{}
+	if id := RunID(); id != "" {
+		attrs = append(attrs, "run_id", id)
+	}
+	slog.Debug(msg, attrs...)
 }
 
 // phaseObserver receives the name, start time and duration of every completed

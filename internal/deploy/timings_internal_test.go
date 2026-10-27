@@ -14,7 +14,7 @@ func TestTimingsRecorderWritesPhasesAndSteps(t *testing.T) {
 	t.Cleanup(func() { logging.SetPhaseObserver(nil) })
 
 	path := filepath.Join(t.TempDir(), "nested", "timings.json")
-	rec := newTimingsRecorder(path, "config.ci.yaml", nil)
+	rec := newTimingsRecorder(path, "config.ci.yaml", "run-test", nil)
 	if rec == nil {
 		t.Fatal("expected a recorder when a path is configured")
 	}
@@ -51,6 +51,9 @@ func TestTimingsRecorderWritesPhasesAndSteps(t *testing.T) {
 	if doc.Config != "config.ci.yaml" {
 		t.Errorf("config = %q, want config.ci.yaml", doc.Config)
 	}
+	if doc.RunID != "run-test" {
+		t.Errorf("run_id = %q, want run-test", doc.RunID)
+	}
 	if doc.Status != "failed" {
 		t.Errorf("status = %q, want failed", doc.Status)
 	}
@@ -78,7 +81,7 @@ func TestTimingsRecorderWritesPhasesAndSteps(t *testing.T) {
 }
 
 func TestTimingsRecorderDisabledWithoutPath(t *testing.T) {
-	rec := newTimingsRecorder("", "", nil)
+	rec := newTimingsRecorder("", "", "", nil)
 	if rec != nil {
 		t.Fatal("expected a nil recorder when no path is configured")
 	}

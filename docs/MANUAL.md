@@ -162,8 +162,12 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 ./cms-ha deploy --state-file /var/tmp/deploy.state
 
 # Record per-phase and per-sub-step durations (JSON) for before/after
-# comparisons. It is written even when a phase fails:
+# comparisons. It is written even when a phase fails. The report carries the
+# same run_id as deploy.state, and every phase/step has a status and duration:
 ./cms-ha deploy --timings-file integration-artifacts/timings.json
+
+# Pin the identifier when correlating with an external CI job or ticket:
+./cms-ha deploy --run-id ci-1234 --timings-file integration-artifacts/timings.json
 
 # (Or Makefile: make deploy-resume)
 ```

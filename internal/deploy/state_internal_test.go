@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
@@ -94,4 +96,27 @@ func TestPlanRun(t *testing.T) {
 			t.Fatal("expected an error when both flags are set")
 		}
 	})
+}
+
+func TestNewRunID(t *testing.T) {
+	id := newRunID()
+	parts := strings.Split(id, "-")
+	if len(parts) != 2 || !strings.Contains(parts[0], "T") || len(parts[1]) != 6 {
+		t.Fatalf("unexpected run id %q", id)
+	}
+}
+
+func TestStateRunIDRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deploy.state")
+	want := &State{Version: stateVersion, RunID: "run-123", Status: "running"}
+	if err := want.Save(path); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	got, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if got.RunID != want.RunID {
+		t.Fatalf("run_id = %q, want %q", got.RunID, want.RunID)
+	}
 }
