@@ -27,12 +27,17 @@ func CheckDiskAccess(lv *libvirt.Client) error {
 		// documents and is left to the operator.
 		return nil
 	}
-	data, err := os.ReadFile(qemuConfigPath)
+	data, err := readQEMUConfig()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("read %s: %w", qemuConfigPath, err)
+		// qemu.conf is often root-only on hosted runners. The libvirt
+		// default is dynamic ownership enabled, and RestrictDisk still
+		// refuses a world-accessible image, so do not block the deploy
+		// just because the file cannot be read.
+		logging.Warn("cannot read %s (%v); assuming libvirt default dynamic_ownership=1", qemuConfigPath, err)
+		return nil
 	}
 	if !dynamicOwnershipEnabled(data) {
 		return fmt.Errorf("libvirt dynamic_ownership is disabled in %s; enable it (dynamic_ownership = 1) so qemu can read mode-0600 disks without world-writable files", qemuConfigPath)
@@ -75,7 +80,7 @@ func EnsureStorageACL(storageDir string) error {
 // distro defaults as a fallback. An empty result means this host does not use
 // a separate qemu account (or qemu.conf is unavailable).
 func qemuUser() string {
-	if data, err := os.ReadFile(qemuConfigPath); err == nil {
+	if data, err := readQEMUConfig(); err == nil {
 		for _, raw := range strings.Split(string(data), "\n") {
 			line := strings.TrimSpace(raw)
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -96,6 +101,22 @@ func qemuUser() string {
 		}
 	}
 	return ""
+}
+
+// readQEMUConfig reads qemu.conf, falling back to sudo when the file is
+// root-only. On a standard Ubuntu libvirt install it is mode 0600 root:root.
+func readQEMUConfig() ([]byte, error) {
+	data, err := os.ReadFile(qemuConfigPath)
+	if err == nil {
+		return data, nil
+	}
+	if os.IsPermission(err) {
+		out, sudoErr := exec.Command("sudo", "-n", "cat", qemuConfigPath).Output() // #nosec G204 -- fixed command and path
+		if sudoErr == nil {
+			return out, nil
+		}
+	}
+	return nil, err
 }
 
 // dynamicOwnershipEnabled parses the small subset of qemu.conf that matters
