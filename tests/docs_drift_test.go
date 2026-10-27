@@ -43,12 +43,12 @@ func TestDocumentationTracksPinnedVersions(t *testing.T) {
 	}
 
 	k3sSource := read("internal/phases/kubernetes/kubernetes.go")
-	k3sChannel := regexp.MustCompile(`INSTALL_K3S_CHANNEL=\\?"(v\d+\.\d+)\\?"`).FindStringSubmatch(k3sSource)
-	if len(k3sChannel) != 2 {
-		t.Fatal("could not parse INSTALL_K3S_CHANNEL")
+	k3sVersion := regexp.MustCompile(`k3sVersion\s*=\s*"(v[^"]+)"`).FindStringSubmatch(k3sSource)
+	if len(k3sVersion) != 2 {
+		t.Fatal("could not parse the pinned K3s version")
 	}
-	if !strings.Contains(baseline, "channel `"+k3sChannel[1]+"`") {
-		t.Fatalf("SOFTWARE_BASELINE.md does not describe the K3s channel %s", k3sChannel[1])
+	if !strings.Contains(baseline, "| **K3s** | "+k3sVersion[1]+" |") {
+		t.Fatalf("SOFTWARE_BASELINE.md does not list the pinned K3s version %s", k3sVersion[1])
 	}
 
 	readme := read("README.md")

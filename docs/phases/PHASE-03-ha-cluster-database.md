@@ -21,7 +21,7 @@
 | internal-worker2 | 192.168.10.14 | Agent |
 
 **Installation:**
-- Master 1: `curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption --node-external-ip 192.168.10.11 --flannel-iface enp1s0" sh -` (Secret encryption at rest is enabled from cluster init).
+- Master 1: the orchestrator downloads the pinned `v1.29.9+k3s1` binary, verifies its SHA-256, installs it, and runs the upstream setup script with `INSTALL_K3S_SKIP_DOWNLOAD=true` and `INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption --node-external-ip 192.168.10.11 --flannel-iface enp1s0"` (Secret encryption at rest is enabled from cluster init).
 - Master 2: joins the existing cluster with `--server https://192.168.10.11:6443 --token-file /root/.k3s-join-token` — the join token is uploaded to each joining node as a file with `0600` permissions and never placed on the command line (an argv value would be readable by every local user via `/proc/*/cmdline`).
 - Master 3: joins as an additional control-plane **server** with the same command, giving the embedded etcd cluster an odd quorum (3 members tolerate 1 failure). It carries no DRBD disk. After all servers join, the phase verifies that the number of nodes labelled `node-role.kubernetes.io/etcd` equals the configured master count — K3s runs etcd inside the server process, so its members are control-plane nodes, not kube-system pods.
 - Workers: join as agents with `K3S_TOKEN` expanded from the same protected file into an exported environment variable (`export K3S_TOKEN="$(cat /root/.k3s-join-token)"`), visible only in the owner-readable `/proc/*/environ`. Agent join results are validated per node (SSH error **and** exit code); a failed join aborts the phase.

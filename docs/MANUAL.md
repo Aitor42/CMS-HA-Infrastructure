@@ -40,6 +40,13 @@ sudo usermod -aG libvirt $USER
 newgrp libvirt
 ```
 
+Disk images are created mode `0600` and handed to the qemu account by libvirt
+**dynamic ownership**. Keep `dynamic_ownership = 1` in
+`/etc/libvirt/qemu.conf` (the default); `init-vms` checks it and fails before
+creating VMs when it is explicitly disabled. The deploy account still needs
+passwordless `sudo` for the final `chmod`, because libvirt may chown a disk to
+qemu before the orchestrator can restrict it.
+
 ### 1.3 CLI Behaviour and Configuration Validation (v2.1)
 
 *   **Error handling**: command errors are printed once to **stderr** and the process exits with code `1`. Nothing is retried silently; failures surface where they occur.

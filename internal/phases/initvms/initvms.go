@@ -11,6 +11,7 @@ import (
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/hypervisor"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
@@ -130,6 +131,9 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 		if _, err := exec.LookPath(cmd); err != nil {
 			return fmt.Errorf("%q not found in PATH; install: apt install %s", cmd, pkg)
 		}
+	}
+	if err := hypervisor.CheckDiskAccess(p.lv); err != nil {
+		return err
 	}
 
 	dir := filepath.Clean(p.cfg.VM.StorageDir)

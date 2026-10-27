@@ -1,6 +1,9 @@
 package kubernetes
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCountNonEmptyLines(t *testing.T) {
 	tests := []struct {
@@ -78,5 +81,24 @@ func TestIsTransientAPIError(t *testing.T) {
 		if isTransientAPIError(detail) {
 			t.Errorf("expected permanent: %s", detail)
 		}
+	}
+}
+
+func TestK3sInstallCommandPinsVerifiedBinary(t *testing.T) {
+	cmd := k3sInstallCommand("server --cluster-init", "")
+	for _, want := range []string{
+		"v1.29.9%2Bk3s1/k3s",
+		k3sSHA256,
+		"sha256sum -c -",
+		"install -m 0755 \"$tmp\" /usr/local/bin/k3s",
+		"INSTALL_K3S_SKIP_DOWNLOAD=true",
+		"INSTALL_K3S_EXEC=\"server --cluster-init\"",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("k3s install command is missing %q:\n%s", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "INSTALL_K3S_CHANNEL") {
+		t.Error("k3s install command must not resolve a channel")
 	}
 }

@@ -200,7 +200,9 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		installOpts.Wait = -1
 		installOpts.NoReboot = true
 	}
-	_ = os.Chmod(diskPath, 0666)
+	if err := hypervisor.RestrictDisk(diskPath); err != nil {
+		return fmt.Errorf("restrict jumpstart disk: %w", err)
+	}
 
 	if mode == "cloud" {
 		logging.Info("Starting Jumpstart cloud boot (the image is already installed)...")
@@ -328,7 +330,9 @@ func (p *Phase) writeSeed(ctx context.Context, seedDir, seedISO, metaData string
 	if err := libvirt.CreateISO(ctx, seedISO, seedDir, "cidata"); err != nil {
 		return fmt.Errorf("failed to create seed ISO: %w", err)
 	}
-	_ = os.Chmod(seedISO, 0644)
+	if err := hypervisor.RestrictDisk(seedISO); err != nil {
+		return fmt.Errorf("restrict seed ISO: %w", err)
+	}
 	logging.Success("Cloud-init seed ISO created: %s", seedISO)
 	return nil
 }

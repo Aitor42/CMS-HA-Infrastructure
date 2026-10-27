@@ -21,6 +21,30 @@ import (
 // genuinely broken cluster into a very long hang.
 const apiRetryBudget = 3 * time.Minute
 
+// The K3s binary is pinned to an exact release and verified before it is
+// installed. The upstream install script still creates the systemd unit and
+// runs the server/agent, but INSTALL_K3S_SKIP_DOWNLOAD=true forces it to use
+// this already-verified binary instead of resolving a channel at runtime.
+const (
+	k3sVersion = "v1.29.9+k3s1"
+	k3sSHA256  = "1d09adc906c16afbc69963b22070401f3c29a2c336368582f92b4330f0c89197"
+)
+
+// k3sInstallCommand downloads the pinned K3s binary, verifies its SHA-256 and
+// installs it before invoking the upstream setup script. envPrefix is used for
+// the worker's K3S_TOKEN/K3S_URL exports; execArgs becomes INSTALL_K3S_EXEC.
+func k3sInstallCommand(execArgs, envPrefix string) string {
+	url := "https://github.com/k3s-io/k3s/releases/download/" + strings.ReplaceAll(k3sVersion, "+", "%2B") + "/k3s"
+	return fmt.Sprintf(`set -euo pipefail
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" %q
+printf '%%s  %%s\n' %q "$tmp" | sha256sum -c -
+install -m 0755 "$tmp" /usr/local/bin/k3s
+%s curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_EXEC=%q sh -
+`, url, k3sSHA256, envPrefix, execArgs)
+}
+
 // Phase implements the Kubernetes setup phase.
 type Phase struct {
 	cfg  *config.Config
@@ -97,7 +121,7 @@ func (p *Phase) validateConfig() error {
 // the join token and puts it on every node that will join.
 func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s on Master 1 (cluster-init)...")
-	initCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP)
+	initCmd := k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP), "")
 	if err := runChecked(ctx, p.pool, master1.IP, initCmd, "install K3s on master1"); err != nil {
 		return err
 	}
@@ -184,7 +208,7 @@ func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail)
 		m := m
 		serverJoinTasks[m.IP] = func(ctx context.Context, pool ssh.Executor) error {
 			logging.Info("Installing K3s on %s (server join)...", m.Name)
-			joinCmd := fmt.Sprintf("curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0\" sh -", master1.IP, joinTokenPath, m.IP)
+			joinCmd := k3sInstallCommand(fmt.Sprintf("server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP, joinTokenPath, m.IP), "")
 			return runChecked(ctx, pool, m.IP, joinCmd, "join K3s "+m.Name)
 		}
 	}
@@ -203,7 +227,8 @@ func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail)
 func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s Agents on Workers...")
 	const joinTokenPath = "/root/.k3s-join-token"
-	agentJoinCmd := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443 INSTALL_K3S_CHANNEL=\"v1.29\" INSTALL_K3S_EXEC=\"--flannel-iface enp1s0\"; curl -sfL https://get.k3s.io | sh -", joinTokenPath, master1.IP)
+	envPrefix := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443;", joinTokenPath, master1.IP)
+	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", envPrefix)
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
 		if w.IP != "" {

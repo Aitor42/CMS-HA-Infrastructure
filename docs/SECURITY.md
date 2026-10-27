@@ -186,17 +186,21 @@ follow-up that needs a live cluster to validate safely.
    cgroup limit on `apache2.service` — was not adopted because a cgroup OOM
    would stop the whole service instead of a single worker, which trades an
    RCE for an outage on a 768 MB node.
-5. **VM disk images are mode `0666` on the hypervisor.** The deploy account and
-   the libvirt qemu account can be different users, and the current image
-   creation does not assume the ability to chown. This is acceptable only on the
-   dedicated, single-operator hypervisor the lab targets; a multi-user host must
-   use libvirt dynamic ownership or an ACL scoped to the qemu account before
-   running this topology.
-6. **K3s is installed with the upstream `https://get.k3s.io` script.** The
-   channel is pinned to `v1.29` and fetched over TLS, but the installer resolves
-   the latest patch and is executed as root. A fully pinned binary plus a
-   published checksum is the intended follow-up; it needs a live cluster to
-   validate the upgrade path.
+5. **VM disk images are mode `0600` and rely on libvirt dynamic ownership.**
+   The deploy account and the qemu account are different users. The init-vms
+   preflight reads `/etc/libvirt/qemu.conf` and fails if `dynamic_ownership` is
+   explicitly disabled; libvirt then chowns each disk to qemu when the domain
+   starts, without world-readable or world-writable files. A multi-user host
+   that cannot use dynamic ownership must replace this with an ACL scoped to
+   the qemu account.
+6. **K3s still uses the upstream `https://get.k3s.io` setup script.** The
+   binary itself is now pinned to `v1.29.9+k3s1`, downloaded directly from the
+   release, verified against a SHA-256 in the repository, and installed before
+   the script runs; `INSTALL_K3S_SKIP_DOWNLOAD=true` prevents the script from
+   resolving a different patch. The remaining risk is the setup script itself
+   (systemd unit, symlinks and uninstall metadata), which is fetched over TLS
+   and executed as root; replacing it with a vendored unit is a follow-up that
+   needs a live upgrade test.
 
 ---
 

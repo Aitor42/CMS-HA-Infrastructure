@@ -32,6 +32,9 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 	if name == "" {
 		return fmt.Errorf("client VM with an empty name")
 	}
+	if err := CheckDiskAccess(lv); err != nil {
+		return err
+	}
 
 	exists, err := lv.DomainExistsChecked(ctx, name)
 	if err != nil {
@@ -78,10 +81,13 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 		return err
 	}
 
-	// libvirt runs qemu as its own user, so the disks must be readable by it.
-	_ = os.Chmod(diskPath, 0666)
-	for _, disk := range extraDisks {
-		_ = os.Chmod(disk.Path, 0666)
+	// libvirt's dynamic ownership chowns the disks to the qemu user at start;
+	// keep them owner-only instead of world-writable. CheckDiskAccess (run by
+	// the init-vms preflight) rejects hosts where that mechanism is disabled.
+	for _, disk := range append([]string{diskPath}, extraDiskPaths(extraDisks)...) {
+		if err := RestrictDisk(disk); err != nil {
+			return err
+		}
 	}
 
 	return applyBootOrder(ctx, lv, node.Name)
@@ -94,6 +100,9 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client, name, baseImage, seedISO string) error {
 	if name == "" {
 		return fmt.Errorf("client VM with an empty name")
+	}
+	if err := CheckDiskAccess(lv); err != nil {
+		return err
 	}
 	if baseImage == "" {
 		return fmt.Errorf("cloud base image for %s is empty", name)
@@ -157,12 +166,12 @@ func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Cl
 		return err
 	}
 
-	// libvirt runs qemu as its own user, so the disks and the seed must be
-	// readable by it.
-	_ = os.Chmod(diskPath, 0666)
-	_ = os.Chmod(seedISO, 0644)
-	for _, disk := range extraDisks {
-		_ = os.Chmod(disk.Path, 0666)
+	// Dynamic ownership gives qemu the disks and the seed at start; the deploy
+	// user may already have lost ownership, so a permission error is expected.
+	for _, disk := range append([]string{diskPath, seedISO}, extraDiskPaths(extraDisks)...) {
+		if err := RestrictDisk(disk); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -277,4 +286,12 @@ func ClientVMDefinition(ctx context.Context, cfg *config.Config, lv *libvirt.Cli
 	}
 
 	return config.NodeDetail{}, nil, nil, fmt.Errorf("node %q is not part of the configured topology", name)
+}
+
+func extraDiskPaths(disks []libvirt.DiskOpt) []string {
+	paths := make([]string, 0, len(disks))
+	for _, disk := range disks {
+		paths = append(paths, disk.Path)
+	}
+	return paths
 }
