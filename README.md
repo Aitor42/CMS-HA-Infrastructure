@@ -157,6 +157,7 @@ CMS-HA-Infrastructure/
 ├── README.md                        # This file
 ├── Makefile                         # Build, deploy, lint, and ops targets
 ├── config.yaml                      # Centralised typed configuration (age-encrypted secrets)
+├── schema/config.schema.json        # Generated JSON Schema for editor autocomplete/validation
 ├── go.mod / go.sum                  # Go module definition
 ├── embed.go                         # Embeds templates/, kubernetes/ and Grafana dashboards
 │
@@ -562,6 +563,7 @@ dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 | [NETWORK_DIAGRAM.md](docs/NETWORK_DIAGRAM.md) | Network topology and service architecture diagrams |
 | [SECURITY.md](docs/SECURITY.md) | Non-root access, host-key pinning and CI scanning model |
 | [RELEASING.md](docs/RELEASING.md) | Tagged releases, checksums, SBOMs and Cosign verification |
+| [schema/config.schema.json](schema/config.schema.json) | Generated JSON Schema for `config.yaml` (autocomplete and pre-deploy validation) |
 | [phases/](docs/phases/) | Per-phase technical documentation |
 
 ---

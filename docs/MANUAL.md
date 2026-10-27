@@ -245,6 +245,25 @@ Validate `config.yaml` without creating or changing any VM:
 The JSON form is intended for CI and scripts; it returns `valid: false` and a
 non-zero exit code for an invalid configuration.
 
+`schema/config.schema.json` is generated from the Go types in `internal/config`
+and is checked into the repository. Regenerate it after changing a config
+field (the `tools/configschema` test fails on drift):
+
+```bash
+make schema
+```
+
+For VS Code with the Red Hat YAML extension, add this to your settings so
+`config.yaml` and `config.ci.yaml` get completion and inline validation:
+
+```json
+{
+  "yaml.schemas": {
+    "./schema/config.schema.json": ["config.yaml", "config.ci.yaml"]
+  }
+}
+```
+
 ### 3.6 Real-Time SSH Connectivity Matrix
 
 To instantly inspect the state and SSH reachability of all provisioned virtual machines:

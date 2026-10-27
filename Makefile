@@ -91,6 +91,10 @@ coverage-diff: ## Enforce coverage on changed Go lines (requires coverage.out)
 	@echo "▶ Checking changed-line coverage against $(BASE)..."
 	$(GO) run ./tools/diffcoverage -base "$(BASE)" -profile coverage.out -min "$(DIFF_COVERAGE_MIN)"
 
+.PHONY: schema
+schema: ## Regenerate schema/config.schema.json from internal/config
+	$(GO) run ./tools/configschema
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	@echo "▶ Cleaning..."

@@ -1,0 +1,458 @@
+{
+  "$defs": {
+    "BackupConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "access_key": {
+          "type": "string"
+        },
+        "bucket": {
+          "type": "string"
+        },
+        "data_dir": {
+          "type": "string"
+        },
+        "engine": {
+          "type": "string"
+        },
+        "garage_version": {
+          "type": "string"
+        },
+        "restore_test_schedule": {
+          "type": "string"
+        },
+        "retention_days": {
+          "type": "integer"
+        },
+        "s3_port": {
+          "type": "integer"
+        },
+        "s3_region": {
+          "type": "string"
+        },
+        "schedule": {
+          "type": "string"
+        },
+        "secret_key": {
+          "type": "string"
+        }
+      },
+      "title": "BackupConfig",
+      "type": "object"
+    },
+    "Config": {
+      "additionalProperties": false,
+      "properties": {
+        "backup": {
+          "$ref": "#/$defs/BackupConfig"
+        },
+        "database": {
+          "$ref": "#/$defs/DatabaseConfig"
+        },
+        "deploy": {
+          "$ref": "#/$defs/DeployConfig"
+        },
+        "drbd": {
+          "$ref": "#/$defs/DRBDConfig"
+        },
+        "monitoring": {
+          "$ref": "#/$defs/MonitoringConfig"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkConfig"
+        },
+        "nodes": {
+          "$ref": "#/$defs/NodesConfig"
+        },
+        "pki": {
+          "$ref": "#/$defs/PKIConfig"
+        },
+        "ssh": {
+          "$ref": "#/$defs/SSHConfig"
+        },
+        "traffic": {
+          "$ref": "#/$defs/TrafficConfig"
+        },
+        "vm": {
+          "$ref": "#/$defs/VMConfig"
+        },
+        "wordpress": {
+          "$ref": "#/$defs/WordPressConfig"
+        }
+      },
+      "title": "Config",
+      "type": "object"
+    },
+    "DRBDConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "fence_command": {
+          "type": "string"
+        },
+        "fence_state_command": {
+          "type": "string"
+        },
+        "fencing": {
+          "type": "boolean"
+        }
+      },
+      "title": "DRBDConfig",
+      "type": "object"
+    },
+    "DatabaseConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "exporter_password": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "password": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "root_password": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "title": "DatabaseConfig",
+      "type": "object"
+    },
+    "DeployConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "install_batch_size": {
+          "type": "integer"
+        },
+        "node_install_timeout": {
+          "description": "Go duration, for example 10s, 15m or 2h; an integer is interpreted as nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "puppet_concurrency": {
+          "type": "integer"
+        },
+        "ssh_timeout": {
+          "description": "Go duration, for example 10s, 15m or 2h; an integer is interpreted as nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "stagger_delay": {
+          "description": "Go duration, for example 10s, 15m or 2h; an integer is interpreted as nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        }
+      },
+      "title": "DeployConfig",
+      "type": "object"
+    },
+    "ExportersConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "apache_version": {
+          "type": "string"
+        },
+        "mysqld_version": {
+          "type": "string"
+        },
+        "nginx_version": {
+          "type": "string"
+        }
+      },
+      "title": "ExportersConfig",
+      "type": "object"
+    },
+    "HotdesksConf": {
+      "additionalProperties": false,
+      "properties": {
+        "base_ip_octet": {
+          "type": "integer"
+        },
+        "count": {
+          "type": "integer"
+        },
+        "disk_gb": {
+          "type": "integer"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "ram_final_mb": {
+          "type": "integer"
+        },
+        "ram_install_mb": {
+          "type": "integer"
+        },
+        "vcpus": {
+          "type": "integer"
+        }
+      },
+      "title": "HotdesksConf",
+      "type": "object"
+    },
+    "MonitoringConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "exporters": {
+          "$ref": "#/$defs/ExportersConfig"
+        },
+        "grafana_admin_password": {
+          "type": "string"
+        }
+      },
+      "title": "MonitoringConfig",
+      "type": "object"
+    },
+    "NetworkConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "internal": {
+          "$ref": "#/$defs/NetworkDetail"
+        },
+        "main": {
+          "$ref": "#/$defs/NetworkDetail"
+        }
+      },
+      "title": "NetworkConfig",
+      "type": "object"
+    },
+    "NetworkDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "bridge": {
+          "type": "string"
+        },
+        "cidr": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "gateway": {
+          "type": "string"
+        },
+        "vip": {
+          "type": "string"
+        }
+      },
+      "title": "NetworkDetail",
+      "type": "object"
+    },
+    "NodeDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "disk_gb": {
+          "type": "integer"
+        },
+        "drbd_disk_gb": {
+          "type": "integer"
+        },
+        "fqdn": {
+          "type": "string"
+        },
+        "ip": {
+          "type": "string"
+        },
+        "ip_main": {
+          "type": "string"
+        },
+        "mac": {
+          "type": "string"
+        },
+        "mac_internal": {
+          "type": "string"
+        },
+        "mac_main": {
+          "type": "string"
+        },
+        "mac_wan": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ram_final_mb": {
+          "type": "integer"
+        },
+        "ram_install_mb": {
+          "type": "integer"
+        },
+        "vcpus": {
+          "type": "integer"
+        }
+      },
+      "title": "NodeDetail",
+      "type": "object"
+    },
+    "NodesConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "cms_frontends": {
+          "items": {
+            "$ref": "#/$defs/NodeDetail"
+          },
+          "type": "array"
+        },
+        "hotdesks": {
+          "$ref": "#/$defs/HotdesksConf"
+        },
+        "jumpstart": {
+          "$ref": "#/$defs/NodeDetail"
+        },
+        "lbs": {
+          "items": {
+            "$ref": "#/$defs/NodeDetail"
+          },
+          "type": "array"
+        },
+        "masters": {
+          "items": {
+            "$ref": "#/$defs/NodeDetail"
+          },
+          "type": "array"
+        },
+        "monitor": {
+          "$ref": "#/$defs/NodeDetail"
+        },
+        "router": {
+          "$ref": "#/$defs/NodeDetail"
+        },
+        "storage": {
+          "$ref": "#/$defs/NodeDetail"
+        },
+        "workers": {
+          "items": {
+            "$ref": "#/$defs/NodeDetail"
+          },
+          "type": "array"
+        }
+      },
+      "title": "NodesConfig",
+      "type": "object"
+    },
+    "PKIConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "ca_name": {
+          "type": "string"
+        },
+        "ca_port": {
+          "type": "integer"
+        },
+        "cert_dns_names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cert_lifetime_hours": {
+          "type": "integer"
+        },
+        "cert_min_valid_days": {
+          "type": "integer"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "provisioner_password": {
+          "type": "string"
+        },
+        "step_ca_version": {
+          "type": "string"
+        },
+        "step_version": {
+          "type": "string"
+        }
+      },
+      "title": "PKIConfig",
+      "type": "object"
+    },
+    "SSHConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "connect_timeout": {
+          "description": "Go duration, for example 10s, 15m or 2h; an integer is interpreted as nanoseconds.",
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "known_hosts_file": {
+          "type": "string"
+        },
+        "private_key": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "title": "SSHConfig",
+      "type": "object"
+    },
+    "TrafficConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "k6_version": {
+          "type": "string"
+        },
+        "prometheus_rw_url": {
+          "type": "string"
+        },
+        "vhost": {
+          "type": "string"
+        }
+      },
+      "title": "TrafficConfig",
+      "type": "object"
+    },
+    "VMConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "jumpstart_base_image": {
+          "type": "string"
+        },
+        "jumpstart_image": {
+          "type": "string"
+        },
+        "libvirt_uri": {
+          "type": "string"
+        },
+        "provisioning": {
+          "type": "string"
+        },
+        "storage_dir": {
+          "type": "string"
+        }
+      },
+      "title": "VMConfig",
+      "type": "object"
+    },
+    "WordPressConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "admin_password": {
+          "type": "string"
+        }
+      },
+      "title": "WordPressConfig",
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Config",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Schema for config.yaml. Secrets may be plain text or age-encrypted ENC[...] values.",
+  "title": "CMS-HA Infrastructure configuration"
+}
