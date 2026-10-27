@@ -14,7 +14,8 @@ name: Integration (KVM lab, hosted)
 #
 # That is why it deploys `config.ci.yaml` (config.yaml with the three client
 # hotdesks dropped and the installer RAM lowered to 3 GiB: 13 VMs instead of
-# 16, ~12.7 GB of guest RAM) and why it is manual only: a full run takes tens
+# 16, ~12.7 GB of guest RAM) and why the hosted workflow is reserved for the
+# nightly drift check, release gates and manual dispatch: a full run takes tens
 # of minutes and holds a whole runner for the duration. The full 16-VM
 # topology is still covered by `integration.yml` on a self-hosted `kvm` runner.
 #
@@ -23,6 +24,11 @@ name: Integration (KVM lab, hosted)
 # hosted runner. The PXE/Cobbler deliverable is still the gate; reproduce it
 # here with `jumpstart_image=iso` and `fast_provisioning=false`, or run the
 # self-hosted `integration.yml` workflow.
+#
+# Cadence: pull requests stay on the static/unit CI; the nightly schedule and
+# pushes to main use the fast cloud path; a published release forces the full
+# ISO/PXE path (`jumpstart_image=iso`, `fast_provisioning=false`). Manual
+# dispatch still accepts every profile.
 
 on:
   workflow_dispatch:
@@ -50,6 +56,18 @@ on:
         type: boolean
         default: true
 
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  schedule:
+    # Nightly fast-cloud drift check. Scheduled workflows only run on the
+    # default branch; keep the expensive full PXE run for releases.
+    - cron: '0 3 * * *'
+  release:
+    types: [published]
+
 concurrency:
   group: integration-hosted-${{ github.ref }}
   cancel-in-progress: false
@@ -67,8 +85,9 @@ env:
   CONFIG: config.ci.local.yaml
   STATE_FILE: deploy.state
   ARTIFACTS_DIR: integration-artifacts
-  JUMPSTART_IMAGE: ${{ inputs.jumpstart_image }}
-  FAST_PROVISIONING: ${{ inputs.fast_provisioning }}
+  # Resolved per event in the "Resolve integration profile" step: release runs
+  # force the PXE gate, while manual/scheduled runs default to the fast cloud
+  # path. Do not read inputs directly from jobs: schedule/release have none.
 
 jobs:
   integration:
@@ -347,6 +366,18 @@ jobs:
                 + 1 + 1 + len(cfg["nodes"]["lbs"]) + len(cfg["nodes"]["cms_frontends"]))
           PY
 
+      - name: Resolve integration profile
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "JUMPSTART_IMAGE=iso" >> "$GITHUB_ENV"
+            echo "FAST_PROVISIONING=false" >> "$GITHUB_ENV"
+          else
+            image="${{ inputs.jumpstart_image }}"
+            fast="${{ inputs.fast_provisioning }}"
+            echo "JUMPSTART_IMAGE=${image:-cloud}" >> "$GITHUB_ENV"
+            echo "FAST_PROVISIONING=${fast:-true}" >> "$GITHUB_ENV"
+          fi
+
       # Both stages need the lab installed; `full` then continues with the
       # service phases, which find the client VMs already defined and skip
       # their creation.
@@ -481,7 +512,7 @@ jobs:
             2>&1 | tee "$ARTIFACTS_DIR/04-status-ssh.log"
 
       - name: Run the integration test (deploy + verify + traffic + drills + failover)
-        if: ${{ inputs.stage == 'full' }}
+        if: ${{ inputs.stage != 'provision' }}
         env:
           SKIP_CHAOS: ${{ inputs.skip_chaos }}
           # `Provision the lab` above already ran Step 1/2 of the manual, so the

@@ -513,7 +513,7 @@ The deployment checkpoint (`deploy.state`) is collected as a CI artifact so a
 failed run can be resumed with `./cms-ha deploy --resume`.
 
 The same driver also runs on a standard `ubuntu-latest` runner through
-`.github/workflows/integration-hosted.yml` (manual as well). Hosted runners do
+`.github/workflows/integration-hosted.yml` (nightly, release and manual dispatch). Hosted runners do
 expose nested KVM, so the lab is genuinely virtualised, but it is small — 4
 vCPU and 15 GiB of RAM — which is why that workflow deploys `config.ci.yaml`
 (the shipped topology without the hotdesks) and provisions the clients in
@@ -551,7 +551,7 @@ The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pul
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
 | Security Scan | gosec + govulncheck + Trivy | Go SAST, dependency CVEs, secrets/misconfig |
 | Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + 5 failover scenarios (manual dispatch) |
-| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (manual dispatch) |
+| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (nightly cloud, release PXE, manual dispatch) |
 
 ---
 

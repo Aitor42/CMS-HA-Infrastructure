@@ -275,7 +275,7 @@ It requires `/dev/kvm`, a working libvirt connection and a container runtime
 (docker/podman). The checkpoint and the phase logs are uploaded as CI artifacts.
 
 The same driver runs on a GitHub-hosted runner through
-`.github/workflows/integration-hosted.yml` (manual as well). Hosted runners
+`.github/workflows/integration-hosted.yml` (nightly, release and manual dispatch). Hosted runners
 expose nested KVM but are small (4 vCPU, 15 GiB), so that workflow deploys
 `config.ci.yaml` (no hotdesks) and installs clients in batches of four. Its
 dispatch defaults to the fast cloud path (`jumpstart_image=cloud`,
