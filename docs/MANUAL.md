@@ -43,9 +43,11 @@ newgrp libvirt
 Disk images are created mode `0600` and handed to the qemu account by libvirt
 **dynamic ownership**. Keep `dynamic_ownership = 1` in
 `/etc/libvirt/qemu.conf` (the default); `init-vms` checks it and fails before
-creating VMs when it is explicitly disabled. The deploy account still needs
-passwordless `sudo` for the final `chmod`, because libvirt may chown a disk to
-qemu before the orchestrator can restrict it.
+creating VMs when it is explicitly disabled. It also applies a default ACL to
+`vm.storage_dir` so PXE disks created by `virt-install` inherit qemu access and
+no world permissions. The deploy account still needs passwordless `sudo` as a
+fallback for a disk that libvirt chowns before the orchestrator can restrict
+it; without sudo, the default ACL is what keeps the PXE path working.
 
 ### 1.3 CLI Behaviour and Configuration Validation (v2.1)
 

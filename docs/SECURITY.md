@@ -190,9 +190,11 @@ follow-up that needs a live cluster to validate safely.
    The deploy account and the qemu account are different users. The init-vms
    preflight reads `/etc/libvirt/qemu.conf` and fails if `dynamic_ownership` is
    explicitly disabled; libvirt then chowns each disk to qemu when the domain
-   starts, without world-readable or world-writable files. A multi-user host
-   that cannot use dynamic ownership must replace this with an ACL scoped to
-   the qemu account.
+   starts, without world-readable or world-writable files. The init-vms
+   preflight also applies a default ACL scoped to the qemu account on
+   `vm.storage_dir`, so disks created by `virt-install` inherit the same
+   protection. A multi-user host that cannot use dynamic ownership must
+   replace this with an ACL scoped to the qemu account.
 6. **K3s still uses the upstream `https://get.k3s.io` setup script.** The
    binary itself is now pinned to `v1.29.9+k3s1`, downloaded directly from the
    release, verified against a SHA-256 in the repository, and installed before

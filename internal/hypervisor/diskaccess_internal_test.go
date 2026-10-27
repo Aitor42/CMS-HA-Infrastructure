@@ -30,6 +30,18 @@ func TestDynamicOwnershipEnabled(t *testing.T) {
 	}
 }
 
+func TestQEMUUserFromConfig(t *testing.T) {
+	old := qemuConfigPath
+	t.Cleanup(func() { qemuConfigPath = old })
+	qemuConfigPath = filepath.Join(t.TempDir(), "qemu.conf")
+	if err := os.WriteFile(qemuConfigPath, []byte("#user = \"root\"\nuser = \"lab-qemu\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := qemuUser(); got != "lab-qemu" {
+		t.Fatalf("qemuUser() = %q, want lab-qemu", got)
+	}
+}
+
 func TestCheckDiskAccessRejectsDisabledDynamicOwnership(t *testing.T) {
 	old := qemuConfigPath
 	t.Cleanup(func() { qemuConfigPath = old })

@@ -140,6 +140,9 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create storage dir %s: %w", dir, err)
 	}
+	if err := hypervisor.EnsureStorageACL(dir); err != nil {
+		return err
+	}
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err == nil && stat.Bsize > 0 {
 		freeGB := stat.Bavail * uint64(stat.Bsize) / (1 << 30)
