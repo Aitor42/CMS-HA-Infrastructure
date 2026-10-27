@@ -73,6 +73,12 @@ func TestKubernetesPhaseRun(t *testing.T) {
 	if !hasCommand(fake.Commands, "192.168.10.21", "K3S_URL=https://192.168.10.11:6443") {
 		t.Error("worker did not join as an agent")
 	}
+	if !hasCommand(fake.Commands, "192.168.10.21", "K3S_TOKEN_FILE=/root/.k3s-join-token") {
+		t.Error("worker did not read the token from the protected file")
+	}
+	if hasCommand(fake.Commands, "192.168.10.21", `K3S_TOKEN="$(cat`) {
+		t.Error("worker expanded the token into the environment")
+	}
 	if !hasCommand(fake.Commands, master1, "drbd-status=primary") {
 		t.Error("master1 was not labeled as the DRBD primary")
 	}

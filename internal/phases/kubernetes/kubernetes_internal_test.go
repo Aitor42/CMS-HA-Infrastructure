@@ -112,7 +112,7 @@ func TestK3sInstallCommandPinsVerifiedBinary(t *testing.T) {
 }
 
 func TestK3sAgentInstallSkipsBlockingStart(t *testing.T) {
-	cmd := k3sInstallCommand("--flannel-iface enp1s0", "export K3S_TOKEN=test;", true)
+	cmd := k3sInstallCommand("--flannel-iface enp1s0", "export K3S_TOKEN_FILE=/root/.k3s-join-token;", true)
 	if !strings.Contains(cmd, "INSTALL_K3S_SKIP_START=true") {
 		t.Errorf("k3s agent command is missing INSTALL_K3S_SKIP_START=true:\n%s", cmd)
 	}

@@ -34,7 +34,7 @@ const (
 
 // k3sInstallCommand downloads the pinned K3s binary, verifies its SHA-256 and
 // installs it before invoking the upstream setup script. envPrefix is used for
-// the worker's K3S_TOKEN/K3S_URL exports; execArgs becomes INSTALL_K3S_EXEC.
+// the worker's K3S_TOKEN_FILE/K3S_URL exports; execArgs becomes INSTALL_K3S_EXEC.
 func k3sInstallCommand(execArgs, envPrefix string, skipStart bool) string {
 	url := "https://github.com/k3s-io/k3s/releases/download/" + strings.ReplaceAll(k3sVersion, "+", "%2B") + "/k3s"
 	skip := ""
@@ -191,6 +191,9 @@ func (p *Phase) readJoinToken(ctx context.Context, master1 config.NodeDetail) (s
 			return fmt.Errorf("node-token not ready yet")
 		}
 		token = strings.TrimSpace(tok)
+		if strings.ContainsAny(token, " \t\r\n") {
+			return fmt.Errorf("node-token contains whitespace; refusing to distribute a corrupt token")
+		}
 		return nil
 	})
 	if err != nil {
@@ -260,14 +263,13 @@ func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail)
 	return nil
 }
 
-// joinWorkers installs the k3s agent on every worker in parallel. The token is
-// expanded by bash into an exported env var (the assignment literal
-// "$(cat ...)" stays unexpanded in argv), so the value is only visible in the
-// owner-readable /proc/*/environ, never in cmdline.
+// joinWorkers installs the k3s agent on every worker in parallel. The agent
+// reads the token from the protected 0600 file via K3S_TOKEN_FILE, so the
+// secret never appears in argv or in the systemd environment file.
 func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s Agents on Workers...")
 	const joinTokenPath = "/root/.k3s-join-token"
-	envPrefix := fmt.Sprintf("export K3S_TOKEN=\"$(cat %s)\" K3S_URL=https://%s:6443;", joinTokenPath, master1.IP)
+	envPrefix := fmt.Sprintf("export K3S_TOKEN_FILE=%s K3S_URL=https://%s:6443;", joinTokenPath, master1.IP)
 	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", envPrefix, true) + "systemctl daemon-reload\nsystemctl start k3s-agent --no-block\n"
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
