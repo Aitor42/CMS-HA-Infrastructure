@@ -2,7 +2,9 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +98,33 @@ func TestUtils_CheckSSH_Concurrent(t *testing.T) {
 
 	// CheckSSH fans out across nodes; the race detector covers the shared pool.
 	_ = utils.CheckSSH(ctx, cfg, s, l)
+}
+
+func TestUtils_CollectSSHStatusJSONShape(t *testing.T) {
+	cfg := &config.Config{
+		Nodes: config.NodesConfig{
+			Jumpstart: config.NodeDetail{Name: "vm1", IP: "127.0.0.1"},
+			Router:    config.NodeDetail{Name: "vm2", IP: "127.0.0.2"},
+		},
+	}
+	s := newTestPool(t)
+	l := libvirt.NewClient("test:///default")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	results := utils.CollectSSHStatus(ctx, cfg, s, l)
+	if len(results) != 2 {
+		t.Fatalf("got %d rows, want 2", len(results))
+	}
+	data, err := json.Marshal(results)
+	if err != nil {
+		t.Fatalf("marshal SSH status: %v", err)
+	}
+	for _, field := range []string{`"name"`, `"ip"`, `"state"`, `"ssh"`, `"healthy"`} {
+		if !strings.Contains(string(data), field) {
+			t.Fatalf("JSON %s does not contain %s", data, field)
+		}
+	}
 }
 
 func TestUtils_WaitForAllSSH_NoNodes(t *testing.T) {

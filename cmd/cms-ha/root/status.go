@@ -1,6 +1,8 @@
 package root
 
 import (
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
@@ -16,6 +18,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 
 	var waitSSH time.Duration
+	var asJSON bool
 	sshCmd := &cobra.Command{
 		Use:   "ssh",
 		Short: "Check SSH connectivity to all configured nodes",
@@ -39,9 +42,22 @@ func init() {
 				}
 			}
 			lv := newLibvirtClient(cfg)
+			if asJSON {
+				results := utils.CollectSSHStatus(cmd.Context(), cfg, pool, lv)
+				if err := json.NewEncoder(cmd.OutOrStdout()).Encode(results); err != nil {
+					return fmt.Errorf("encode SSH status: %w", err)
+				}
+				for _, res := range results {
+					if !res.Healthy {
+						return fmt.Errorf("one or more VMs are not healthy or unreachable via SSH")
+					}
+				}
+				return nil
+			}
 			return utils.CheckSSH(cmd.Context(), cfg, pool, lv)
 		},
 	}
 	sshCmd.Flags().DurationVar(&waitSSH, "wait", 0, "Wait up to this long for SSH on every node before checking (e.g. 10m)")
+	sshCmd.Flags().BoolVar(&asJSON, "json", false, "Emit the status rows as JSON")
 	statusCmd.AddCommand(sshCmd)
 }

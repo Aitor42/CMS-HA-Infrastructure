@@ -229,12 +229,25 @@ The health check validates all infrastructure phases. The Go CLI executes these 
 ✓ Completed phase: Infrastructure Verification in 21.37s
 ```
 
-### 3.5 Real-Time SSH Connectivity Matrix
+### 3.5 Configuration Validation
+
+Validate `config.yaml` without creating or changing any VM:
+
+```bash
+./cms-ha config validate
+./cms-ha config validate --json
+```
+
+The JSON form is intended for CI and scripts; it returns `valid: false` and a
+non-zero exit code for an invalid configuration.
+
+### 3.6 Real-Time SSH Connectivity Matrix
 
 To instantly inspect the state and SSH reachability of all provisioned virtual machines:
 
 ```bash
 ./cms-ha status ssh
+./cms-ha status ssh --json
 ```
 
 ```text

@@ -173,6 +173,7 @@ CMS-HA-Infrastructure/
 │       ├── traffic.go               # cms-ha traffic       (k6 load test)
 │       ├── repair.go                # cms-ha repair k8s|clocks
 │       ├── secrets.go               # cms-ha secrets encrypt|decrypt|generate-key|rotate
+│       ├── config.go                # cms-ha config validate [--json]
 │       └── ...                      # backup, status, lint
 │
 ├── internal/                        # Core Go packages (not importable externally)
@@ -373,11 +374,22 @@ Example output from a fully converged environment:
 ✓ Completed phase: Infrastructure Verification in 21.37s
 ```
 
+### Configuration Validation
+
+Validate the same full configuration the deploy path uses, without touching any
+infrastructure. `--json` is a stable object for CI and scripts:
+
+```bash
+./cms-ha config validate
+./cms-ha config validate --json | jq
+```
+
 ### SSH Connectivity Matrix
 
 ```bash
 ./cms-ha status ssh              # one probe per node
 ./cms-ha status ssh --wait 10m   # wait until every node accepts SSH, then print
+./cms-ha status ssh --json       # machine-readable rows (name, ip, state, ssh, healthy)
 ```
 
 ```text

@@ -2,7 +2,9 @@ package tests
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +16,7 @@ func TestCLI_CommandRegistration(t *testing.T) {
 	commands := []string{
 		"backup",
 		"cleanup",
+		"config",
 		"deploy",
 		"lint",
 		"phase",
@@ -73,6 +76,57 @@ func TestCLI_VersionFlag(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("--version output %q does not contain %q", got, want)
 		}
+	}
+}
+
+func TestCLI_ConfigValidateJSON(t *testing.T) {
+	cmd := root.GetRootCmd()
+	t.Cleanup(func() {
+		_ = cmd.PersistentFlags().Set("config", "config.yaml")
+		cmd.SetArgs(nil)
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"-c", "../config.ci.yaml", "config", "validate", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	var got struct {
+		Valid   bool   `json:"valid"`
+		Config  string `json:"config"`
+		Nodes   int    `json:"nodes"`
+		Masters int    `json:"masters"`
+		Workers int    `json:"workers"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON %q: %v", out.String(), err)
+	}
+	if !got.Valid || got.Nodes != 13 || got.Masters != 3 || got.Workers != 2 {
+		t.Fatalf("unexpected validation result: %+v", got)
+	}
+
+	bad := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(bad, []byte("vm: {}\nnodes: {}\n"), 0600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
+	out.Reset()
+	cmd.SetArgs([]string{"-c", bad, "config", "validate", "--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("config validate accepted an invalid configuration")
+	}
+	var invalid struct {
+		Valid bool   `json:"valid"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &invalid); err != nil {
+		t.Fatalf("decode invalid JSON %q: %v", out.String(), err)
+	}
+	if invalid.Valid || invalid.Error == "" {
+		t.Fatalf("unexpected invalid result: %+v", invalid)
 	}
 }
 
