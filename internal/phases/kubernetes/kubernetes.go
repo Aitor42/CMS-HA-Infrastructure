@@ -34,8 +34,11 @@ const (
 
 // k3sInstallCommand downloads the pinned K3s binary, verifies its SHA-256 and
 // installs it before invoking the upstream setup script. envPrefix is used for
-// the worker's K3S_TOKEN_FILE/K3S_URL exports; execArgs becomes INSTALL_K3S_EXEC.
-func k3sInstallCommand(execArgs, envPrefix string, skipStart bool) string {
+// the worker's K3S_TOKEN_FILE/K3S_URL install environment; execArgs becomes
+// INSTALL_K3S_EXEC. installEnv is placed after the pipe so it is an environment
+// assignment for the upstream script, not an `export` line that ends up in the
+// generated systemd environment file.
+func k3sInstallCommand(execArgs, installEnv string, skipStart bool) string {
 	url := "https://github.com/k3s-io/k3s/releases/download/" + strings.ReplaceAll(k3sVersion, "+", "%2B") + "/k3s"
 	skip := ""
 	if skipStart {
@@ -51,8 +54,8 @@ trap 'rm -f "$tmp"' EXIT
 curl -fsSL --connect-timeout 15 --max-time 180 --retry 3 --retry-delay 2 -o "$tmp" %q
 printf '%%s  %%s\n' %q "$tmp" | sha256sum -c -
 install -m 0755 "$tmp" /usr/local/bin/k3s
-%s curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 https://get.k3s.io | INSTALL_K3S_SKIP_DOWNLOAD=true %sINSTALL_K3S_EXEC=%q sh -
-`, url, k3sSHA256, envPrefix, skip, execArgs)
+curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 https://get.k3s.io | %sINSTALL_K3S_SKIP_DOWNLOAD=true %sINSTALL_K3S_EXEC=%q sh -
+`, url, k3sSHA256, installEnv, skip, execArgs)
 }
 
 // Phase implements the Kubernetes setup phase.
@@ -269,8 +272,8 @@ func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail)
 func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s Agents on Workers...")
 	const joinTokenPath = "/root/.k3s-join-token"
-	envPrefix := fmt.Sprintf("export K3S_TOKEN_FILE=%s K3S_URL=https://%s:6443;", joinTokenPath, master1.IP)
-	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", envPrefix, true) + "systemctl daemon-reload\nsystemctl start k3s-agent --no-block\n"
+	installEnv := fmt.Sprintf("K3S_TOKEN_FILE=%s K3S_URL=https://%s:6443 ", joinTokenPath, master1.IP)
+	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", installEnv, true) + "systemctl daemon-reload\nsystemctl start k3s-agent --no-block\n"
 	var workerIPs []string
 	for _, w := range p.cfg.Nodes.Workers {
 		if w.IP != "" {
