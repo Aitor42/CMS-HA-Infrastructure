@@ -21,6 +21,7 @@ env:
   ANSIBLE_CORE_VERSION: "2.21.5"
   ANSIBLE_LINT_VERSION: "26.10.1"
   PUPPET_LINT_VERSION: "5.1.1"
+  ACTIONLINT_VERSION: "v1.7.12"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +59,9 @@ jobs:
       - name: Build check (all packages)
         run: go build ./...
 
+      - name: Check go.mod/go.sum are tidy
+        run: go mod tidy -diff
+
       - name: Build CLI binary
         run: |
           make build
@@ -72,8 +76,41 @@ jobs:
       - name: Run unit tests with race detection
         run: make test
 
+      - name: Generate coverage profile
+        run: make test-cover
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: error
+
   # ─────────────────────────────────────────────────────────────────────────────
-  # 2. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
+  # 2. GitHub Actions Workflow Linting
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint-actions:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run actionlint
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          actionlint
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
   # ─────────────────────────────────────────────────────────────────────────────
   lint-shell:
     name: Lint Shell Scripts
@@ -326,6 +363,7 @@ jobs:
     if: always()
     needs:
       - build-go
+      - lint-actions
       - lint-shell
       - lint-yaml
       - validate-k8s
@@ -338,6 +376,7 @@ jobs:
         run: |
           echo "=== CI Pipeline Results ==="
           echo "build-go:           ${{ needs.build-go.result }}"
+          echo "lint-actions:       ${{ needs.lint-actions.result }}"
           echo "lint-shell:         ${{ needs.lint-shell.result }}"
           echo "lint-yaml:          ${{ needs.lint-yaml.result }}"
           echo "validate-k8s:      ${{ needs.validate-k8s.result }}"
@@ -348,6 +387,7 @@ jobs:
           # Fail if any required job failed
           for result in \
             "${{ needs.build-go.result }}" \
+            "${{ needs.lint-actions.result }}" \
             "${{ needs.lint-shell.result }}" \
             "${{ needs.lint-yaml.result }}" \
             "${{ needs.validate-k8s.result }}" \

@@ -61,6 +61,12 @@ test: ## Run Go unit tests
 	@echo "▶ Running tests..."
 	$(GO) test -race ./...
 
+.PHONY: test-cover
+test-cover: ## Run Go tests with cross-package coverage (coverage.out)
+	@echo "▶ Running tests with coverage..."
+	$(GO) test -coverpkg=./... -coverprofile=coverage.out ./...
+	@$(GO) tool cover -func=coverage.out | tail -1
+
 .PHONY: clean
 clean: ## Remove build artifacts
 	@echo "▶ Cleaning..."

@@ -49,6 +49,7 @@ ansible/.cache/
 deploy.state
 deploy.state.tmp
 deploy.state.lock
+coverage.out
 
 # Strix runs
 strix_runs/
