@@ -33,13 +33,13 @@ In a virtualised environment, device firmware selection is critical for compatib
 
 | Software | Version / Release | Function | Key Dependencies | Source URL | Node(s) |
 |:---------|:------------------|:---------|:-----------------|:-----------|:--------|
-| **cms-ha (Go CLI)** | Go 1.26 | Unified infrastructure orchestrator & CLI | Cobra, Viper, age (X25519), `golang.org/x/crypto` ≥ 0.56.0, slog | [GitHub Repo](https://github.com/Aitor42/CMS-HA-Infrastructure) | Hypervisor Host |
+| **cms-ha (Go CLI)** | Go 1.26 | Unified infrastructure orchestrator & CLI | Cobra, yaml.v3, age (X25519), `golang.org/x/crypto` ≥ 0.56.0, slog | [GitHub Repo](https://github.com/Aitor42/CMS-HA-Infrastructure) | Hypervisor Host |
 | **Cobbler** | 3.3.7 | Zero-touch bare-metal provisioning | Python 3.12, Apache2, pyyaml, django | [Cobbler Project](https://cobbler.github.io/) | `jumpstart` |
 | **Puppet Server** | 8.4.0 | Central configuration management server | OpenJDK 17, Ruby, openssl | [Puppet Server](https://www.puppet.com/) | `jumpstart` |
 | **Puppet Agent** | 8.4.0 | Local configuration enforcement client | OpenSSL, libc6 | [Puppet Agent](https://www.puppet.com/) | All nodes (incl. router) |
 | **Nginx** | 1.24.0 | Reverse proxy and load balancer | OpenSSL 3.0.x, zlib, pcre2 | [Nginx News](https://nginx.org/) | `main-lb1`, `main-lb2` |
 | **keepalived** | 2.2.x | VRRP failover for the shared LB VIP (192.168.20.100) | libc6, iproute2 | [keepalived.org](https://keepalived.org/) | `main-lb1`, `main-lb2` |
-| **K3s** | v1.29.3+k3s1 | Lightweight high-availability Kubernetes cluster | Containerd, Flannel CNI, Traefik, embedded etcd | [K3s Official](https://k3s.io/) | `master1/2/3`, `worker1/2` |
+| **K3s** | v1.29.x (channel `v1.29`) | Lightweight high-availability Kubernetes cluster | Containerd, Flannel CNI, Traefik, embedded etcd | [K3s Official](https://k3s.io/) | `master1/2/3`, `worker1/2` |
 | **etcd** | 3.5.x (embedded in K3s) | Distributed key-value store providing the control-plane quorum (3 members tolerate 1 failure) | Bundled with K3s (no separate install) | [etcd.io](https://etcd.io/) | `master1/2/3` |
 | **MariaDB** | 10.11.7 (LTS) | CMS relational database (K3s StatefulSet) | DRBD 9 Volume, libc6 | [MariaDB Foundation](https://mariadb.org/) | K3s cluster (replicated) |
 | **WordPress** | 6.5.2 | Content Management System (CMS) | PHP 8.3, Apache2, MySQL/MariaDB | [WordPress.org](https://wordpress.org/) | `main-cms1`, `main-cms2` |

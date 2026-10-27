@@ -6,7 +6,7 @@
 # the infrastructure. Run `make help` to see all available commands.
 #
 # Prerequisites:
-#   - Go 1.22+ installed
+#   - Go 1.26+ installed
 #   - KVM/QEMU + libvirt installed on the host
 #   - SSH key at ~/.ssh/id_ed25519_gar
 #   - Ubuntu 24.04 Server ISO (for initial deployment only)

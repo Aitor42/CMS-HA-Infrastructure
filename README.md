@@ -158,6 +158,7 @@ CMS-HA-Infrastructure/
 ├── Makefile                         # Build, deploy, lint, and ops targets
 ├── config.yaml                      # Centralised typed configuration (age-encrypted secrets)
 ├── go.mod / go.sum                  # Go module definition
+├── embed.go                         # Embeds templates/, kubernetes/ and Grafana dashboards
 │
 ├── cmd/cms-ha/                      # CLI entry point (Cobra)
 │   ├── main.go                      # Binary entry point
@@ -175,12 +176,11 @@ CMS-HA-Infrastructure/
 │       └── ...                      # backup, status, lint
 │
 ├── internal/                        # Core Go packages (not importable externally)
-│   ├── config/                      # Typed config loader (viper) + age encryption
+│   ├── config/                      # Typed YAML config loader (yaml.v3) + age encryption
 │   ├── ssh/                         # SSH connection pool + SFTP + parallel execution
 │   ├── libvirt/                     # virsh/virt-install/qemu-img wrapper
 │   ├── logging/                     # Coloured structured logging (slog + fatih/color)
 │   ├── retry/                       # Retry/poll primitives with context
-│   ├── templates/                   # Go template renderer with embed.FS
 │   ├── deploy/                      # Orchestrator — coordinates all phases
 │   ├── lint/                        # External linter runner (shellcheck, yamllint, ...)
 │   ├── utils/                       # VM ops, verify, failover, repair, status
@@ -537,7 +537,7 @@ dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 
 ## CI Pipeline
 
-The GitHub Actions CI validates every push and pull request:
+The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pull requests targeting `main`:
 
 | Job | Tool | Scope |
 |:----|:-----|:------|
