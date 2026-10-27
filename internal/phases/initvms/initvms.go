@@ -41,11 +41,12 @@ type Options struct {
 
 // Phase implements the VM initialization phase (Phase 00).
 //
-// Ansible (ansible/playbooks/provision.yml, generated from config.yaml by
-// `cms-ha inventory`) is the declared infrastructure-as-code path for
-// creating networks, disks and domains; this Go/virsh phase is only a
-// fallback until that playbook has been validated on a real hypervisor. Do
-// not add new creation logic here — put it in the Ansible roles.
+// This Go/libvirt phase is the supported default and the path exercised by the
+// PXE/Cobbler gate. Ansible (ansible/playbooks/provision.yml, generated from
+// config.yaml by `cms-ha inventory`) is an optional declarative alternative;
+// it is linted and parity-tested, but not the gate-validated path. Keep the two
+// paths driven by the same config.yaml rather than inventing independent
+// addresses or sizes.
 type Phase struct {
 	cfg  *config.Config
 	lv   *libvirt.Client

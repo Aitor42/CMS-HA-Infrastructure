@@ -27,7 +27,7 @@ The environment is deployed with a **single command** (`cms-ha deploy`): 16 virt
 The environment is driven by three cooperating layers:
 
 - **`cms-ha` (Go CLI orchestrator)** — the supported entry point: a statically compiled binary with an integrated SSH connection pool, bounded worker semaphore concurrency, type-safe YAML configuration, `age`-based secret encryption, structured logging (`slog`), self-healing routines, phase checkpoints (`--resume` / `--from-phase`) and parallel health verification.
-- **Ansible** (`ansible/`) — declarative *creation* of the libvirt networks and VM domains from `config.yaml`.
+- **Ansible** (`ansible/`, optional) — declarative *creation* of the libvirt networks and VM domains from `config.yaml`; the default, gate-validated creation path remains `cms-ha deploy`.
 - **Puppet** (`puppet/`) — node *desired state* (packages, services, exporters, `/etc/hosts`, …).
 
 > The legacy v1 shell suite has been removed; see `docs/LEGACY-V1-MAPPING.md` for the v1 → v2 command mapping.
@@ -45,7 +45,7 @@ The environment is driven by three cooperating layers:
 | **Full-stack Observability** | Prometheus + Grafana with 19 alert rules (DRBD/etcd quorum, keepalived VIP, service & backup health), dynamic scrape targets and dashboards whose every panel query is checked against Prometheus |
 | **Defense in Depth** | UFW perimeter firewall + dynamic WAN MAC detection + per-node iptables rules + network segmentation |
 | **Internal PKI** | Private Certificate Authority (step-ca) with automated TLS trust distribution |
-| **Infrastructure as Code** | Ansible (`community.libvirt`) creates & declares networks, disks and VM domains |
+| **Infrastructure as Code (optional)** | Ansible (`community.libvirt`) declares networks, disks and VM domains; the Go `init-vms` phase is the default/gate path |
 | **Automated Backups** | Daily dump + off-DRBD upload to a Garage S3 store (container on the hypervisor), automated restore drill, `BackupMissing` alert |
 | **Secret Hardening** | `age` (X25519) auto-encryption of `config.yaml` secrets on first load (key kept at `~/.config/cms-ha/`, never committed); K3s join token distributed as a `0600` file — never in argv; database/WordPress/CA credentials supplied in `config.yaml` |
 | **Access Hardening** | Non-root deploy account (`ssh.user`) with transparent `sudo -n`; direct root SSH disabled (`PermitRootLogin no`) on every node; SSH host keys pinned on first use (TOFU, fail-closed on mismatch) — see `docs/SECURITY.md` |
@@ -143,7 +143,7 @@ graph TB
 | Dashboards | Grafana | 13.2.4 | Metrics visualisation and dashboards |
 | Firewall | UFW | — | Perimeter and per-node iptables rules |
 | PKI / TLS | step-ca | 0.27.x | Internal Certificate Authority |
-| Infrastructure Provisioning | Ansible + community.libvirt | 2.16 | Declarative network/VM creation from `config.yaml` |
+| Infrastructure Provisioning (optional) | Ansible + community.libvirt | 2.16 | Optional declarative network/VM creation; default is Go `init-vms` |
 | Virtualisation | KVM / QEMU / libvirt | — | Hypervisor and VM management |
 
 > Full software inventory with versions, dependencies, and download URLs: [`docs/SOFTWARE_BASELINE.md`](docs/SOFTWARE_BASELINE.md)
@@ -261,10 +261,12 @@ vim config.yaml
 
 The orchestrator executes all phases sequentially: VM Init (jumpstart) → Cobbler → Register Nodes → VM Init (clients) → Repair SSH → Router Gateway (addresses, forwarding, NAT) → Puppet → DRBD → Garage Backups → K3s → Nginx & WordPress → Monitoring → UFW → Internal CA (14 pipeline steps, from 13 distinct phases; `--skip-vm-create` drops the two VM Init steps for a 12-step run).
 
-### Provisioning with Ansible (Infrastructure as Code)
+### Optional: provisioning with Ansible (Infrastructure as Code)
 
-The VM/network layer is declared in Ansible and generated from `config.yaml`
-(the single source of truth):
+The default and PXE/Cobbler-gated path is `cms-ha deploy` (Go `init-vms`).
+Ansible is an optional declarative alternative generated from `config.yaml`
+(the single source of truth) and is linted/parity-tested, but it is not the
+gate-validated path:
 
 ```bash
 # Generate the inventory from config.yaml
@@ -282,8 +284,8 @@ Ansible only *creates and declares* infrastructure. Runtime operations
 (start/stop/shrink) and fencing stay on the thin `libvirt`/`virsh` primitive in
 the Go CLI — see [`ansible/README.md`](ansible/README.md) for the boundary.
 
-The Go `init-vms` phase remains available as a fallback; both paths create the
-same domains from `config.yaml`.
+Both paths create the same domains from `config.yaml`; the Go `init-vms` phase
+is the supported default.
 
 ---
 

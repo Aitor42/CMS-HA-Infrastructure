@@ -1,9 +1,16 @@
-# Ansible — Infrastructure Provisioning
+# Ansible — optional Infrastructure-as-Code path
 
 `ansible/` declares the infrastructure: libvirt networks, disks and VM domains,
-generated from `config.yaml`. It is the Infrastructure-as-Code path; the Go
-`cms-ha phase init-vms` remains as a fallback until `provision.yml` has been
-validated end-to-end on a real hypervisor.
+generated from `config.yaml`. It is an **optional alternative** for teams that
+prefer a declarative creation layer.
+
+The supported default and the path covered by the PXE/Cobbler gate is
+`cms-ha deploy` (the Go `init-vms` phase). Ansible is kept because it is a useful
+IaC showcase and is checked by `ansible-lint`, `--syntax-check` and inventory
+parity tests, but it is **not** the gate-validated path and must not be presented
+as a second official deployment entry point. The two paths share `config.yaml`
+and the same inventory data; there is no independent source of addresses, MACs
+or VM sizes.
 
 Ansible is **not** used for runtime operations or fencing. Start/stop/shrink,
 state queries and STONITH stay on the libvirt primitive inside the Go
@@ -14,7 +21,9 @@ make provision                       # Ansible creates networks + VMs
 ./cms-ha deploy --skip-vm-create     # service phases only
 ```
 
-New creation logic goes in the Ansible roles, not in the Go phase.
+If you extend the optional Ansible path, put its creation logic in the Ansible
+roles. The Go `init-vms` phase remains the default and must keep working
+independently.
 
 ## Boundary: Ansible vs Puppet vs Go
 

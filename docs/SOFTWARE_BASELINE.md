@@ -54,8 +54,8 @@ In a virtualised environment, device firmware selection is critical for compatib
 | **UFW** | 0.36.2 | Perimeter and per-node firewall management | `iptables`, `nftables`, `python3` | [Launchpad UFW](https://launchpad.net/ufw) | `ufw-router`, all nodes |
 | **step-ca** | 0.30.2 | Private Certificate Authority for internal PKI | step CLI, SQLite | [Smallstep CA](https://github.com/smallstep/certificates) | `jumpstart` |
 | **step** | 0.31.0 | Command-line tool for interacting with step-ca | libc6 | [Smallstep CLI](https://github.com/smallstep/cli) | All nodes |
-| **Ansible** | 2.16.x | Declarative creation of networks, disks and VM domains (infra as code) | Python 3, SSH, libvirt daemon | [Ansible](https://www.ansible.com/) | Hypervisor Host |
-| **community.libvirt** | 1.2.x | Ansible collection for libvirt networks and domains | Ansible core, `libvirt-python` | [community.libvirt](https://github.com/ansible-collections/community.libvirt) | Hypervisor Host |
+| **Ansible** | 2.16.x | Optional declarative creation of networks, disks and VM domains; the Go `init-vms` phase is the default/gate path | Python 3, SSH, libvirt daemon | [Ansible](https://www.ansible.com/) | Hypervisor Host |
+| **community.libvirt** | 1.2.x | Ansible collection for the optional libvirt provisioning path | Ansible core, `libvirt-python` | [community.libvirt](https://github.com/ansible-collections/community.libvirt) | Hypervisor Host |
 | **Garage** | v2.4.1 | S3-compatible object store for off-DRBD backups | Container runtime (Docker/Podman), SQLite | [Garage](https://garagehq.deuxfleurs.fr/) | Hypervisor Host |
 | **rclone** | 1.68.2 | S3 client used by the backup/restore CronJobs | Alpine libc | [rclone](https://rclone.org/) | K3s cluster (Jobs) |
 | **k6** | 0.55.0 | HTTP load/smoke generator for the CMS (`cms-ha traffic`) | Container runtime (Docker/Podman) | [k6](https://k6.io/) | Hypervisor Host |
