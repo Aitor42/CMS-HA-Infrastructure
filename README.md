@@ -327,6 +327,21 @@ The Go orchestrator keeps the pipeline fast and safe:
 
 ---
 
+## Design Decisions
+
+| Decision | Why | Trade-off |
+|:---------|:----|:----------|
+| **Go orchestrator instead of a shell suite** | Typed configuration, unit tests, bounded parallelism, structured errors and resumable checkpoints in one binary. | The team must maintain Go code; the removed v1 scripts remain available in git history and their command mapping is in [`docs/LEGACY-V1-MAPPING.md`](docs/LEGACY-V1-MAPPING.md). |
+| **PXE/Cobbler is the deliverable gate; cloud is the fast path** | PXE proves the real bare-metal path (DHCP/TFTP/autoinstall); cloud images cut iteration and hosted-CI time. | Two provisioning paths must stay in parity; the hosted workflow defaults to cloud, while releases force ISO/PXE. |
+| **Ubuntu 24.04 LTS + Puppet 8** | Long support window, mature autoinstall, and declarative convergence for 16 nodes. | Puppet catalog runs are slower than ad-hoc shell, so client convergence is bounded and parallel. |
+| **K3s with embedded etcd** | A lightweight, HA-capable Kubernetes control plane that fits the lab footprint. | etcd quorum is sensitive to disk latency; the design uses dedicated masters and DRBD-backed data. |
+| **DRBD 9 Protocol C + MariaDB StatefulSet** | Synchronous replication keeps the database available through a node loss without a shared SAN. | Writes pay replication latency; split-brain handling and fencing are explicit operational procedures. |
+| **age-encrypted secrets + non-root SSH** | No plaintext credentials in git and no direct root login; privileged commands use `sudo -n`. | The operator must protect and back up the age identity; `secrets rotate` documents the rekey procedure. |
+| **Kustomize manifests and embedded templates** | The binary ships the same manifests/templates it deploys; no drift between a repo checkout and the release. | Changes require a rebuild; CI validates the rendered manifests with kubeconform. |
+| **Pinned tools, images and checksums** | Reproducible CI and releases; a floating tag cannot silently change deployed bits. | Version bumps are deliberate PRs (Dependabot or manual), not automatic at runtime. |
+
+---
+
 ## Operations & Verification Reference
 
 ### Full Infrastructure Health Check
