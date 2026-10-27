@@ -63,6 +63,7 @@ CMS-HA-Infrastructure/
 │   ├── PLAN.md                  # Comprehensive planning and inventory
 │   ├── MANUAL.md                # Operations and administration manual
 │   ├── SECURITY.md              # Access hardening and TOFU host-key model
+│   ├── LEGACY-V1-MAPPING.md     # v1 shell scripts → v2 commands
 │   ├── SOFTWARE_BASELINE.md     # Software version control baseline
 │   ├── NETWORK_DIAGRAM.md       # Architectural diagrams (Mermaid)
 │   └── phases/PHASE-00..11.md   # Project milestone documentation
@@ -79,6 +80,5 @@ CMS-HA-Infrastructure/
 │   ├── backups/                 # Backup and restore-drill CronJobs
 │   ├── monitoring/              # Prometheus RBAC for the cluster
 │   └── overlays/lab/            # Lab overlay (node affinity / labels patch)
-├── templates/                   # PXE, monitoring, DRBD, nginx and libvirt templates
-└── scripts/                     # Legacy Bash toolchain (v1, kept for reference)
+└── templates/                   # PXE, monitoring, DRBD, nginx and libvirt templates
 ```

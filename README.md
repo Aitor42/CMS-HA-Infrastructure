@@ -30,7 +30,7 @@ The environment is driven by three cooperating layers:
 - **Ansible** (`ansible/`) — declarative *creation* of the libvirt networks and VM domains from `config.yaml`.
 - **Puppet** (`puppet/`) — node *desired state* (packages, services, exporters, `/etc/hosts`, …).
 
-> The legacy v1 shell suite in `scripts/` is deprecated; use `cms-ha` for every operation.
+> The legacy v1 shell suite has been removed; see `docs/LEGACY-V1-MAPPING.md` for the v1 → v2 command mapping.
 
 ### Key Technical Highlights
 
@@ -198,13 +198,13 @@ CMS-HA-Infrastructure/
 │       ├── pki/                     # 10 — Internal CA (step-ca)
 │       └── traffic/                 # 11 — k6 load generator (pinned grafana/k6 container)
 │
-├── scripts/                         # Legacy v1 shell scripts — DEPRECATED (see scripts/README.md)
 ├── kubernetes/                      # K3s manifests — Kustomize tree (base/ + monitoring/ + overlays/ + backups/ + jobs/)
 ├── puppet/                          # Puppet manifests and modules (role-based)
 ├── templates/                       # Configuration templates (Go text/template)
 ├── ansible/                         # Infra as code: libvirt networks + VM domains (create/declare)
 ├── tests/integration/run.sh         # End-to-end integration driver (deploy + verify + failover)
 ├── docs/SECURITY.md                 # Non-root access, host-key TOFU, CI scanning model
+├── docs/LEGACY-V1-MAPPING.md        # v1 shell scripts → v2 commands (legacy scripts removed)
 ├── .github/workflows/ci.yml         # CI: build/tests + lint + kustomize/kubeconform + ansible-lint + security scan
 ├── .github/workflows/integration.yml # CI: end-to-end lab run on a self-hosted KVM runner
 └── .github/workflows/integration-hosted.yml # CI: the same lab on a GitHub-hosted runner

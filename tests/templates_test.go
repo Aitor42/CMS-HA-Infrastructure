@@ -241,18 +241,4 @@ func TestTemplates_CasperHelperSingleSource(t *testing.T) {
 	if !strings.Contains(string(data), "070701") {
 		t.Error("casper helper is missing its cpio parser")
 	}
-
-	legacy, err := os.ReadFile("../scripts/01_setup_cobbler.sh")
-	if err != nil {
-		t.Fatalf("failed to read legacy cobbler script: %v", err)
-	}
-	if !strings.Contains(string(legacy), "templates/cobbler/casper_initrd_tcp.sh") {
-		t.Error("legacy cobbler script must reference the canonical casper helper")
-	}
-	if strings.Contains(string(legacy), "utils/casper_initrd_tcp.sh") {
-		t.Error("legacy cobbler script must not reference a duplicated casper helper")
-	}
-	if _, err := os.Stat("../scripts/utils/casper_initrd_tcp.sh"); err == nil {
-		t.Error("scripts/utils/casper_initrd_tcp.sh must not exist: templates/cobbler/ is the single source")
-	}
 }

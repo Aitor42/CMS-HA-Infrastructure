@@ -1,11 +1,12 @@
-# `scripts/` — DEPRECATED (v1, reference only)
+# Legacy v1 shell scripts — removed
 
-> ⚠️ **These shell scripts are no longer the deployment path.** They are kept
-> for historical reference only and are **not maintained**: `config.sh` and the
-> numbered scripts predate the Go orchestrator and have already drifted from it.
-> Do not add features or fixes here.
+> ⚠️ **The v1 shell suite has been removed from the working tree.** It was
+> deprecated long before the removal: `config.sh` and the numbered scripts
+> predate the Go orchestrator and had already drifted from it. Git history keeps
+> the old files for reference; this document keeps the v1 → v2 mapping so the
+> replacement for each entry point stays discoverable.
 
-Everything these scripts did is now implemented by the **v2** path:
+Everything the scripts did is now implemented by the **v2** path:
 
 - **`cms-ha`** (Go orchestrator) — the single entry point (`cms-ha deploy` and
   the per-phase commands).
@@ -20,6 +21,7 @@ Everything these scripts did is now implemented by the **v2** path:
 
 | Deprecated script | v2 replacement |
 |:--|:--|
+| `deploy_all.sh` | `cms-ha deploy` |
 | `scripts/config.sh` | `config.yaml` (single source of truth) |
 | `scripts/00_init_vms.sh` | `cms-ha deploy` (init-vms phase) · `ansible/playbooks/provision.yml` |
 | `scripts/01_setup_cobbler.sh` | `cms-ha phase setup-cobbler` |
@@ -42,9 +44,3 @@ Everything these scripts did is now implemented by the **v2** path:
 | `scripts/utils/sync_vm_clocks.sh` | `cms-ha repair clocks` · chrony (`role::base`) |
 | `scripts/utils/test_failover.sh` | `cms-ha test failover` |
 | `scripts/utils/verify_all.sh` | `cms-ha verify` |
-
-## Divergence guard
-
-`tests/scripts_test.go` fails if a shell script is added under `scripts/` that
-is not listed in this file or that is missing the deprecation banner. That keeps
-this inventory complete: no new v1 script can slip in unnoticed.
