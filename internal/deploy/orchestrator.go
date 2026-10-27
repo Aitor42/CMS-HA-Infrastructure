@@ -82,6 +82,18 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 		statePath = DefaultStateFile
 	}
 
+	if !opts.DryRun {
+		lock, err := acquireStateLock(statePath)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := lock.Close(); err != nil {
+				logging.Warn("could not release state lock: %v", err)
+			}
+		}()
+	}
+
 	var state *State
 	if !opts.DryRun {
 		var err error

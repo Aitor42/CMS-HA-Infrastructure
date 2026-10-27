@@ -48,6 +48,7 @@ ansible/.cache/
 # Orchestrator deployment checkpoint (resume state)
 deploy.state
 deploy.state.tmp
+deploy.state.lock
 
 # Strix runs
 strix_runs/

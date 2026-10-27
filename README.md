@@ -320,7 +320,7 @@ The Go orchestrator keeps the pipeline fast and safe:
 - **Fast provisioning (hosted workflow default)** — `deploy --fast-provisioning` (or `vm.provisioning: cloud`) installs the jumpstart and every client node from the same cloud image, with per-node cloud-init for hostname, MACs, static addresses and SSH key. The CLI/config default remains PXE; the hosted workflow defaults to `fast_provisioning=true` for speed. The PXE/Cobbler run remains the deliverable gate (self-hosted `integration.yml`, or a hosted dispatch with `jumpstart_image=iso` and `fast_provisioning=false`).
 - **Self-healing** — stale Puppet certificates are revoked, re-signed and the catalog is re-run; broken DRBD/K3s state aborts the deploy instead of reporting success.
 - **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository.
-- **Checkpoints** — `deploy.state` lets `--resume` and `--from-phase` continue after a failure.
+- **Checkpoints** — `deploy.state` lets `--resume` and `--from-phase` continue after a failure. A `deploy.state.lock` file makes a second concurrent deploy fail fast instead of corrupting the checkpoint.
 
 ---
 

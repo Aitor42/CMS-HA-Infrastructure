@@ -153,7 +153,8 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 ./cms-ha deploy
 
 # The orchestrator writes a checkpoint (deploy.state) after every phase, so a
-# failed run can resume instead of starting over:
+# failed run can resume instead of starting over. A second concurrent deploy
+# fails fast because deploy.state.lock is held:
 ./cms-ha deploy --resume                    # skip phases already completed
 ./cms-ha deploy --from-phase drbd-setup     # start at a named phase
 ./cms-ha deploy --state-file /var/tmp/deploy.state
