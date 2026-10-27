@@ -1,0 +1,79 @@
+# GoReleaser configuration for cms-ha.
+#
+# The release workflow installs Syft and Cosign before invoking GoReleaser:
+# Syft produces the SBOMs, Cosign keyless-signs the checksum file. The archive
+# names and checksum filename are stable so the verification commands in the
+# release notes do not depend on the runner.
+version: 2
+
+project_name: cms-ha
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cms-ha
+    main: ./cmd/cms-ha
+    binary: cms-ha
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+      - docs/SECURITY.md
+      - docs/MANUAL.md
+      - docs/LEGACY-V1-MAPPING.md
+
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --yes
+      - --bundle=${signature}
+      - ${artifact}
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"

@@ -206,6 +206,7 @@ CMS-HA-Infrastructure/
 ├── docs/SECURITY.md                 # Non-root access, host-key TOFU, CI scanning model
 ├── docs/LEGACY-V1-MAPPING.md        # v1 shell scripts → v2 commands (legacy scripts removed)
 ├── .github/workflows/ci.yml         # CI: build/tests + lint + kustomize/kubeconform + ansible-lint + security scan
+├── .github/workflows/release.yml    # Tagged releases: GoReleaser + Syft SBOM + Cosign keyless signature
 ├── .github/workflows/integration.yml # CI: end-to-end lab run on a self-hosted KVM runner
 └── .github/workflows/integration-hosted.yml # CI: the same lab on a GitHub-hosted runner
 ```
@@ -533,6 +534,7 @@ dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 | [SOFTWARE_BASELINE.md](docs/SOFTWARE_BASELINE.md) | Complete software inventory with versions and URLs |
 | [NETWORK_DIAGRAM.md](docs/NETWORK_DIAGRAM.md) | Network topology and service architecture diagrams |
 | [SECURITY.md](docs/SECURITY.md) | Non-root access, host-key pinning and CI scanning model |
+| [RELEASING.md](docs/RELEASING.md) | Tagged releases, checksums, SBOMs and Cosign verification |
 | [phases/](docs/phases/) | Per-phase technical documentation |
 
 ---
@@ -549,9 +551,10 @@ The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pul
 | K8s Validation | kubeconform | Kubernetes manifests against v1.29 schemas |
 | Puppet Lint | puppet-lint | All `.pp` manifests |
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
-| Security Scan | gosec + govulncheck + Trivy | Go SAST, dependency CVEs, secrets/misconfig |
+| Security Scan | gosec + govulncheck + Gitleaks + Trivy | Go SAST, dependency CVEs, committed secrets, secrets/misconfig |
 | Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + 5 failover scenarios (manual dispatch) |
 | Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (nightly cloud, release PXE, manual dispatch) |
+| Release | GoReleaser + Syft + Cosign | Tag `v*`: linux/amd64+arm64 archives, `SHA256SUMS`, SBOMs and keyless signature (see `docs/RELEASING.md`) |
 
 ---
 

@@ -50,6 +50,32 @@ func TestCLI_SecretsSubcommands(t *testing.T) {
 	}
 }
 
+func TestCLI_VersionFlag(t *testing.T) {
+	cmd := root.GetRootCmd()
+	oldVersion := cmd.Version
+	t.Cleanup(func() {
+		cmd.Version = oldVersion
+		cmd.SetArgs(nil)
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+
+	root.SetBuildInfo("v9.9.9", "abc1234", "2026-10-27T00:00:00Z")
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"--version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("--version: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"v9.9.9", "abc1234", "2026-10-27T00:00:00Z"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("--version output %q does not contain %q", got, want)
+		}
+	}
+}
+
 func TestCLI_PhaseSubcommands(t *testing.T) {
 	rootCmd := root.GetRootCmd()
 	phaseSubcommands := []string{

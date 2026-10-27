@@ -56,6 +56,22 @@ func GetRootCmd() *cobra.Command {
 	return rootCmd
 }
 
+// SetBuildInfo exposes the linker-provided build identity through --version.
+// Empty values are replaced with stable placeholders so a locally built binary
+// never prints a misleading blank version.
+func SetBuildInfo(v, c, d string) {
+	if v == "" {
+		v = "dev"
+	}
+	if c == "" {
+		c = "none"
+	}
+	if d == "" {
+		d = "unknown"
+	}
+	rootCmd.Version = fmt.Sprintf("%s (commit %s, built %s)", v, c, d)
+}
+
 // defaultConfigPath is the fallback config path. It drives which CLI
 // invocations get directory-based fallback lookup (see loadConfig below).
 const defaultConfigPath = "config.yaml"
