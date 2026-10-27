@@ -29,11 +29,11 @@ var rootCmd = &cobra.Command{
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		logging.SetVerbose(verbose)
-		// Only the deploy command implements dry-run; any other command that
+		// Deploy and phase commands implement dry-run. Anything else that
 		// accepts the flag silently would perform real changes while the
 		// user believes they are in simulation mode.
-		if dryRun && cmd != deployCmd {
-			return fmt.Errorf("--dry-run is only implemented by 'cms-ha deploy'")
+		if dryRun && cmd != deployCmd && !isPhaseCommand(cmd) {
+			return fmt.Errorf("--dry-run is only implemented by 'cms-ha deploy' and 'cms-ha phase'")
 		}
 		return nil
 	},
@@ -92,6 +92,13 @@ func loadConfig() (*config.Config, error) {
 	return loadConfigWith(func(cfg *config.Config) error { return cfg.Validate() })
 }
 
+// loadConfigReadOnly is the dry-run counterpart of loadConfig: it still
+// validates the topology, but it never auto-encrypts plaintext secrets or
+// creates an age key, so a simulation cannot mutate config.yaml.
+func loadConfigReadOnly() (*config.Config, error) {
+	return loadConfigWithMode(func(cfg *config.Config) error { return cfg.Validate() }, false)
+}
+
 // loadConfigPartial is loadConfig without the full deployment validation, for
 // commands that operate on whatever resources are present (cleanup/destroy,
 // VM lifecycle, status and repair). Those must work even when the topology in
@@ -103,7 +110,16 @@ func loadConfigPartial() (*config.Config, error) {
 	return loadConfigWith(func(cfg *config.Config) error { return cfg.ValidatePartial() })
 }
 
+// loadConfigPartialReadOnly is the dry-run counterpart of loadConfigPartial.
+func loadConfigPartialReadOnly() (*config.Config, error) {
+	return loadConfigWithMode(func(cfg *config.Config) error { return cfg.ValidatePartial() }, false)
+}
+
 func loadConfigWith(validate func(*config.Config) error) (*config.Config, error) {
+	return loadConfigWithMode(validate, true)
+}
+
+func loadConfigWithMode(validate func(*config.Config) error, autoEncrypt bool) (*config.Config, error) {
 	expanded := config.ExpandPath(configPath)
 	if _, err := os.Stat(expanded); err == nil {
 		configPath = expanded
@@ -122,7 +138,13 @@ func loadConfigWith(validate func(*config.Config) error) (*config.Config, error)
 			}
 		}
 	}
-	cfg, err := config.LoadAutoEncrypt(configPath)
+	var cfg *config.Config
+	var err error
+	if autoEncrypt {
+		cfg, err = config.LoadAutoEncrypt(configPath)
+	} else {
+		cfg, err = config.Load(configPath)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}

@@ -130,6 +130,23 @@ func TestCLI_ConfigValidateJSON(t *testing.T) {
 	}
 }
 
+func TestCLI_PhaseDryRun(t *testing.T) {
+	cmd := root.GetRootCmd()
+	t.Cleanup(func() {
+		_ = cmd.PersistentFlags().Set("dry-run", "false")
+		_ = cmd.PersistentFlags().Set("config", "config.yaml")
+		cmd.SetArgs(nil)
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	})
+
+	// A phase dry-run must validate and report without opening SSH/libvirt.
+	cmd.SetArgs([]string{"-c", "../config.ci.yaml", "--dry-run", "phase", "setup-drbd"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("phase dry-run: %v", err)
+	}
+}
+
 func TestCLI_PhaseSubcommands(t *testing.T) {
 	rootCmd := root.GetRootCmd()
 	phaseSubcommands := []string{

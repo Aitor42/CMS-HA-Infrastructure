@@ -249,8 +249,11 @@ vim config.yaml
 # The configuration (CIDRs, node IPs/MACs/FQDNs, hotdesk bounds, HA quorum) is validated on every run.
 ./cms-ha deploy
 
-# Preview all 14 pipeline steps without executing anything (--dry-run only works in deploy)
+# Preview the deploy plan without executing anything
 ./cms-ha deploy --dry-run
+
+# Preview one phase; it validates config and opens no SSH/libvirt connection
+./cms-ha phase setup-kubernetes --dry-run
 
 # Or resume with pre-installed VMs
 ./cms-ha deploy --skip-vm-create

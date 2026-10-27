@@ -19,7 +19,11 @@ var deployCmd = &cobra.Command{
 	Use:   "deploy",
 	Short: "Deploy infrastructure",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig()
+		load := loadConfig
+		if dryRun {
+			load = loadConfigReadOnly
+		}
+		cfg, err := load()
 		if err != nil {
 			return err
 		}

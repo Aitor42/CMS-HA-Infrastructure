@@ -1,6 +1,8 @@
 package root
 
 import (
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/backup"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/cobbler"
@@ -23,6 +25,29 @@ var phaseCmd = &cobra.Command{
 	Short: "Run a specific phase",
 }
 
+// dryRunPhase validates the configuration and reports the phase without
+// creating an SSH pool or touching libvirt. The read-only loader is deliberate:
+// a simulation must not auto-encrypt config.yaml.
+func dryRunPhase(name string, load func() (*config.Config, error)) (bool, error) {
+	if !dryRun {
+		return false, nil
+	}
+	if _, err := load(); err != nil {
+		return false, err
+	}
+	logging.Info("Dry run: phase %s would run; no commands were executed", name)
+	return true, nil
+}
+
+func isPhaseCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c == phaseCmd {
+			return true
+		}
+	}
+	return false
+}
+
 func init() {
 	rootCmd.AddCommand(phaseCmd)
 
@@ -42,6 +67,13 @@ func init() {
 			load := loadConfig
 			if cleanup {
 				load = loadConfigPartial
+			}
+			readOnlyLoad := loadConfigReadOnly
+			if cleanup {
+				readOnlyLoad = loadConfigPartialReadOnly
+			}
+			if done, err := dryRunPhase("init-vms", readOnlyLoad); done || err != nil {
+				return err
 			}
 			cfg, err := load()
 			if err != nil {
@@ -82,6 +114,9 @@ func init() {
 			Short:   short,
 			Aliases: aliases,
 			RunE: func(cmd *cobra.Command, args []string) error {
+				if done, err := dryRunPhase(use, loadConfigReadOnly); done || err != nil {
+					return err
+				}
 				return phaseFactory(cmd)
 			},
 		}

@@ -50,7 +50,7 @@ qemu before the orchestrator can restrict it.
 ### 1.3 CLI Behaviour and Configuration Validation (v2.1)
 
 *   **Error handling**: command errors are printed once to **stderr** and the process exits with code `1`. Nothing is retried silently; failures surface where they occur.
-*   **`--dry-run` is only implemented by `cms-ha deploy`.** Passing it to any other command is rejected up front, so no other operation runs with real effects while pretending to simulate.
+*   **`--dry-run` works for `cms-ha deploy` and `cms-ha phase`.** Phase dry-runs load and validate the configuration read-only, then report the phase without opening SSH or libvirt connections; they never auto-encrypt `config.yaml`. Other commands reject the flag up front.
 *   **Configuration validation** runs on every `cms-ha` invocation before any network or VM operation. The load aborts with a precise message (naming the offending node) when:
     - `network.internal.cidr` / `network.main.cidr` are not valid CIDRs;
     - any node IP is not a valid IPv4 address, FQDN contains characters outside letters/digits/dots/hyphens, or a MAC address is malformed — these fields are interpolated into SSH commands, Cobbler registrations and `awk` filters;
