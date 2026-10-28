@@ -3,6 +3,8 @@ package ufw
 import (
 	"context"
 	"fmt"
+	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +20,49 @@ const DefaultWANIface = "enp3s0"
 
 // natRulesPath is where the rendered block is staged on the router.
 const natRulesPath = "/tmp/nat.rules"
+
+// ifaceNamePattern accepts the names Linux allows for a network interface
+// (IFNAMSIZ is 16, including the terminating NUL). The WAN name comes from
+// remote command output and is interpolated into a rules file, so reject
+// anything that is not a plain interface name.
+var ifaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:@-]{1,15}$`)
+
+// NATSpec is the network-specific input for the router's NAT policy. The
+// subnets and the load-balancer VIP are configuration values: hardcoding them
+// here silently leaves a deployment with custom addressing without DNAT or
+// MASQUERADE after the UFW phase succeeds.
+type NATSpec struct {
+	WANIface     string
+	InternalCIDR string
+	MainCIDR     string
+	VIP          string
+}
+
+func (s NATSpec) validate() error {
+	if !ifaceNamePattern.MatchString(s.WANIface) {
+		return fmt.Errorf("invalid WAN interface name %q", s.WANIface)
+	}
+	for _, network := range []struct {
+		label string
+		cidr  string
+	}{
+		{"internal", s.InternalCIDR},
+		{"main", s.MainCIDR},
+	} {
+		ip, _, err := net.ParseCIDR(network.cidr)
+		if err != nil {
+			return fmt.Errorf("%s network CIDR %q is invalid: %w", network.label, network.cidr, err)
+		}
+		if ip.To4() == nil {
+			return fmt.Errorf("%s network CIDR %q is not IPv4", network.label, network.cidr)
+		}
+	}
+	ip := net.ParseIP(s.VIP)
+	if ip == nil || ip.To4() == nil {
+		return fmt.Errorf("load-balancer VIP %q is not a valid IPv4 address", s.VIP)
+	}
+	return nil
+}
 
 // WANIface discovers the router's WAN uplink: first by the MAC declared in the
 // configuration, then by whichever interface holds the default route, and only
@@ -36,12 +81,24 @@ func WANIface(ctx context.Context, pool ssh.Executor, routerIP, wanMAC string) (
 		cmd := fmt.Sprintf("ip -o link | awk '/%s/ {print $2}' | sed 's/://'", wanMAC)
 		if out, _, _, err := pool.RunCommand(ctx, routerIP, cmd); err == nil {
 			if name := strings.TrimSpace(out); name != "" {
+				if strings.ContainsAny(name, " \t\r\n") {
+					return "", fmt.Errorf("WAN MAC %s matches multiple interfaces: %q", wanMAC, name)
+				}
+				if !ifaceNamePattern.MatchString(name) {
+					return "", fmt.Errorf("WAN MAC %s resolved to an invalid interface name %q", wanMAC, name)
+				}
 				return name, nil
 			}
 		}
 	}
 	if out, _, _, err := pool.RunCommand(ctx, routerIP, "ip route show default | awk '{print $5}' | head -n1"); err == nil {
 		if name := strings.TrimSpace(out); name != "" {
+			if strings.ContainsAny(name, " \t\r\n") {
+				return "", fmt.Errorf("default route is ambiguous: %q", name)
+			}
+			if !ifaceNamePattern.MatchString(name) {
+				return "", fmt.Errorf("default route resolved to an invalid interface name %q", name)
+			}
 			return name, nil
 		}
 	}
@@ -52,16 +109,28 @@ func WANIface(ctx context.Context, pool ssh.Executor, routerIP, wanMAC string) (
 }
 
 // RenderNATRules renders templates/ufw/nat-rules with the discovered WAN
-// interface name.
-func RenderNATRules(wanIface string) ([]byte, error) {
+// interface and the deployment's configured subnets/VIP.
+func RenderNATRules(spec NATSpec) ([]byte, error) {
+	if err := spec.validate(); err != nil {
+		return nil, err
+	}
+	_, internalNet, _ := net.ParseCIDR(spec.InternalCIDR)
+	_, mainNet, _ := net.ParseCIDR(spec.MainCIDR)
+
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/ufw/nat-rules")
 	if err != nil {
 		return nil, fmt.Errorf("failed to read NAT rules template: %w", err)
 	}
 	rendered := strings.NewReplacer(
-		"${WAN_IF}", wanIface,
-		"${WAN_IFACE}", wanIface,
+		"${WAN_IF}", spec.WANIface,
+		"${WAN_IFACE}", spec.WANIface,
+		"${INTERNAL_CIDR}", internalNet.String(),
+		"${MAIN_CIDR}", mainNet.String(),
+		"${LB_VIP}", spec.VIP,
 	).Replace(string(tmplContent))
+	if strings.Contains(rendered, "${") {
+		return nil, fmt.Errorf("NAT rules template contains an unresolved placeholder")
+	}
 	return []byte(rendered), nil
 }
 
@@ -76,8 +145,8 @@ func RenderNATRules(wanIface string) ([]byte, error) {
 //
 // The function is idempotent: the splice starts by deleting any previously
 // injected block, so it can run both early (bootstrap) and late (UFW phase).
-func ConfigureNAT(ctx context.Context, pool ssh.Executor, routerIP, wanIface string, apply bool) ([]byte, error) {
-	natRules, err := RenderNATRules(wanIface)
+func ConfigureNAT(ctx context.Context, pool ssh.Executor, routerIP string, spec NATSpec, apply bool) ([]byte, error) {
+	natRules, err := RenderNATRules(spec)
 	if err != nil {
 		return nil, err
 	}

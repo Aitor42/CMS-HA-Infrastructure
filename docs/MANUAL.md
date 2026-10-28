@@ -936,7 +936,11 @@ Symptom:
 Nodes on the `main` network cannot access the internet (HTTP/HTTPS downloads fail), or external traffic on port 80/443 fails to reach the load balancer (`192.168.20.100`).
 
 Cause:
-The `*nat` block in `/etc/ufw/before.rules` must appear *before* the `*filter` section and reference the correct dynamic WAN interface.
+The `*nat` block in `/etc/ufw/before.rules` must appear *before* the `*filter`
+section, reference the correct dynamic WAN interface, and use the configured
+`network.internal.cidr`, `network.main.cidr` and `network.main.vip`. The UFW
+phase now verifies the live nat table after reloading UFW, so a stale block
+fails the phase instead of leaving NAT silently broken.
 
 Solution:
 Run the idempotent UFW phase:
@@ -946,5 +950,7 @@ Run the idempotent UFW phase:
 
 Manual Verification:
 ```bash
-ssh ubuntu@192.168.10.1 "sudo -H ufw status verbose && sudo -H grep -A 10 '^\*nat' /etc/ufw/before.rules"
+ssh ubuntu@192.168.10.1 "sudo -H ufw status verbose"
+ssh ubuntu@192.168.10.1 "sudo -H iptables -t nat -S"
+ssh ubuntu@192.168.10.1 "sudo -H grep -A 10 '^\*nat' /etc/ufw/before.rules"
 ```

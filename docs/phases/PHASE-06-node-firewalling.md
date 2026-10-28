@@ -14,7 +14,9 @@
 Each node has UFW configured with:
 - `ufw default deny incoming` — Denies all incoming traffic by default
 - Only specific service ports executed by the node are opened
-- SSH (22) permitted only from the jumpstart node (192.168.10.10)
+- SSH (22) is open so the orchestrator on the hypervisor can reach every
+  node; the perimeter router is the WAN boundary. Restrict this rule to the
+  lab CIDRs if the WAN is not trusted.
 - node_exporter (9100) permitted only from the monitor node (192.168.10.20)
 
 ### Rules per Node
@@ -32,8 +34,11 @@ Each node has UFW configured with:
 
 ### Implementation
 
-- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — applies the node firewall rules.
-- `puppet/modules/role` (`role::ufw`) — keeps the rules converged.
+- `puppet/modules/role` (`role::base` plus each role manifest) — applies and
+  keeps the per-node rules converged during the Puppet phase.
+- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — re-injects the router's
+  NAT rules, reloads UFW, verifies the perimeter policies/forwarding/live NAT
+  table, and checks that UFW is active on every node (including jumpstart).
 
 ### Verification
 
@@ -42,6 +47,9 @@ Each node has UFW configured with:
 ssh ubuntu@192.168.10.20 "sudo ufw status numbered"
 ssh ubuntu@192.168.10.11 "sudo ufw status numbered"
 ssh ubuntu@192.168.20.103 "sudo ufw status numbered"
+
+# Verify the router's live NAT table, not only before.rules
+ssh ubuntu@192.168.10.1 "sudo iptables -t nat -S"
 
 # Port isolation test (from an external node):
 # MariaDB direct port 3306 on master1 should NOT be accessible directly (only 30306 NodePort)

@@ -288,7 +288,12 @@ func (p *Phase) enableNAT(ctx context.Context, router config.NodeDetail) error {
 		return err
 	}
 	logging.Info("Installing NAT rules on the router (WAN interface %s)...", wanIface)
-	if _, err := ufw.ConfigureNAT(ctx, p.pool, router.IP, wanIface, true); err != nil {
+	if _, err := ufw.ConfigureNAT(ctx, p.pool, router.IP, ufw.NATSpec{
+		WANIface:     wanIface,
+		InternalCIDR: p.cfg.Network.Internal.CIDR,
+		MainCIDR:     p.cfg.Network.Main.CIDR,
+		VIP:          p.cfg.LBVIP(),
+	}, true); err != nil {
 		return err
 	}
 	return nil

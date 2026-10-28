@@ -36,14 +36,19 @@ ufw default allow outgoing
 
 ### NAT Rules (/etc/ufw/before.rules)
 
-**DNAT (External access → LB VIP, floated between main-lb1/main-lb2 by keepalived):**
+The block is rendered from `templates/ufw/nat-rules` with the configured
+`network.internal.cidr`, `network.main.cidr`, `network.main.vip` and the WAN
+interface discovered at runtime. **DNAT** publishes the keepalived VIP to the
+WAN; **MASQUERADE** gives both lab subnets outbound access:
+
 ```
 *nat
 :PREROUTING ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
--A PREROUTING -i eth0 -p tcp --dport 80 -j DNAT --to-destination 192.168.20.100:80
--A PREROUTING -i eth0 -p tcp --dport 443 -j DNAT --to-destination 192.168.20.100:443
--A POSTROUTING -s 192.168.20.0/24 -o eth0 -j MASQUERADE
+-A PREROUTING -i <wan> -p tcp --dport 80 -j DNAT --to-destination <lb-vip>:80
+-A PREROUTING -i <wan> -p tcp --dport 443 -j DNAT --to-destination <lb-vip>:443
+-A POSTROUTING -s <internal-cidr> -o <wan> -j MASQUERADE
+-A POSTROUTING -s <main-cidr> -o <wan> -j MASQUERADE
 COMMIT
 ```
 
@@ -73,7 +78,8 @@ ssh ubuntu@192.168.10.1 "sudo iptables -t nat -L -n -v"
 ssh ubuntu@192.168.20.201 "sudo curl -s http://example.com"
 ssh ubuntu@192.168.20.201 "sudo ping -c 2 192.168.10.11"
 
-# From internal subnet: must not access the internet
-ssh ubuntu@192.168.10.11 "sudo curl -s --connect-timeout 5 http://example.com"  # Should fail
+# From the internal subnet: should reach the internet through NAT (needed for
+# package/Puppet downloads) and the main-network VIP
+ssh ubuntu@192.168.10.11 "sudo curl -s --connect-timeout 5 http://example.com"
 ssh ubuntu@192.168.10.11 "sudo ping -c 2 192.168.20.100"  # Should work
 ```

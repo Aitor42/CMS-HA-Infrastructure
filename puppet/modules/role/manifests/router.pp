@@ -38,9 +38,10 @@ class role::router {
   # Override the base 'deny incoming' with 'deny forward' as well
   exec { 'ufw-default-deny-forward':
     command => '/usr/sbin/ufw default deny forward',
-    # ufw >= 0.36 renders this policy as "deny (routed)"; the old
-    # "deny (forward)" wording never matched, so the exec re-ran every run.
-    unless  => '/usr/sbin/ufw status verbose | /usr/bin/grep -q "Default: deny (routed)"',
+    # ufw >= 0.36 renders this policy as "deny (routed)" on the same line as
+    # the other defaults; only the incoming policy has the "Default:" prefix.
+    # Anchoring on the prefixed form made the exec re-run on every agent run.
+    unless  => '/usr/sbin/ufw status verbose | /usr/bin/grep -q "deny (routed)"',
     require => Package['ufw'],
   }
 

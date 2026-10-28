@@ -201,7 +201,10 @@ class role::base {
 
   exec { 'ufw-default-allow-outgoing':
     command => '/usr/sbin/ufw default allow outgoing',
-    unless  => '/usr/sbin/ufw status verbose | /usr/bin/grep -q "Default: allow (outgoing)"',
+    # ufw renders all three default policies on one line, so only the incoming
+    # policy carries the "Default:" prefix. Matching the prefixed form made
+    # this exec re-run on every Puppet agent run.
+    unless  => '/usr/sbin/ufw status verbose | /usr/bin/grep -q "allow (outgoing)"',
     require => Package['ufw'],
   }
 
