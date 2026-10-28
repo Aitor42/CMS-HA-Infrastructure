@@ -107,7 +107,17 @@ func TestK3sInstallCommandPinsVerifiedBinary(t *testing.T) {
 		}
 	}
 	if strings.Contains(cmd, "INSTALL_K3S_SKIP_START=true") {
-		t.Error("server install must wait for readiness")
+		t.Error("skipStart=false must let the upstream installer start the server")
+	}
+}
+
+func TestK3sServerInstallSkipsBlockingStart(t *testing.T) {
+	cmd := k3sInstallCommand("server --cluster-init", "", true)
+	if !strings.Contains(cmd, "INSTALL_K3S_SKIP_START=true") {
+		t.Errorf("k3s server command is missing INSTALL_K3S_SKIP_START=true:\n%s", cmd)
+	}
+	if strings.Contains(cmd, "systemctl restart") {
+		t.Error("k3s server install must not block on systemctl restart")
 	}
 }
 
@@ -124,6 +134,21 @@ func TestK3sAgentInstallSkipsBlockingStart(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "| K3S_TOKEN_FILE=/root/.k3s-join-token") {
 		t.Error("k3s agent install must pass K3S_TOKEN_FILE to the install script")
+	}
+}
+
+func TestReadyNodeNames(t *testing.T) {
+	out := "master1 Ready control-plane,etcd 1m v1.29.9+k3s1\n" +
+		"master2 NotReady control-plane,etcd 1m v1.29.9+k3s1\n" +
+		"worker1 Ready <none> 1m v1.29.9+k3s1\n" +
+		"worker2 Ready,SchedulingDisabled <none> 1m v1.29.9+k3s1\n" +
+		"\n"
+	ready := readyNodeNames(out)
+	if !ready["master1"] || !ready["worker1"] || !ready["worker2"] {
+		t.Errorf("Ready nodes = %v, want master1, worker1 and worker2", ready)
+	}
+	if ready["master2"] {
+		t.Error("NotReady node was counted as Ready")
 	}
 }
 

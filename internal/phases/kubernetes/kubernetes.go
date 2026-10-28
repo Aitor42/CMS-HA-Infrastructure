@@ -105,7 +105,9 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := p.waitForEtcdQuorum(ctx, master1); err != nil {
 		return err
 	}
-	p.labelPrimary(ctx, master1)
+	if err := p.labelPrimary(ctx, master1); err != nil {
+		return err
+	}
 	if err := p.deployWorkloads(ctx, master1); err != nil {
 		return err
 	}
@@ -138,7 +140,10 @@ func (p *Phase) validateConfig() error {
 // the join token and puts it on every node that will join.
 func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Installing K3s on Master 1 (cluster-init)...")
-	initCmd := k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP), "", false)
+	// Start the server with --no-block too: the upstream unit is Type=notify
+	// with TimeoutStartSec=0, so a server that cannot start would otherwise
+	// hang systemctl forever. The API wait below is the bounded readiness gate.
+	initCmd := k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP), "", true) + "systemctl daemon-reload\nsystemctl start k3s --no-block\n"
 	if err := runChecked(ctx, p.pool, master1.IP, initCmd, "install K3s on master1"); err != nil {
 		return err
 	}
@@ -294,15 +299,24 @@ func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) erro
 
 func (p *Phase) waitForNodesReady(ctx context.Context, master1 config.NodeDetail) error {
 	logging.Info("Waiting for all nodes to be Ready...")
-	expectedCount := fmt.Sprintf("%d", len(p.cfg.Nodes.Masters)+len(p.cfg.Nodes.Workers))
+	expected := p.expectedK3sNodes()
 	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 100, Interval: 3 * time.Second, MaxInterval: 12 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
-		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes --no-headers | grep -v NotReady | grep Ready | wc -l")
-		if err != nil {
-			return err
+		// Count in Go and check kubectl's exit status. Piping the listing into
+		// grep|wc would turn an API failure into "got 0 Ready nodes" and hide
+		// the real cause for the full retry budget.
+		out, errOut, code, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes --no-headers")
+		if err != nil || code != 0 {
+			return fmt.Errorf("kubectl get nodes failed (exit %d): %v %s", code, err, strings.TrimSpace(errOut))
 		}
-		count := strings.TrimSpace(out)
-		if count != expectedCount {
-			return fmt.Errorf("expected %s Ready nodes, got %s", expectedCount, count)
+		ready := readyNodeNames(out)
+		missing := make([]string, 0, len(expected))
+		for _, node := range expected {
+			if !ready[node.Name] && !ready[node.FQDN] {
+				missing = append(missing, node.Name)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("nodes not Ready: %s", strings.Join(missing, ", "))
 		}
 		return nil
 	})
@@ -310,6 +324,34 @@ func (p *Phase) waitForNodesReady(ctx context.Context, master1 config.NodeDetail
 		return fmt.Errorf("K3s nodes did not all become Ready: %w", err)
 	}
 	return nil
+}
+
+// expectedK3sNodes returns the node identities the phase must see Ready. K3s
+// uses the VM hostname as the node name, but a node registered with its FQDN is
+// equally valid, so readiness accepts either form.
+func (p *Phase) expectedK3sNodes() []config.NodeDetail {
+	nodes := make([]config.NodeDetail, 0, len(p.cfg.Nodes.Masters)+len(p.cfg.Nodes.Workers))
+	nodes = append(nodes, p.cfg.Nodes.Masters...)
+	nodes = append(nodes, p.cfg.Nodes.Workers...)
+	return nodes
+}
+
+// readyNodeNames parses `kubectl get nodes --no-headers` and returns the names
+// whose STATUS column starts with Ready. Extra/stale node objects are ignored,
+// which makes a resumed deploy tolerant of a node object left behind by an
+// earlier failed join.
+func readyNodeNames(out string) map[string]bool {
+	ready := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		// kubectl renders a cordoned Ready node as Ready,SchedulingDisabled;
+		// the Ready condition is still true, so accept the prefix.
+		if len(fields) < 2 || !strings.HasPrefix(fields[1], "Ready") {
+			continue
+		}
+		ready[fields[0]] = true
+	}
+	return ready
 }
 
 // waitForEtcdQuorum verifies the member count, not just node readiness. K3s
@@ -342,13 +384,75 @@ func (p *Phase) waitForEtcdQuorum(ctx context.Context, master1 config.NodeDetail
 	return nil
 }
 
-// labelPrimary marks master1 as the DRBD primary. The label is informational:
-// losing it must not abort a healthy cluster, so failures are warnings.
-func (p *Phase) labelPrimary(ctx context.Context, master1 config.NodeDetail) {
-	logging.Info("Labeling Master 1 with DRBD primary status...")
-	_, _, _, err := p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", master1.FQDN, master1.Name))
+// labelPrimary marks the node that currently owns the DRBD Primary role. This
+// is not informational: the MariaDB StatefulSet and the backup CronJobs use the
+// label as a node affinity, so a missing label only surfaces later as a Pending
+// pod and a misleading "mariadb pod was never created" timeout. Resolving the
+// role instead of assuming master1 also keeps a resumed deploy correct after a
+// failover moved the primary to master2.
+func (p *Phase) labelPrimary(ctx context.Context, master1 config.NodeDetail) error {
+	primary, err := p.findDRBDPrimary(ctx)
 	if err != nil {
-		logging.Warn("Failed to label node: %v", err)
+		return err
+	}
+	logging.Info("Labeling %s with DRBD primary status...", primary.Name)
+
+	// A node object can retain the label after its DRBD role changed. Clear it
+	// from the other masters before setting the current owner, otherwise the
+	// MariaDB node affinity matches both a secondary and the primary.
+	for _, m := range p.cfg.Nodes.Masters {
+		if m.IP == "" || m.IP == primary.IP {
+			continue
+		}
+		cmd := fmt.Sprintf("kubectl label node %s drbd-status- 2>/dev/null || kubectl label node %s drbd-status- 2>/dev/null || true", m.FQDN, m.Name)
+		_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, cmd)
+	}
+
+	cmd := fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", primary.FQDN, primary.Name)
+	if err := runCheckedRetry(ctx, p.pool, master1.IP, cmd, "label the DRBD primary node"); err != nil {
+		return fmt.Errorf("could not label %s as drbd-status=primary (MariaDB and backup scheduling depend on it): %w", primary.Name, err)
+	}
+	return nil
+}
+
+// findDRBDPrimary asks every DRBD-enabled master for the role of cms_data and
+// requires exactly one Primary. Configurations without drbd_disk_gb keep the
+// historical master1 behaviour.
+func (p *Phase) findDRBDPrimary(ctx context.Context) (config.NodeDetail, error) {
+	var candidates []config.NodeDetail
+	for _, m := range p.cfg.Nodes.Masters {
+		if m.IP != "" && m.DRBDDiskGB > 0 {
+			candidates = append(candidates, m)
+		}
+	}
+	if len(candidates) == 0 {
+		if len(p.cfg.Nodes.Masters) == 0 {
+			return config.NodeDetail{}, fmt.Errorf("no master nodes configured")
+		}
+		return p.cfg.Nodes.Masters[0], nil
+	}
+
+	var primaries []config.NodeDetail
+	for _, m := range candidates {
+		out, errOut, code, err := p.pool.RunCommand(ctx, m.IP, "drbdadm role cms_data")
+		if err != nil || code != 0 {
+			return config.NodeDetail{}, fmt.Errorf("read DRBD role on %s (exit %d): %v %s", m.Name, code, err, strings.TrimSpace(errOut))
+		}
+		if strings.HasPrefix(strings.TrimSpace(out), "Primary") {
+			primaries = append(primaries, m)
+		}
+	}
+	switch len(primaries) {
+	case 1:
+		return primaries[0], nil
+	case 0:
+		return config.NodeDetail{}, fmt.Errorf("no DRBD-enabled master reports Primary for cms_data")
+	default:
+		names := make([]string, 0, len(primaries))
+		for _, m := range primaries {
+			names = append(names, m.Name)
+		}
+		return config.NodeDetail{}, fmt.Errorf("multiple DRBD-enabled masters report Primary for cms_data: %s", strings.Join(names, ", "))
 	}
 }
 

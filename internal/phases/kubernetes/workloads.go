@@ -43,7 +43,10 @@ func (p *Phase) deployWorkloads(ctx context.Context, master1 config.NodeDetail) 
 func (p *Phase) prepareManifests(ctx context.Context, master1 config.NodeDetail) (string, func(), error) {
 	logging.Info("Applying Kubernetes Manifests (kustomize)...")
 	manifestsDir := "/tmp/k3s-manifests"
-	if err := runChecked(ctx, p.pool, master1.IP, fmt.Sprintf("install -d -m 0700 %s", manifestsDir), "create private manifest directory"); err != nil {
+	// Start from an empty directory: a resumed deploy may have left generated
+	// secrets or manifests from an earlier, failed run behind.
+	resetCmd := fmt.Sprintf("rm -rf %s && install -d -m 0700 %s", manifestsDir, manifestsDir)
+	if err := runChecked(ctx, p.pool, master1.IP, resetCmd, "reset private manifest directory"); err != nil {
 		return "", nil, err
 	}
 	cleanup := func() {

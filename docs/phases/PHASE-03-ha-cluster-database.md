@@ -35,7 +35,7 @@
   - Only the promoted primary master (`internal-master1` by default) mounts the DRBD volume.
 - **Dynamic Node Pinning (Kubernetes + DRBD):** 
   - To prevent MariaDB from running on nodes without the mounted DRBD storage, `nodeSelector: drbd-status: primary` is configured in `mariadb-statefulset.yaml`.
-  - The Kubernetes phase labels `internal-master1` with `drbd-status=primary`.
+  - The Kubernetes phase asks the DRBD-enabled masters for the `cms_data` role and labels the node that reports `Primary` with `drbd-status=primary` (`internal-master1` on a fresh deploy, or the survivor after a failover/resume). It fails if no node, or more than one, claims the primary role.
   - The local failover script (`/usr/local/bin/drbd-failover.sh`) dynamically reassigns this label during promotion and demotion, causing Kubernetes to automatically move the MariaDB pod to the active master node.
   - The pod tolerates node loss for only 60 s (`node.kubernetes.io/not-ready` / `unreachable` `NoExecute` tolerations with `tolerationSeconds: 60`). Kubernetes' default is 300 s, which would leave WordPress without a database for five minutes after a master failure even though the watchdog has already fenced the peer and promoted the survivor. The window is deliberately longer than the 40 s `node-monitor-grace-period`, so a transient blip does not evict the database.
 - **Automated Failover Watchdog (`drbd-failover-watchdog.service`):**

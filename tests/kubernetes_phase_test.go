@@ -43,8 +43,8 @@ func TestKubernetesPhaseRun(t *testing.T) {
 			switch {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
-			case strings.Contains(cmd, "kubectl get nodes --no-headers | grep"):
-				return "4\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
+				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
 			default:
@@ -59,6 +59,12 @@ func TestKubernetesPhaseRun(t *testing.T) {
 
 	if !hasCommand(fake.Commands, master1, `INSTALL_K3S_EXEC="server --cluster-init`) {
 		t.Error("master1 was not initialized with the cluster-init server")
+	}
+	if !hasCommand(fake.Commands, master1, "INSTALL_K3S_SKIP_START=true") {
+		t.Error("master1 install still blocks on systemctl restart")
+	}
+	if !hasCommand(fake.Commands, master1, "systemctl start k3s --no-block") {
+		t.Error("master1 was not started with --no-block")
 	}
 	for _, ip := range []string{"192.168.10.12", "192.168.10.13", "192.168.10.21"} {
 		if got := string(fake.Files[ip]["/root/.k3s-join-token"]); got != "K10test::server:token" {
@@ -135,6 +141,70 @@ func TestKubernetesPhaseRequiresSecrets(t *testing.T) {
 	}
 }
 
+func TestKubernetesPhaseLabelsActualDRBDPrimary(t *testing.T) {
+	cfg := kubernetesConfig(t)
+	cfg.Nodes.Masters[0].DRBDDiskGB = 3
+	cfg.Nodes.Masters[1].DRBDDiskGB = 3
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				if host == "192.168.10.12" {
+					return "Primary/Secondary\n", "", 0, nil
+				}
+				return "Secondary/Primary\n", "", 0, nil
+			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
+				return "K10test::server:token\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
+				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
+				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
+			default:
+				return "", "", 0, nil
+			}
+		},
+	}
+
+	if err := kubernetes.NewPhase(cfg, fake).Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !hasCommand(fake.Commands, "192.168.10.11", "kubectl label node master2 drbd-status=primary") {
+		t.Error("the DRBD primary (master2) was not labeled")
+	}
+	if hasCommand(fake.Commands, "192.168.10.11", "kubectl label node master1 drbd-status=primary") {
+		t.Error("master1 was labeled primary even though DRBD reports master2 as Primary")
+	}
+}
+
+func TestKubernetesPhaseReportsPrimaryLabelFailure(t *testing.T) {
+	cfg := kubernetesConfig(t)
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			if strings.Contains(cmd, "kubectl label node") {
+				return "", "Error from server (NotFound): node not found", 1, nil
+			}
+			switch {
+			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
+				return "K10test::server:token\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
+				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
+				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
+			default:
+				return "", "", 0, nil
+			}
+		},
+	}
+
+	err := kubernetes.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "could not label") {
+		t.Fatalf("Run() = %v, want the primary-label failure", err)
+	}
+	if hasCommand(fake.Commands, "192.168.10.11", "apply -k /tmp/k3s-manifests/overlays/lab") {
+		t.Error("phase continued to deploy workloads after the primary label failed")
+	}
+}
+
 func TestKubernetesPhaseReportsServerJoinFailure(t *testing.T) {
 	cfg := kubernetesConfig(t)
 	fake := &testutil.FakeExecutor{
@@ -145,8 +215,8 @@ func TestKubernetesPhaseReportsServerJoinFailure(t *testing.T) {
 			switch {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
-			case strings.Contains(cmd, "kubectl get nodes --no-headers | grep"):
-				return "4\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
+				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
 			default:

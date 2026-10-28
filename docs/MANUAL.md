@@ -189,7 +189,7 @@ unknown value is rejected with the list of valid phases.
 1. The jumpstart node converges first, so Puppet Server, DNS, Cobbler, DHCP and TFTP are up before any client runs.
 2. Clients converge in parallel with automatic Puppet SSL repair; the window is `deploy.puppet_concurrency` (auto: 4–8 by CPU count, or `PUPPET_CONCURRENCY`). Each node converges once, in phase 04.
 3. `bootstrap-router` gives the router static addresses, IP forwarding and NAT before clients download packages.
-4. DRBD is promoted and mounted on `internal-master1`; K3s then labels that node `drbd-status=primary` so `mariadb-0` can mount the volume.
+4. DRBD is promoted and mounted on `internal-master1`; K3s then resolves the current DRBD primary and labels that node `drbd-status=primary` so `mariadb-0` can mount the volume.
 5. The CMS frontends converge sequentially (the first one creates the WordPress schema); monitoring, UFW and the CA fan out in parallel.
 6. Every remote exit code is checked: a broken DRBD/K3s state aborts the deploy instead of reporting success.
 
