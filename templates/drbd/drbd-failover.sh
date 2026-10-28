@@ -24,7 +24,11 @@ case "${1:-status}" in
       exit 1
     fi
 
-    drbdadm primary "$RESOURCE" || drbdadm primary --force "$RESOURCE"
+    # No --force here. The caller has already confirmed the peer is fenced,
+    # but the local disk must still be UpToDate for DRBD to promote it.
+    # Forcing an Outdated/Inconsistent disk would publish stale data as the
+    # new authority; failing is the safe outcome, and the watchdog retries.
+    drbdadm primary "$RESOURCE"
     echo "  ✔ Node promoted to Primary"
 
     mkdir -p "$MOUNT_POINT"
@@ -35,15 +39,20 @@ case "${1:-status}" in
       echo "  ℹ $MOUNT_POINT was already mounted"
     fi
 
-    # Label local node in Kubernetes as active primary and remove label from peer
+    # Label local node as the active primary and clear stale labels from every
+    # other master.
     export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
     if command -v kubectl &>/dev/null && [ -f "$KUBECONFIG" ]; then
       echo "  [+] Updating availability labels in Kubernetes..."
       LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
-      PEER_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -v "$LOCAL_NODE" | grep "master" | head -n 1 || true)
-      kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite || true
-      if [ -n "$PEER_NODE" ]; then
-        kubectl label node "$PEER_NODE" drbd-status- 2>/dev/null || true
+      if [ -n "$LOCAL_NODE" ]; then
+        kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite || true
+        # Clear the stale label from every other master, not just one peer:
+        # with three control-plane nodes a singular "peer" can miss the old
+        # primary and leave a secondary matching the MariaDB node affinity.
+        for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "master" | grep -vx "$LOCAL_NODE" || true); do
+          kubectl label node "$node" drbd-status- 2>/dev/null || true
+        done
       fi
 
       # Trigger pod reschedule to the new Primary node.
@@ -69,11 +78,33 @@ case "${1:-status}" in
   demote)
     echo "[FAILOVER] Demoting local node to Secondary..."
 
+    # The watchdog treats a local Primary as the active writer and would scale
+    # MariaDB back to one replica while this function is trying to unmount.
+    # Pause it for the duration; the trap restarts it even if a step fails.
+    WATCHDOG_WAS_ACTIVE=0
+    if systemctl is-active --quiet drbd-failover-watchdog.service 2>/dev/null; then
+      WATCHDOG_WAS_ACTIVE=1
+      systemctl stop drbd-failover-watchdog.service 2>/dev/null || true
+    fi
+    restart_watchdog() {
+      if [ "$WATCHDOG_WAS_ACTIVE" = "1" ]; then
+        systemctl start drbd-failover-watchdog.service 2>/dev/null || true
+      fi
+    }
+    trap restart_watchdog EXIT
+
     # Scale down MariaDB pod before unmounting to release storage locks
     if command -v kubectl &>/dev/null; then
       echo "  [+] Scaling down MariaDB pod..."
       kubectl scale statefulset mariadb -n cms --replicas=0 2>/dev/null || true
-      sleep 3
+      # A fixed sleep is not enough: the default termination grace period is
+      # 30s, and unmounting while mariadbd still has the volume open fails.
+      for _ in $(seq 1 30); do
+        if ! kubectl get pod mariadb-0 -n cms >/dev/null 2>&1; then
+          break
+        fi
+        sleep 2
+      done
       echo "  [+] Removing Kubernetes labels..."
       LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
       kubectl label node "$LOCAL_NODE" drbd-status- 2>/dev/null || true

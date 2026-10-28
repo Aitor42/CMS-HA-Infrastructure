@@ -235,16 +235,22 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		return CheckResult{"Phase 04", "K3s & MariaDB Pod", false, "No master node configured"}
 	}
 
-	// stderr is kept (no 2>/dev/null): when the API server is unreachable the
-	// count still reads 0, and the reason has to reach the failure detail
-	// instead of looking like an empty etcd cluster.
-	cmd := `kubectl --request-timeout=10s get nodes; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get pods -n cms | grep mariadb; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers | wc -l`
+	// Query the exact StatefulSet pod, not every pod carrying app=mariadb:
+	// backup and restore CronJob pods share that label and can be Running
+	// while the database itself is Pending or CrashLooping. The etcd listing is
+	// parsed by name below; piping it through `wc -l` would also count a stale
+	// node object left behind by an earlier join.
+	cmd := `kubectl --request-timeout=10s get nodes --no-headers; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.status.phase}' 2>/dev/null || true; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers`
 
-	wantNodes := len(v.cfg.Nodes.Masters) + len(v.cfg.Nodes.Workers)
-	wantEtcd := fmt.Sprintf("%d", len(v.cfg.Nodes.Masters))
+	expectedNodes := make([]config.NodeDetail, 0, len(v.cfg.Nodes.Masters)+len(v.cfg.Nodes.Workers))
+	expectedNodes = append(expectedNodes, v.cfg.Nodes.Masters...)
+	expectedNodes = append(expectedNodes, v.cfg.Nodes.Workers...)
+	wantNodes := len(expectedNodes)
+	wantEtcd := len(v.cfg.Nodes.Masters)
 
 	readyNodes := 0
-	etcdOut := "0"
+	etcdMembers := 0
+	mariadbRunning := false
 	problem := ""
 	pass := false
 
@@ -253,29 +259,49 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 	// shot would fail the whole verification for that blip, so retry within a
 	// bounded budget, mirroring the deploy phase's own etcd check.
 	_ = retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, MaxInterval: 6 * time.Second, Timeout: 90 * time.Second}, func(attemptCtx context.Context) error {
-		out, errOut, _, err := v.ssh.RunCommand(attemptCtx, v.cfg.Nodes.Masters[0].IP, cmd)
+		out, errOut, code, err := v.ssh.RunCommand(attemptCtx, v.cfg.Nodes.Masters[0].IP, cmd)
 		parts := strings.Split(out, "---CMS_DELIM---")
 		nodesOut := out
 		podOut := ""
-		etcdOut = ""
+		etcdOut := ""
 		if len(parts) >= 2 {
 			nodesOut = parts[0]
-			podOut = parts[1]
+			podOut = strings.TrimSpace(parts[1])
 		}
 		if len(parts) >= 3 {
-			etcdOut = strings.TrimSpace(parts[2])
+			etcdOut = parts[2]
 		}
 
-		// The cluster is only healthy when every configured node is Ready: a
-		// node that vanished from the output must not pass just because the
-		// remaining ones are fine, and "NotReady" contains "Ready".
-		readyNodes = countReadyNodes(nodesOut)
-		// etcd must report one member per configured master, otherwise the
+		ready := readyNodeNames(nodesOut)
+		readyNodes = 0
+		var missingNodes []string
+		for _, node := range expectedNodes {
+			if ready[node.Name] || ready[node.FQDN] {
+				readyNodes++
+			} else {
+				missingNodes = append(missingNodes, node.Name)
+			}
+		}
+
+		// etcd must report every configured master by name, otherwise the
 		// cluster has no real quorum even though the nodes look Ready. K3s
 		// keeps etcd inside the server process, so members are the nodes
-		// carrying the etcd role label rather than kube-system pods.
-		pass = err == nil && wantNodes > 0 && readyNodes == wantNodes &&
-			strings.Contains(podOut, "Running") && etcdOut == wantEtcd
+		// carrying the etcd role label rather than kube-system pods. Extra
+		// stale node objects are tolerated.
+		members := etcdMemberNames(etcdOut)
+		etcdMembers = 0
+		var missingEtcd []string
+		for _, node := range v.cfg.Nodes.Masters {
+			if members[node.Name] || members[node.FQDN] {
+				etcdMembers++
+			} else {
+				missingEtcd = append(missingEtcd, node.Name)
+			}
+		}
+
+		mariadbRunning = podOut == "Running"
+		pass = err == nil && code == 0 && wantNodes > 0 &&
+			len(missingNodes) == 0 && len(missingEtcd) == 0 && mariadbRunning
 		if pass {
 			problem = ""
 			return nil
@@ -284,12 +310,16 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		switch {
 		case err != nil:
 			problem = fmt.Sprintf("ssh: %v", err)
-		case readyNodes != wantNodes:
-			problem = fmt.Sprintf("only %d of %d nodes Ready", readyNodes, wantNodes)
-		case !strings.Contains(podOut, "Running"):
-			problem = "mariadb pod is not Running"
+		case code != 0:
+			problem = fmt.Sprintf("kubectl failed with exit code %d", code)
+		case len(missingNodes) > 0:
+			problem = fmt.Sprintf("nodes not Ready: %s", strings.Join(missingNodes, ", "))
+		case len(missingEtcd) > 0:
+			problem = fmt.Sprintf("etcd members missing: %s", strings.Join(missingEtcd, ", "))
+		case !mariadbRunning:
+			problem = fmt.Sprintf("mariadb-0 is not Running (phase %q)", podOut)
 		default:
-			problem = "etcd query failed or returned no members"
+			problem = "cluster check failed"
 		}
 		if msg := strings.TrimSpace(errOut); msg != "" {
 			// kubectl repeats the same message for each call in the session.
@@ -299,11 +329,41 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		return fmt.Errorf("%s", problem)
 	})
 
-	details := fmt.Sprintf("ready nodes: %d/%d, etcd members: %s", readyNodes, wantNodes, etcdOut)
+	details := fmt.Sprintf("ready nodes: %d/%d, etcd members: %d/%d, MariaDB: %t", readyNodes, wantNodes, etcdMembers, wantEtcd, mariadbRunning)
 	if !pass && problem != "" {
 		details += "; " + problem
 	}
 	return CheckResult{"Phase 04", "K3s & MariaDB Pod", pass, details}
+}
+
+// readyNodeNames parses `kubectl get nodes --no-headers` and returns the names
+// whose STATUS column starts with Ready. "NotReady" contains "Ready", so the
+// prefix check is deliberate; cordoned nodes still count.
+func readyNodeNames(out string) map[string]bool {
+	ready := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasPrefix(fields[1], "Ready") {
+			continue
+		}
+		ready[fields[0]] = true
+	}
+	return ready
+}
+
+// etcdMemberNames returns the node names carrying the etcd role label. The
+// name is enough; a stale object with the label must not make a missing member
+// look present, so callers compare against the configured names.
+func etcdMemberNames(out string) map[string]bool {
+	members := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		members[fields[0]] = true
+	}
+	return members
 }
 
 func (v *Verifier) phase05(ctx context.Context) CheckResult {

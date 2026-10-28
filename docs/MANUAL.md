@@ -775,8 +775,8 @@ Location: `/etc/systemd/system/drbd-failover-watchdog.service` and `/usr/local/b
 ```ini
 [Unit]
 Description=DRBD Automatic Failover Watchdog Daemon
-After=network-online.target drbd.service
-Wants=network-online.target drbd.service
+After=network-online.target drbd.service drbd-cms-boot.service
+Wants=network-online.target drbd.service drbd-cms-boot.service
 Before=k3s.service
 
 [Service]

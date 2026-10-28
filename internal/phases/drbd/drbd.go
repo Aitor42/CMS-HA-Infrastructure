@@ -20,6 +20,10 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// replicationWait is a variable so tests can exercise the failure path without
+// waiting five minutes. Production keeps the bounded retry budget.
+var replicationWait = retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}
+
 // Phase implements the DRBD setup phase.
 type Phase struct {
 	cfg  *config.Config
@@ -63,18 +67,24 @@ func (p *Phase) Run(ctx context.Context) error {
 	if err := p.initDRBDMetadata(ctx, drbdPair); err != nil {
 		return err
 	}
-	if err := p.promotePrimary(ctx, master1); err != nil {
+	primary, err := p.resolvePrimary(ctx, drbdPair)
+	if err != nil {
 		return err
 	}
-	p.waitForReplication(ctx, master1)
-	if err := p.formatAndMount(ctx, master1); err != nil {
+	if err := p.waitForReplication(ctx, primary); err != nil {
+		return err
+	}
+	if err := p.formatAndMount(ctx, primary); err != nil {
 		return err
 	}
 	p.updateFstab(ctx, drbdPair)
-	if err := p.deployFailoverScripts(ctx, drbdPair); err != nil {
+	// Install the boot guard before the watchdog unit is enabled: the watchdog
+	// has Wants=drbd-cms-boot.service, and starting it on a first deploy must
+	// not race a missing unit. The guard is idempotent and runs again at boot.
+	if err := p.deployBootRoleResolution(ctx, master1, master2); err != nil {
 		return err
 	}
-	if err := p.deployBootRoleResolution(ctx, master1, master2); err != nil {
+	if err := p.deployFailoverScripts(ctx, drbdPair); err != nil {
 		return err
 	}
 	p.deployTmpfiles(ctx, drbdPair)
@@ -152,12 +162,15 @@ func (p *Phase) initDRBDMetadata(ctx context.Context, pair []config.NodeDetail) 
 	logging.Info("Initializing DRBD metadata in parallel...")
 	// create-md fails when metadata already exists (expected on re-runs): that
 	// is confirmed with dump-md, and `set -e` surfaces every other error.
+	// Do NOT pass --force here: on a re-run it would overwrite the metadata of
+	// both peers, discarding the replication UUID/history and potentially
+	// forcing a full resync (or, worse, making two stale disks look fresh).
 	// The script runs through RunScript inside RunParallelFunc so drbdadm's
 	// stderr (which reports the expected "already exists" condition) is kept;
 	// plain RunParallel only surfaces stdout.
 	initScript := `set -e
 modprobe drbd
-if ! drbdadm create-md cms_data --force; then
+if ! drbdadm create-md cms_data; then
     drbdadm dump-md cms_data >/dev/null 2>&1 || {
         echo "drbdadm create-md failed and no existing metadata was found" >&2
         exit 1
@@ -181,44 +194,120 @@ drbdadm up cms_data
 	return nil
 }
 
-// promotePrimary makes master1 the single writer once both disks are ready.
-func (p *Phase) promotePrimary(ctx context.Context, master1 config.NodeDetail) error {
-	logging.Info("Promoting Master 1 to Primary...")
-	_, _, code, err := p.pool.RunCommand(ctx, master1.IP, "drbdadm primary cms_data --force")
-	if err != nil || code != 0 {
-		return fmt.Errorf("failed to promote %s to DRBD Primary: %v (exit code %d)", master1.IP, err, code)
+// resolvePrimary returns the node that already owns the Primary role, or
+// promotes one safely when neither peer does. A resumed deploy after a
+// failover must not force master1 to Primary while master2 is still the
+// writer: that is a split brain. The same applies to a cleanly stopped pair
+// whose disks are both UpToDate; promoting with --force there is unnecessary
+// and discards DRBD's consistency checks.
+func (p *Phase) resolvePrimary(ctx context.Context, pair []config.NodeDetail) (config.NodeDetail, error) {
+	type peerState struct {
+		node config.NodeDetail
+		role string
+		disk string
 	}
-	return nil
+
+	states := make([]peerState, 0, len(pair))
+	var primaries []peerState
+	for _, node := range pair {
+		roleOut, roleErr, code, err := p.pool.RunCommand(ctx, node.IP, "drbdadm role cms_data")
+		if err != nil || code != 0 {
+			return config.NodeDetail{}, fmt.Errorf("read DRBD role on %s (exit %d): %v %s", node.Name, code, err, strings.TrimSpace(roleErr))
+		}
+		role := strings.TrimSpace(strings.SplitN(roleOut, "/", 2)[0])
+
+		diskOut, _, diskCode, diskErr := p.pool.RunCommand(ctx, node.IP, "drbdadm dstate cms_data")
+		disk := ""
+		if diskErr == nil && diskCode == 0 {
+			disk = strings.TrimSpace(strings.SplitN(diskOut, "/", 2)[0])
+		}
+
+		state := peerState{node: node, role: role, disk: disk}
+		states = append(states, state)
+		if role == "Primary" {
+			primaries = append(primaries, state)
+		}
+	}
+
+	switch len(primaries) {
+	case 1:
+		// An existing Primary is authoritative, but only if its local disk is
+		// healthy. A Primary with an Inconsistent/Outdated disk would be
+		// mounted below and served as if it were the latest copy.
+		if primaries[0].disk != "" && primaries[0].disk != "UpToDate" {
+			return config.NodeDetail{}, fmt.Errorf("refusing to use existing DRBD Primary %s: local disk state is %s, not UpToDate", primaries[0].node.Name, primaries[0].disk)
+		}
+		logging.Info("%s already holds the DRBD Primary role; leaving the role untouched.", primaries[0].node.Name)
+		return primaries[0].node, nil
+	case 2:
+		names := make([]string, 0, len(primaries))
+		for _, state := range primaries {
+			names = append(names, state.node.Name)
+		}
+		return config.NodeDetail{}, fmt.Errorf("refusing to promote: both DRBD peers report Primary (%s); resolve the split brain first", strings.Join(names, ", "))
+	}
+
+	// Neither peer is Primary. Prefer a disk that is already UpToDate so the
+	// promotion does not need --force; if neither is (a brand-new pair), fall
+	// back to master1 with --force to seed the initial sync.
+	chosen := states[0]
+	for _, state := range states {
+		if state.disk == "UpToDate" {
+			chosen = state
+			break
+		}
+	}
+
+	promoteCmd := "drbdadm primary cms_data"
+	if chosen.disk != "UpToDate" {
+		logging.Warn("No DRBD peer reports an UpToDate disk; forcing the initial promotion on %s.", chosen.node.Name)
+		promoteCmd += " --force"
+	}
+
+	logging.Info("Promoting %s to DRBD Primary...", chosen.node.Name)
+	if _, _, code, err := p.pool.RunCommand(ctx, chosen.node.IP, promoteCmd); err != nil || code != 0 {
+		return config.NodeDetail{}, fmt.Errorf("failed to promote %s to DRBD Primary: %v (exit code %d)", chosen.node.Name, err, code)
+	}
+
+	roleOut, roleErr, code, err := p.pool.RunCommand(ctx, chosen.node.IP, "drbdadm role cms_data")
+	if err != nil || code != 0 || !strings.HasPrefix(strings.TrimSpace(roleOut), "Primary") {
+		return config.NodeDetail{}, fmt.Errorf("promotion command succeeded but %s does not report Primary (exit %d): %v %s", chosen.node.Name, code, err, strings.TrimSpace(roleErr))
+	}
+	return chosen.node, nil
 }
 
 // waitForReplication waits until the peer is connected and its disk is
-// UpToDate (or at least syncing). A connection alone is not enough.
-func (p *Phase) waitForReplication(ctx context.Context, master1 config.NodeDetail) {
+// UpToDate (or at least syncing). A connection alone is not enough. This is a
+// gate: a deploy that cannot establish replication must not be reported as
+// successful, because the next failover would have no replica to promote.
+func (p *Phase) waitForReplication(ctx context.Context, primary config.NodeDetail) error {
 	logging.Info("Waiting for DRBD replication to start/sync...")
-	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
-		out, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "drbdadm status cms_data")
-		if err != nil {
-			return err
+	err := retry.DoContext(ctx, replicationWait, func(attemptCtx context.Context) error {
+		out, errOut, code, err := p.pool.RunCommand(attemptCtx, primary.IP, "drbdadm status cms_data")
+		if err != nil || code != 0 {
+			return fmt.Errorf("drbdadm status failed (exit %d): %v %s", code, err, strings.TrimSpace(errOut))
 		}
 		// "Established"/"Connected" is only the connection state: the peer
 		// disk must also be UpToDate (or at least syncing) before the
 		// replica can be considered ready. A connection alone is not.
 		connected := strings.Contains(out, "Established") || strings.Contains(out, "Connected")
+		localReady := strings.Contains(out, "disk:UpToDate")
 		diskReady := strings.Contains(out, "peer-disk:UpToDate") || strings.Contains(out, "ds:UpToDate") || strings.Contains(out, "SyncTarget")
-		if !connected || !diskReady {
-			return fmt.Errorf("replication not ready: %s", out)
+		if !strings.Contains(out, "role:Primary") || !localReady || !connected || !diskReady {
+			return fmt.Errorf("replication not ready: %s", strings.TrimSpace(out))
 		}
 		return nil
 	})
-
 	if err != nil {
-		logging.Warn("DRBD replication sync might still be ongoing: %v", err)
+		return fmt.Errorf("DRBD replication did not become ready on %s: %w", primary.Name, err)
 	}
+	return nil
 }
 
-// formatAndMount initialises the filesystem once and mounts it on master1.
-func (p *Phase) formatAndMount(ctx context.Context, master1 config.NodeDetail) error {
-	logging.Info("Formatting and mounting DRBD volume on Master 1...")
+// formatAndMount initialises the filesystem once and mounts it on the current
+// DRBD Primary.
+func (p *Phase) formatAndMount(ctx context.Context, primary config.NodeDetail) error {
+	logging.Info("Formatting and mounting DRBD volume on %s...", primary.Name)
 	mountCmd := `
 mkdir -p /mnt/data/mariadb
 if ! blkid /dev/drbd0 >/dev/null 2>&1; then
@@ -228,15 +317,15 @@ if ! mountpoint -q /mnt/data/mariadb; then
     mount /dev/drbd0 /mnt/data/mariadb
 fi
 `
-	if _, err := p.pool.RunScript(ctx, master1.IP, mountCmd); err != nil {
-		return fmt.Errorf("failed to format and mount DRBD volume on master1: %w", err)
+	if _, err := p.pool.RunScript(ctx, primary.IP, mountCmd); err != nil {
+		return fmt.Errorf("failed to format and mount DRBD volume on %s: %w", primary.Name, err)
 	}
 	return nil
 }
 
 // updateFstab records the noauto mount on both peers. A failure is logged but
-// not fatal: the volume is already mounted on master1 and the boot unit only
-// needs the directory to exist.
+// not fatal: the volume is already mounted on the current Primary and the boot
+// unit only needs the directory to exist.
 func (p *Phase) updateFstab(ctx context.Context, pair []config.NodeDetail) {
 	logging.Info("Updating fstab and mount directory on masters...")
 	fstabCmd := "mkdir -p /mnt/data/mariadb && (grep -q '/dev/drbd0' /etc/fstab || echo '/dev/drbd0 /mnt/data/mariadb ext4 defaults,noauto 0 0' >> /etc/fstab)"
@@ -316,8 +405,7 @@ ExecStart=/usr/local/sbin/drbd-boot.sh
 WantedBy=multi-user.target
 `, m.promote)
 		if err := p.pool.CopyContent(ctx, m.node.IP, []byte(unit), "/etc/systemd/system/drbd-cms-boot.service", 0644); err != nil {
-			logging.Warn("Failed to upload drbd-cms-boot.service to %s: %v", m.node.IP, err)
-			continue
+			return fmt.Errorf("failed to deploy drbd-cms-boot.service to %s: %w", m.node.IP, err)
 		}
 		// Retire the old promote-only unit: if both were enabled the old one
 		// could promote before the stale-Primary guard had run.

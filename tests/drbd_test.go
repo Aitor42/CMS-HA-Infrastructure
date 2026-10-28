@@ -138,6 +138,47 @@ func TestDRBD_WatchdogScriptIntegrity(t *testing.T) {
 	}
 }
 
+func TestDRBD_FailoverScriptRefusesForcedPromotionAndClearsAllMasters(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-failover.sh: %v", err)
+	}
+	script := string(content)
+	if strings.Contains(script, "drbdadm primary --force") {
+		t.Error("failover promotion must not force an Outdated/Inconsistent disk to Primary")
+	}
+	if !strings.Contains(script, `for node in $(kubectl get nodes`) || !strings.Contains(script, `grep -vx "$LOCAL_NODE"`) {
+		t.Error("failover promotion must clear the primary label from every other master")
+	}
+}
+
+func TestDRBD_FailoverDemotePausesWatchdogAndWaitsForThePod(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-failover.sh: %v", err)
+	}
+	script := string(content)
+	if !strings.Contains(script, "systemctl stop drbd-failover-watchdog.service") {
+		t.Error("demote must pause the watchdog so it cannot scale MariaDB back up mid-demote")
+	}
+	if !strings.Contains(script, "trap restart_watchdog EXIT") {
+		t.Error("demote must restart the watchdog even when a step fails")
+	}
+	if !strings.Contains(script, "kubectl get pod mariadb-0 -n cms") {
+		t.Error("demote must wait for mariadb-0 to release the volume before unmounting")
+	}
+}
+
+func TestDRBD_WatchdogRestoresMariaDBReplicas(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-watchdog.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-watchdog.sh: %v", err)
+	}
+	if !strings.Contains(string(content), "kubectl scale statefulset mariadb -n cms --replicas=1") {
+		t.Error("watchdog must scale MariaDB back to one replica when the local node is Primary")
+	}
+}
+
 func TestDRBD_WatchdogServiceDefinition(t *testing.T) {
 	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover-watchdog.service")
 	if err != nil {
@@ -149,7 +190,8 @@ func TestDRBD_WatchdogServiceDefinition(t *testing.T) {
 	expectedDirectives := []string{
 		"[Unit]",
 		"Description=DRBD Automatic Failover Watchdog Daemon",
-		"After=network-online.target drbd.service",
+		"After=network-online.target drbd.service drbd-cms-boot.service",
+		"Wants=network-online.target drbd.service drbd-cms-boot.service",
 		"Before=k3s.service",
 		"[Service]",
 		"Type=simple",

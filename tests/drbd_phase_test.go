@@ -38,10 +38,22 @@ func TestDRBDPhaseRun(t *testing.T) {
 	cfg := drbdConfig()
 	master1 := cfg.Nodes.Masters[0].IP
 	master2 := cfg.Nodes.Masters[1].IP
+	promoted := false
 	fake := &testutil.FakeExecutor{
-		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
-			if strings.Contains(cmd, "drbdadm status cms_data") {
-				return "cms_data role:Primary\n  master2 role:Secondary\n    replication:Established\n    peer-disk:UpToDate\n", "", 0, nil
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm primary cms_data --force"):
+				promoted = true
+				return "", "", 0, nil
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				if host == master1 && promoted {
+					return "Primary/Unknown\n", "", 0, nil
+				}
+				return "Secondary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				return "Inconsistent/Inconsistent\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm status cms_data"):
+				return "cms_data role:Primary\n  disk:UpToDate\n  master2 role:Secondary\n    replication:Established\n    peer-disk:UpToDate\n", "", 0, nil
 			}
 			return "", "", 0, nil
 		},
@@ -64,8 +76,11 @@ func TestDRBDPhaseRun(t *testing.T) {
 		if len(fake.Files[ip]["/etc/systemd/system/drbd-failover-watchdog.service"]) == 0 {
 			t.Errorf("%s did not receive the watchdog unit", ip)
 		}
-		if !hasScript(fake.Scripts, ip, "drbdadm create-md cms_data --force") {
+		if !hasScript(fake.Scripts, ip, "if ! drbdadm create-md cms_data; then") {
 			t.Errorf("%s never initialized DRBD metadata", ip)
+		}
+		if hasScript(fake.Scripts, ip, "drbdadm create-md cms_data --force") {
+			t.Errorf("%s must not overwrite existing DRBD metadata on a re-run", ip)
 		}
 		if !hasCommand(fake.Commands, ip, "modinfo drbd") {
 			t.Errorf("%s did not check for the DRBD kernel module", ip)
@@ -101,6 +116,146 @@ func TestDRBDPhaseRun(t *testing.T) {
 	}
 	if !strings.Contains(boot2, "Environment=PROMOTE=0") {
 		t.Errorf("master2 boot unit = %q, want PROMOTE=0", boot2)
+	}
+}
+
+func TestDRBDPhaseLeavesExistingPrimaryInPlace(t *testing.T) {
+	cfg := drbdConfig()
+	master1 := cfg.Nodes.Masters[0].IP
+	master2 := cfg.Nodes.Masters[1].IP
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				if host == master2 {
+					return "Primary/Unknown\n", "", 0, nil
+				}
+				return "Secondary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				return "UpToDate/UpToDate\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm status cms_data"):
+				return "cms_data role:Primary\n  disk:UpToDate\n  master1 role:Secondary\n    replication:Established\n    peer-disk:UpToDate\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	if err := drbd.NewPhase(cfg, fake).Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if hasCommand(fake.Commands, master1, "drbdadm primary cms_data") {
+		t.Error("master1 must not be promoted while master2 is already Primary")
+	}
+	if !hasCommand(fake.Commands, master2, "drbdadm status cms_data") {
+		t.Error("replication was not checked on the existing Primary")
+	}
+	if !hasScript(fake.Scripts, master2, "mount /dev/drbd0 /mnt/data/mariadb") {
+		t.Error("the existing Primary was not mounted")
+	}
+	if hasScript(fake.Scripts, master1, "mount /dev/drbd0 /mnt/data/mariadb") {
+		t.Error("the Secondary must not be mounted")
+	}
+}
+
+func TestDRBDPhaseRejectsAnExistingPrimaryWithAStaleDisk(t *testing.T) {
+	cfg := drbdConfig()
+	master1 := cfg.Nodes.Masters[0].IP
+	master2 := cfg.Nodes.Masters[1].IP
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				if host == master2 {
+					return "Primary/Unknown\n", "", 0, nil
+				}
+				return "Secondary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				if host == master2 {
+					return "Inconsistent/Inconsistent\n", "", 0, nil
+				}
+				return "UpToDate/UpToDate\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	err := drbd.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "local disk state is Inconsistent") {
+		t.Fatalf("Run() = %v, want the stale-primary refusal", err)
+	}
+	if hasScript(fake.Scripts, master2, "mount /dev/drbd0 /mnt/data/mariadb") {
+		t.Error("a Primary with a stale disk must not be mounted")
+	}
+	if hasScript(fake.Scripts, master1, "mount /dev/drbd0 /mnt/data/mariadb") {
+		t.Error("the Secondary must not be mounted")
+	}
+}
+
+func TestDRBDPhasePromotesAnUpToDatePeerWithoutForce(t *testing.T) {
+	cfg := drbdConfig()
+	master1 := cfg.Nodes.Masters[0].IP
+	master2 := cfg.Nodes.Masters[1].IP
+	promoted := false
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm primary cms_data"):
+				if strings.Contains(cmd, "--force") {
+					t.Errorf("unexpected forced promotion: %s", cmd)
+				}
+				if host != master2 {
+					t.Errorf("promotion ran on %s, want master2", host)
+				}
+				promoted = true
+				return "", "", 0, nil
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				if host == master2 && promoted {
+					return "Primary/Unknown\n", "", 0, nil
+				}
+				return "Secondary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				if host == master2 {
+					return "UpToDate/UpToDate\n", "", 0, nil
+				}
+				return "Inconsistent/Inconsistent\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm status cms_data"):
+				return "cms_data role:Primary\n  disk:UpToDate\n  master1 role:Secondary\n    replication:Established\n    peer-disk:UpToDate\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	if err := drbd.NewPhase(cfg, fake).Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !promoted {
+		t.Error("master2 was not promoted")
+	}
+	if !hasScript(fake.Scripts, master2, "mount /dev/drbd0 /mnt/data/mariadb") {
+		t.Error("the UpToDate peer was not mounted")
+	}
+	if hasScript(fake.Scripts, master1, "mount /dev/drbd0 /mnt/data/mariadb") {
+		t.Error("the Inconsistent peer must not be mounted")
+	}
+}
+
+func TestDRBDPhaseRejectsSplitBrain(t *testing.T) {
+	cfg := drbdConfig()
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				return "Primary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				return "UpToDate/UpToDate\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	err := drbd.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "both DRBD peers report Primary") {
+		t.Fatalf("Run() = %v, want a split-brain refusal", err)
 	}
 }
 

@@ -113,6 +113,11 @@ while true; do
         kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite --request-timeout=3s 2>/dev/null || true
       fi
 
+      # A demote scales the StatefulSet to zero; make sure a node that is
+      # Primary again (boot, manual promotion, or a previous failed failover)
+      # brings the database back instead of leaving it scaled down.
+      kubectl scale statefulset mariadb -n cms --replicas=1 --request-timeout=3s 2>/dev/null || true
+
       # Verify MariaDB pod is scheduled on this node
       CURRENT_POD_NODE=$(kubectl get pod mariadb-0 -n cms --request-timeout=3s -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
       if [ -n "$CURRENT_POD_NODE" ] && [ "$CURRENT_POD_NODE" != "$LOCAL_NODE" ]; then

@@ -75,6 +75,10 @@ spec:
           volumeMounts:
             - name: mariadb-data
               mountPath: /var/lib/mysql
+            - name: mariadb-config
+              mountPath: /etc/mysql/conf.d/custom.cnf
+              subPath: custom.cnf
+              readOnly: true
           livenessProbe:
             exec:
               command:
@@ -95,3 +99,6 @@ spec:
         - name: mariadb-data
           persistentVolumeClaim:
             claimName: mariadb-pvc
+        - name: mariadb-config
+          configMap:
+            name: mariadb-config

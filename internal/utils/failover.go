@@ -372,8 +372,12 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	// worker loss must not do is take the database or the CMS down, so assert
 	// exactly that instead of a reschedule this design never performs.
 	if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
-		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "kubectl --request-timeout=10s get pods -n cms | grep mariadb")
-		return err == nil && strings.Contains(out, "Running")
+		// Query mariadb-0 by name: `grep mariadb` also matches the backup and
+		// restore CronJob pods, so a running backup could hide a database that
+		// is actually down.
+		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP,
+			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.status.phase}'")
+		return err == nil && strings.TrimSpace(out) == "Running"
 	}) {
 		pass = false
 		logging.Warn("MariaDB pod is not Running after worker1 was shut down")

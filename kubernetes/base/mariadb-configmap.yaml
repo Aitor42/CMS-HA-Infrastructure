@@ -1,0 +1,18 @@
+# mariadb-configmap.yaml
+# InnoDB settings for the DRBD-backed data directory.
+#
+# Native AIO (io_uring) is not reliable on DRBD+qcow2 block devices and can
+# corrupt ibdata1 during initialisation; fsync flushing is the conservative
+# choice for this storage stack. The StatefulSet mounts this file at
+# /etc/mysql/conf.d/custom.cnf.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-config
+  namespace: cms
+data:
+  custom.cnf: |
+    [mysqld]
+    innodb_use_native_aio=0
+    innodb_flush_method=fsync
+    innodb_flush_log_at_trx_commit=2

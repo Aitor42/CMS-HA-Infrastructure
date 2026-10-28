@@ -1,6 +1,52 @@
 package verify
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
+)
+
+func TestPhase04AcceptsConfiguredNodesAndTheMariaDBPod(t *testing.T) {
+	cfg := &config.Config{
+		Nodes: config.NodesConfig{
+			Masters: []config.NodeDetail{{Name: "m1", IP: "192.168.10.11"}},
+			Workers: []config.NodeDetail{{Name: "w1", IP: "192.168.10.13"}},
+		},
+	}
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			if strings.Contains(cmd, "---CMS_DELIM---") {
+				return "m1 Ready control-plane,etcd\nw1 Ready worker\nstale Ready worker\n" +
+					"---CMS_DELIM---\nRunning\n---CMS_DELIM---\n" +
+					"m1 Ready control-plane,etcd\nstale Ready control-plane,etcd\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	res := v.phase04(t.Context())
+	if !res.Pass {
+		t.Fatalf("phase04() = %+v, want a pass despite the stale node object", res)
+	}
+}
+
+func TestReadyNodeNames(t *testing.T) {
+	got := readyNodeNames("m1 Ready control-plane\nm2 NotReady control-plane\nm3 Ready,SchedulingDisabled worker\n")
+	if !got["m1"] || got["m2"] || !got["m3"] {
+		t.Fatalf("readyNodeNames() = %v", got)
+	}
+}
+
+func TestEtcdMemberNames(t *testing.T) {
+	got := etcdMemberNames("m1 Ready control-plane,etcd\nstale Ready control-plane,etcd\n")
+	if !got["m1"] || !got["stale"] || len(got) != 2 {
+		t.Fatalf("etcdMemberNames() = %v", got)
+	}
+}
 
 func TestCountReadyNodes(t *testing.T) {
 	tests := []struct {
