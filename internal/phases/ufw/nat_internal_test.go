@@ -179,6 +179,29 @@ func TestConfigureNATUploadsAndInjectsIdempotently(t *testing.T) {
 	}
 }
 
+func TestConfigureNATDoesNotDeleteForeignNATTable(t *testing.T) {
+	fake := &testutil.FakeExecutor{}
+	if _, err := ConfigureNAT(t.Context(), fake, testRouterIP, testNATSpec(), false); err != nil {
+		t.Fatalf("ConfigureNAT() = %v", err)
+	}
+	var inject string
+	for _, command := range fake.Commands {
+		if strings.Contains(command.Cmd, "cp /etc/ufw/before.rules") {
+			inject = command.Cmd
+			break
+		}
+	}
+	if inject == "" {
+		t.Fatal("ConfigureNAT() did not run the injection script")
+	}
+	if strings.Contains(inject, "sed -i '/^\\*nat/") {
+		t.Error("ConfigureNAT() still deletes any *nat table instead of only its managed block")
+	}
+	if !strings.Contains(inject, "refusing to delete an unmanaged *nat table") {
+		t.Error("ConfigureNAT() does not refuse to delete a foreign *nat table")
+	}
+}
+
 func TestConfigureNATLoadsLiveTableWhenRequested(t *testing.T) {
 	fake := &testutil.FakeExecutor{}
 	if _, err := ConfigureNAT(t.Context(), fake, testRouterIP, testNATSpec(), true); err != nil {

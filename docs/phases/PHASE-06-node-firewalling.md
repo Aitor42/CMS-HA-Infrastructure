@@ -31,6 +31,7 @@ Each node has UFW configured with:
 | **internal-storage** | 22, 111, 2049, 9100 | SSH, RPCbind, NFS (from Main subnet), node_exporter |
 | **main-lb1/2** | 22, 80, 443, 9100, 9113, 112 | SSH, HTTP, HTTPS, node_exporter, nginx_exporter, VRRP (keepalived) |
 | **main-cms1/2** | 22, 80, 9100, 9117 | SSH, Apache, node_exporter, apache_exporter |
+| **jumpstart** | 22, 80, 443, 25151, 8140, 53, 123/udp, 69/udp, 67/udp (enp1s0/enp2s0), 2049, 111, 8443 | SSH, Cobbler/Puppet/DNS/NTP/TFTP, DHCP on the two provisioning NICs, NFS/RPC, step-ca; provisioning services are scoped to the Internal/Main subnets, not the WAN |
 
 ### Implementation
 

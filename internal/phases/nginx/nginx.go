@@ -57,7 +57,7 @@ func (p *Phase) Run(ctx context.Context) error {
 			continue
 		}
 		logging.Info("Converging CMS frontend %s (%s)...", cms.Name, cms.IP)
-		if _, _, err := phases.RunPuppetAgent(ctx, p.pool, cms.IP, cms.Name); err != nil {
+		if _, _, err := phases.RunPuppetAgentCmd(ctx, p.pool, cms.IP, cms.Name, phases.PuppetAgentCommandWithService("")); err != nil {
 			return err
 		}
 	}
@@ -98,6 +98,15 @@ func (p *Phase) Run(ctx context.Context) error {
 	for _, r := range resMount {
 		if r.Err != nil || r.ExitCode != 0 {
 			return fmt.Errorf("nfs mount verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
+		}
+	}
+
+	logging.Info("Verifying NFS uploads are writable by Apache and root...")
+	const uploadWriteCheck = "sudo -u www-data bash -c 'touch /var/www/html/wp-content/uploads/.cms-ha-www-data-test && rm -f /var/www/html/wp-content/uploads/.cms-ha-www-data-test' && sudo -H bash -c 'touch /var/www/html/wp-content/uploads/.cms-ha-root-test && rm -f /var/www/html/wp-content/uploads/.cms-ha-root-test'"
+	resUpload := p.pool.RunParallel(ctx, cmsIPs, uploadWriteCheck)
+	for _, r := range resUpload {
+		if r.Err != nil || r.ExitCode != 0 {
+			return fmt.Errorf("nfs upload write verification failed on %s (exit %d): %v", r.Host, r.ExitCode, r.Err)
 		}
 	}
 

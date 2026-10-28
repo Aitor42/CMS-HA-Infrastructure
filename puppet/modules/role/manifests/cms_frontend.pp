@@ -222,7 +222,7 @@ class role::cms_frontend {
   # WORDPRESS — Download and extract (idempotent via creates guard)
   # ---------------------------------------------------------------------------
   exec { 'wordpress-download':
-    command => '/bin/rm -f /tmp/wordpress-latest.tar.gz && /usr/bin/wget -q --tries=3 -O /tmp/wordpress-latest.tar.gz https://wordpress.org/latest.tar.gz',
+    command => '/bin/rm -f /tmp/wordpress-latest.tar.gz && /usr/bin/wget -q --timeout=30 --tries=3 -O /tmp/wordpress-latest.tar.gz https://wordpress.org/latest.tar.gz',
     unless  => '/bin/tar -tzf /tmp/wordpress-latest.tar.gz >/dev/null 2>&1',
     require => Package['wget'],
   }
@@ -233,8 +233,11 @@ class role::cms_frontend {
     require => Exec['wordpress-download'],
   }
 
+  # Copy over the tree instead of deleting /var/www/html first. The uploads
+  # directory is an NFS mount and wp-config.php contains generated secrets;
+  # a re-run of this resource must not wipe either of them.
   exec { 'wordpress-deploy':
-    command => '/bin/rm -rf /var/www/html/* && /bin/cp -a /tmp/wordpress/. /var/www/html/ && \
+    command => '/bin/cp -a /tmp/wordpress/. /var/www/html/ && \
                 /bin/chown -R www-data:www-data /var/www/html/',
     creates => '/var/www/html/wp-config-sample.php',
     require => Exec['wordpress-extract'],
@@ -258,15 +261,15 @@ class role::cms_frontend {
   }
 
   exec { 'wordpress-config-db-name':
-    command => "/bin/sed -i \"s/database_name_here/wordpress/\" /var/www/html/wp-config.php",
-    unless  => "/usr/bin/grep -q \"define.*DB_NAME.*'wordpress'\" /var/www/html/wp-config.php",
-    require => Exec['wordpress-config-create'],
+    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py configure-db-name',
+    unless  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py check-db-name',
+    require => [Exec['wordpress-config-create'], File['/usr/local/sbin/cms-ha-configure-wordpress.py']],
   }
 
   exec { 'wordpress-config-db-user':
-    command => "/bin/sed -i \"s/username_here/wp_user/\" /var/www/html/wp-config.php",
-    unless  => "/usr/bin/grep -q \"define.*DB_USER.*'wp_user'\" /var/www/html/wp-config.php",
-    require => Exec['wordpress-config-create'],
+    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py configure-db-user',
+    unless  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py check-db-user',
+    require => [Exec['wordpress-config-create'], File['/usr/local/sbin/cms-ha-configure-wordpress.py']],
   }
 
   exec { 'wordpress-config-db-pass':
@@ -276,9 +279,9 @@ class role::cms_frontend {
   }
 
   exec { 'wordpress-config-db-host':
-    command => '/bin/sed -i "s/define( *\'DB_HOST\', *\'localhost\' *);/\$db_hosts = [\'192.168.10.11:30306\', \'192.168.10.12:30306\']; \$active_db_host = \$db_hosts[0]; foreach (\$db_hosts as \$h) { list(\$ip, \$port) = explode(\':\', \$h); \$fp = @fsockopen(\$ip, \$port, \$e, \$s, 1); if (\$fp) { fclose(\$fp); \$active_db_host = \$h; break; } } define(\'DB_HOST\', \$active_db_host);/" /var/www/html/wp-config.php',
-    unless  => '/usr/bin/grep -q "active_db_host" /var/www/html/wp-config.php',
-    require => Exec['wordpress-config-create'],
+    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py configure-db-host',
+    unless  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py check-db-host',
+    require => [Exec['wordpress-config-create'], File['/usr/local/sbin/cms-ha-configure-wordpress.py']],
   }
 
   exec { 'wordpress-config-ssl-reverse-proxy':
@@ -330,7 +333,7 @@ class role::cms_frontend {
   # WP-CLI — WordPress command-line interface (idempotent install)
   # ---------------------------------------------------------------------------
   exec { 'wpcli-install':
-    command => '/usr/bin/wget -q -O /usr/local/bin/wp \
+    command => '/usr/bin/wget -q --timeout=30 --tries=3 -O /usr/local/bin/wp \
       https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
       && /bin/chmod +x /usr/local/bin/wp',
     unless  => '/usr/bin/test -s /usr/local/bin/wp && /usr/bin/test -x /usr/local/bin/wp',
@@ -340,9 +343,12 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
   # WORDPRESS CORE INSTALL — Runs only if WordPress is not yet installed in DB
   # ---------------------------------------------------------------------------
+  # The uploads share is the only lock both frontends can see. Re-check inside
+  # the lock: a resumed Puppet run can start this resource on both nodes even
+  # though phase 07 normally serialises them.
   exec { 'wordpress-core-install':
-    command => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py install',
-    onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
+    command => '/usr/bin/flock -w 300 /var/www/html/wp-content/uploads/.cms-ha-install.lock /bin/bash -c \'/usr/local/bin/wp core is-installed --allow-root --path=/var/www/html || /usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py install\'',
+    onlyif  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py db-reachable',
     unless  => '/usr/bin/test -x /usr/local/bin/wp && /usr/local/bin/wp core is-installed --allow-root --path=/var/www/html',
     require => [
       Exec['wpcli-install'],
@@ -356,12 +362,12 @@ class role::cms_frontend {
       Exec['mount-wp-uploads'],
     ],
     user    => 'root',
-    timeout => 120,
+    timeout => 420,
   }
 
   exec { 'wordpress-rewrite-structure':
     command => '/usr/local/bin/wp rewrite structure \'/%postname%/\' --hard --allow-root --path=/var/www/html',
-    onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.11/30306\" 2>/dev/null || timeout 2 bash -c \": </dev/tcp/192.168.10.12/30306\" 2>/dev/null"',
+    onlyif  => '/usr/bin/python3 /usr/local/sbin/cms-ha-configure-wordpress.py db-reachable',
     # `wp rewrite list` prints the generated rewrite *rules*, not the permalink
     # structure, so it never contains "postname" and the exec re-ran every time.
     # The option is what the command actually sets, so read that and match it

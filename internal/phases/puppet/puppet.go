@@ -16,8 +16,11 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
+
+const defaultJumpstartFQDN = "jumpstart.internal.local"
 
 // Phase installs the Puppet server and converges every node.
 type Phase struct {
@@ -28,6 +31,17 @@ type Phase struct {
 // NewPhase creates a new Puppet Phase.
 func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
+}
+
+// jumpstartServerName is the Puppet server name used by every agent. It must
+// follow the configured FQDN: the autosign policy is generated from the same
+// value, so a hardcoded name would leave a deployment with a custom domain
+// unable to establish TLS with the server.
+func (p *Phase) jumpstartServerName() string {
+	if fqdn := strings.TrimSpace(p.cfg.Nodes.Jumpstart.FQDN); fqdn != "" {
+		return fqdn
+	}
+	return defaultJumpstartFQDN
 }
 
 func (p *Phase) Name() string        { return catalog.Puppet.Name }
@@ -65,7 +79,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Applying Puppet catalog on Jumpstart...")
-	stdout, stderr, err := phases.RunPuppetAgentCmd(ctx, p.pool, jumpstartIP, "jumpstart", phases.PuppetAgentCommand("jumpstart.internal.local"))
+	stdout, stderr, err := phases.RunPuppetAgentCmd(ctx, p.pool, jumpstartIP, "jumpstart", phases.PuppetAgentCommand(p.jumpstartServerName()))
 	if err != nil {
 		// Jumpstart convergence bootstraps the puppetserver; letting a failed
 		// catalog slide here makes every later phase fail with confusing
@@ -101,6 +115,27 @@ func (p *Phase) Run(ctx context.Context) error {
 	return nil
 }
 
+// databaseHosts returns the MariaDB NodePort endpoints in failover order. The
+// WordPress configuration uses the list to probe both DRBD peers instead of
+// hardcoding one address in the Puppet manifest.
+func (p *Phase) databaseHosts() string {
+	port := p.cfg.Database.Port
+	if port == 0 {
+		port = 30306
+	}
+	hosts := make([]string, 0, 2)
+	for _, master := range p.cfg.Nodes.Masters {
+		if master.IP == "" {
+			continue
+		}
+		hosts = append(hosts, fmt.Sprintf("%s:%d", master.IP, port))
+		if len(hosts) == 2 {
+			break
+		}
+	}
+	return strings.Join(hosts, ",")
+}
+
 // installRuntimeSecretFiles puts credentials on the nodes that consume them,
 // without exposing them as Puppet facts or embedding them in Puppet code.
 func (p *Phase) installRuntimeSecretFiles(ctx context.Context) error {
@@ -109,9 +144,12 @@ func (p *Phase) installRuntimeSecretFiles(ctx context.Context) error {
 	}
 	credentials, err := json.Marshal(map[string]map[string]string{
 		"cms_ha": {
+			"database_name":              p.cfg.Database.Name,
+			"database_user":              p.cfg.Database.User,
 			"database_password":          p.cfg.Database.Password,
 			"database_exporter_password": p.cfg.Database.ExporterPassword,
 			"wordpress_admin_password":   p.cfg.WordPress.AdminPassword,
+			"database_hosts":             p.databaseHosts(),
 		},
 	})
 	if err != nil {
@@ -170,6 +208,8 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		return fmt.Errorf("wait for apt lock on jumpstart: %w", err)
 	}
 	cmd := `
+		set -euo pipefail
+		shopt -s nullglob
 		export DEBIAN_FRONTEND=noninteractive
 		
 		# Ensure puppet user and group exist
@@ -177,8 +217,8 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		mkdir -p /usr/share/puppet/modules
 
 		# Setup official Puppet 8 repository if not present
-		if ! dpkg -l | grep -q puppet8-release; then
-			wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
+		if ! dpkg -s puppet8-release >/dev/null 2>&1; then
+			wget --timeout=30 --tries=3 -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
 			dpkg -i /tmp/puppet8-release-noble.deb || true
 			apt-get update
 		fi
@@ -216,9 +256,8 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		grep -q "puppet" /etc/hosts || echo "127.0.0.1 puppet" >> /etc/hosts
 
 		systemctl enable puppetserver
-		if ! systemctl is-active --quiet puppetserver; then
-			systemctl start puppetserver
-		fi
+		systemctl restart puppetserver
+		systemctl is-active --quiet puppetserver
 
 		puppetserver ca list --all >/dev/null || puppetserver ca setup || true
 
@@ -250,18 +289,26 @@ func (p *Phase) uploadPuppetCode(ctx context.Context, jumpstartIP string) error 
 	}
 	remoteCodeDir := "/etc/puppetlabs/code/environments/production"
 
-	_, _, _, err := p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("mkdir -p %s", remoteCodeDir))
-	if err != nil {
-		return err
+	if _, stderr, code, err := p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("mkdir -p %s", remoteCodeDir)); err != nil || code != 0 {
+		return fmt.Errorf("create remote code directory (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
 	}
 
-	err = p.pool.CopyDir(ctx, jumpstartIP, localPuppetDir, remoteCodeDir)
-	if err != nil {
+	// Replace the previous environment instead of layering files on top of it.
+	// Stale manifests left behind by a rename or deletion have caused Puppet to
+	// keep applying code that is no longer in the repository.
+	clearCmd := fmt.Sprintf("find %s -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +", remoteCodeDir)
+	if _, stderr, code, err := p.pool.RunCommand(ctx, jumpstartIP, clearCmd); err != nil || code != 0 {
+		return fmt.Errorf("clear remote code directory (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
+	}
+
+	if err := p.pool.CopyDir(ctx, jumpstartIP, localPuppetDir, remoteCodeDir); err != nil {
 		return fmt.Errorf("copy dir failed: %w", err)
 	}
 
-	chownCmd := fmt.Sprintf("chown -R puppet:puppet %s && chmod -R u+rwX,go+rX %s", remoteCodeDir, remoteCodeDir)
-	p.pool.RunCommand(ctx, jumpstartIP, chownCmd)
+	chownCmd := fmt.Sprintf("chown -R puppet:puppet %s && chmod -R u+rwX,go+rX %s && test -f %s/manifests/site.pp && test -d %s/modules", remoteCodeDir, remoteCodeDir, remoteCodeDir, remoteCodeDir)
+	if _, stderr, code, err := p.pool.RunCommand(ctx, jumpstartIP, chownCmd); err != nil || code != 0 {
+		return fmt.Errorf("secure/verify remote code (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
+	}
 
 	return nil
 }
@@ -298,7 +345,7 @@ func (p *Phase) writeAutosignPolicy(ctx context.Context, jumpstartIP string, nod
 // output. It intentionally never emits a wildcard.
 func autosignPolicy(jumpstartFQDN string, nodes []config.NodeSpec) string {
 	if strings.TrimSpace(jumpstartFQDN) == "" {
-		jumpstartFQDN = "jumpstart.internal.local"
+		jumpstartFQDN = defaultJumpstartFQDN
 	}
 	names := map[string]struct{}{jumpstartFQDN: {}}
 	for _, n := range nodes {
@@ -316,36 +363,37 @@ func autosignPolicy(jumpstartFQDN string, nodes []config.NodeSpec) string {
 
 func (p *Phase) installAgents(ctx context.Context, nodes []config.NodeSpec) error {
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
+	server := p.jumpstartServerName()
 	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 
 	for _, n := range nodes {
 		nodeSpec := n
 		tasks[nodeSpec.IP] = func(ctx context.Context, pool ssh.Executor) error {
 			cmd := fmt.Sprintf(`
-				set -e
+				set -euo pipefail
 				export DEBIAN_FRONTEND=noninteractive
 				%s
-				if ! dpkg -l | grep -q puppet8-release; then
-					wget -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
+				if ! dpkg -s puppet8-release >/dev/null 2>&1; then
+					wget --timeout=30 --tries=3 -q https://apt.puppet.com/puppet8-release-noble.deb -O /tmp/puppet8-release-noble.deb
 					dpkg -i /tmp/puppet8-release-noble.deb || true
 					apt-get update
 				fi
 				dpkg -s puppet-agent >/dev/null 2>&1 || apt-get install -o Dpkg::Options::="--force-confold" -o Dpkg::Options::="--force-confdef" -y puppet-agent
 
 				ln -sf /opt/puppetlabs/bin/puppet /usr/local/bin/puppet
-				grep -q "jumpstart.internal.local" /etc/hosts || echo "%s jumpstart.internal.local jumpstart puppet" >> /etc/hosts
+				grep -q "%s" /etc/hosts || echo "%s %s jumpstart puppet" >> /etc/hosts
 
 				mkdir -p /etc/puppetlabs/puppet
 				cat << 'EOF_PUPPET' > /etc/puppetlabs/puppet/puppet.conf
 [main]
-server = jumpstart.internal.local
+server = %s
 environment = production
 runinterval = 30m
 certname = %s
 EOF_PUPPET
 
 				systemctl enable puppet
-			`, ssh.AptLockWaitSnippet, jumpstartIP, nodeSpec.FQDN)
+			`, ssh.AptLockWaitSnippet, server, jumpstartIP, server, server, nodeSpec.FQDN)
 
 			_, stderr, code, err := pool.RunCommand(ctx, nodeSpec.IP, cmd)
 			if err != nil || code != 0 {
@@ -397,10 +445,56 @@ func (p *Phase) catalogConcurrency() (int, string) {
 	return c, "auto"
 }
 
+// firstCatalogCommand runs one agent catalog with the daemon stopped to avoid
+// the catalog lock, then always leaves the service running. A failed catalog
+// still restarts the daemon so the node keeps retrying instead of silently
+// drifting with Puppet disabled.
+func firstCatalogCommand(server string) string {
+	return fmt.Sprintf(`
+		set +e
+		systemctl stop puppet 2>/dev/null || true
+		/opt/puppetlabs/bin/puppet agent -t --server %s
+		code=$?
+		if [ $code -eq 0 ] || [ $code -eq 2 ]; then
+			if ! systemctl start puppet; then
+				echo "puppet service failed to start after a successful catalog" >&2
+				exit 1
+			fi
+			if ! systemctl is-active --quiet puppet; then
+				echo "puppet service is not active after a successful catalog" >&2
+				exit 1
+			fi
+			exit 0
+		fi
+		systemctl start puppet 2>/dev/null || true
+		exit $code
+	`, shell.Quote(server))
+}
+
+// isPuppetSSLResetError identifies failures that can be repaired by deleting
+// the agent's stale certificate and asking the server for a new one. A key
+// mismatch is the historical case; signature/verify failures are the same
+// class of stale or partially rotated SSL state.
+func isPuppetSSLResetError(stdout, stderr string) bool {
+	combined := strings.ToLower(stdout + "\n" + stderr)
+	for _, marker := range []string{
+		"does not match its private key",
+		"certificate signature failure",
+		"certificate verify failed",
+	} {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) error {
 	var errs []string
 	var mu sync.Mutex
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
+	server := p.jumpstartServerName()
+	cmd := firstCatalogCommand(server)
 
 	concurrency, source := p.catalogConcurrency()
 	if concurrency > len(nodes) {
@@ -422,27 +516,24 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 
 			logging.Info("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP)
 
-			// Stop the background daemon first (same session) to avoid catalog
-			// run lock contention.
-			cmd := `
-				systemctl stop puppet 2>/dev/null || true
-				/opt/puppetlabs/bin/puppet agent -t --server jumpstart.internal.local
-				code=$?
-				if [ $code -eq 0 ] || [ $code -eq 2 ]; then
-					systemctl start puppet || true
-					exit 0
-				fi
-				exit $code
-			`
 			nodeCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
 			stdout, stderr, code, err := p.pool.RunCommand(nodeCtx, spec.IP, cmd)
 
-			// Self-healing: if SSL certificate does not match private key, revoke and purge
-			if code != 0 && (strings.Contains(stdout, "does not match its private key") || strings.Contains(stderr, "does not match its private key")) {
-				logging.Warn("Certificate mismatch detected on %s (%s). Performing self-healing SSL reset...", spec.Name, spec.FQDN)
-				p.pool.RunCommand(ctx, jumpstartIP, fmt.Sprintf("puppetserver ca clean --certname %s 2>/dev/null || true", spec.FQDN))
-				p.pool.RunCommand(ctx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl")
+			// Self-healing: remove the stale client certificate and its server
+			// record, then retry once. This covers both a private-key mismatch
+			// and the signature/verify failures left by a partial CA rotation.
+			if code != 0 && isPuppetSSLResetError(stdout, stderr) {
+				logging.Warn("Stale Puppet SSL state detected on %s (%s). Performing self-healing reset...", spec.Name, spec.FQDN)
+				if spec.FQDN != "" {
+					cleanCmd := fmt.Sprintf("puppetserver ca clean --certname %s", shell.Quote(spec.FQDN))
+					if _, cleanStderr, cleanCode, cleanErr := p.pool.RunCommand(nodeCtx, jumpstartIP, cleanCmd); cleanErr != nil || cleanCode != 0 {
+						logging.Warn("Could not clean Puppet certificate for %s on jumpstart (exit %d): %v %s", spec.FQDN, cleanCode, cleanErr, logging.Tail(cleanStderr, 5))
+					}
+				}
+				if _, resetStderr, resetCode, resetErr := p.pool.RunCommand(nodeCtx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl"); resetErr != nil || resetCode != 0 {
+					logging.Warn("Could not remove stale Puppet SSL directory on %s (exit %d): %v %s", spec.IP, resetCode, resetErr, logging.Tail(resetStderr, 5))
+				}
 				stdout, stderr, code, err = p.pool.RunCommand(nodeCtx, spec.IP, cmd)
 			}
 

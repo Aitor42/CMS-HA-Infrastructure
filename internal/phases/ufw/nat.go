@@ -169,7 +169,11 @@ cp /etc/ufw/before.rules /tmp/before.rules.bak
 restore() { cp /tmp/before.rules.bak /etc/ufw/before.rules; }
 trap restore ERR
 sed -i '/^# NAT Rules/,/^COMMIT/{/^COMMIT/d; d}' /etc/ufw/before.rules
-sed -i '/^\*nat/,/^COMMIT/{/^COMMIT/d; d}' /etc/ufw/before.rules
+if grep -q '^\*nat' /etc/ufw/before.rules; then
+    echo "refusing to delete an unmanaged *nat table from before.rules" >&2
+    restore
+    exit 1
+fi
 awk '/^\*filter/{while((getline line < "/tmp/nat.rules") > 0) print line} {print}' /etc/ufw/before.rules > /tmp/before.rules.new
 mv /tmp/before.rules.new /etc/ufw/before.rules
 if [ "$(grep -c '^\*nat' /etc/ufw/before.rules)" != "1" ] || [ "$(grep -c '^\*filter' /etc/ufw/before.rules)" != "1" ]; then

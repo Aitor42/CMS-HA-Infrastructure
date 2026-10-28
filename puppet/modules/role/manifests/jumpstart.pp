@@ -6,91 +6,107 @@
 class role::jumpstart {
   include role::base
 
-  # Puppet Server (used by all nodes across Internal and Main subnets)
-  exec { 'ufw-allow-puppetserver':
-    command => '/usr/sbin/ufw allow 8140/tcp comment "Puppet Server"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "8140/tcp.*ALLOW"',
+  $internal_cidr = '192.168.10.0/24'
+  $main_cidr = '192.168.20.0/24'
+  $provisioning_sources = [$internal_cidr, $main_cidr]
+
+  # Older releases opened the provisioning services to any source. Remove
+  # those broad rules before adding the scoped ones; otherwise an upgraded
+  # jumpstart would keep the WAN exposure it had before this change.
+  exec { 'ufw-remove-public-provisioning-rules':
+    command => '/bin/bash -c \'for rule in 8140/tcp 80/tcp 443/tcp 25151/tcp 69/udp 67/udp 53/udp 53/tcp 123/udp 2049 111; do /usr/sbin/ufw delete allow "$rule" >/dev/null 2>&1 || true; done\'',
+    onlyif  => '/usr/sbin/ufw status | /usr/bin/grep -Eq "(8140/tcp|80/tcp|443/tcp|25151/tcp|69/udp|67/udp|53/udp|53/tcp|123/udp|2049|111)[[:space:]].*ALLOW[[:space:]]+Anywhere"',
     require => Exec['ufw-enable'],
   }
 
-  # Cobbler HTTP & HTTPS
-  exec { 'ufw-allow-http':
-    command => '/usr/sbin/ufw allow 80/tcp comment "HTTP Cobbler/Apt"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW"',
-    require => Exec['ufw-enable'],
+  # Puppet Server, Cobbler HTTP/HTTPS/XML-RPC. These are only needed by the
+  # internal and main lab subnets, never from the WAN interface.
+  $tcp_services = [
+    { 'port' => '8140', 'comment' => 'Puppet Server' },
+    { 'port' => '80', 'comment' => 'HTTP Cobbler/Apt' },
+    { 'port' => '443', 'comment' => 'HTTPS Cobbler' },
+    { 'port' => '25151', 'comment' => 'Cobbler XML-RPC' },
+  ]
+  $tcp_services.each |$service| {
+    $provisioning_sources.each |$source| {
+      $slug = regsubst("${service['port']}-${source}", '[^A-Za-z0-9]', '-', 'G')
+      exec { "ufw-allow-${slug}":
+        command => "/usr/sbin/ufw allow from ${source} to any port ${service['port']} proto tcp comment \"${service['comment']} from ${source}\"",
+        unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"${service['port']}/tcp.*${source}\"",
+        require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
+      }
+    }
   }
 
-  exec { 'ufw-allow-https':
-    command => '/usr/sbin/ufw allow 443/tcp comment "HTTPS Cobbler"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "443/tcp.*ALLOW"',
-    require => Exec['ufw-enable'],
+  # TFTP, DNS, and NTP are UDP services used by the provisioning clients.
+  $udp_services = [
+    { 'port' => '69', 'comment' => 'TFTP PXE' },
+    { 'port' => '53', 'comment' => 'DNS Server' },
+    { 'port' => '123', 'comment' => 'NTP Server' },
+  ]
+  $udp_services.each |$service| {
+    $provisioning_sources.each |$source| {
+      $slug = regsubst("${service['port']}-${source}", '[^A-Za-z0-9]', '-', 'G')
+      exec { "ufw-allow-${slug}":
+        command => "/usr/sbin/ufw allow from ${source} to any port ${service['port']} proto udp comment \"${service['comment']} from ${source}\"",
+        unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"${service['port']}/udp.*${source}\"",
+        require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
+      }
+    }
   }
 
-  # Cobbler XML-RPC
-  exec { 'ufw-allow-cobbler-xmlrpc':
-    command => '/usr/sbin/ufw allow 25151/tcp comment "Cobbler XML-RPC"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "25151/tcp.*ALLOW"',
-    require => Exec['ufw-enable'],
+  # DNS also answers TCP queries.
+  $provisioning_sources.each |$source| {
+    $slug = regsubst("53-tcp-${source}", '[^A-Za-z0-9]', '-', 'G')
+    exec { "ufw-allow-${slug}":
+      command => "/usr/sbin/ufw allow from ${source} to any port 53 proto tcp comment \"DNS Server from ${source}\"",
+      unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"53/tcp.*${source}\"",
+      require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
+    }
   }
 
-  # TFTP for PXE booting
-  exec { 'ufw-allow-tftp':
-    command => '/usr/sbin/ufw allow 69/udp comment "TFTP PXE"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "69/udp.*ALLOW"',
-    require => Exec['ufw-enable'],
+  # NFS and RPCbind are only consumed by the main-network CMS nodes.
+  $any_services = [
+    { 'port' => '2049', 'comment' => 'NFS' },
+    { 'port' => '111', 'comment' => 'RPCbind' },
+  ]
+  $any_services.each |$service| {
+    $provisioning_sources.each |$source| {
+      $slug = regsubst("${service['port']}-${source}", '[^A-Za-z0-9]', '-', 'G')
+      exec { "ufw-allow-${slug}":
+        command => "/usr/sbin/ufw allow from ${source} to any port ${service['port']} comment \"${service['comment']} from ${source}\"",
+        unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"${service['port']}.*${source}\"",
+        require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
+      }
+    }
   }
 
-  # DHCP server
-  exec { 'ufw-allow-dhcp':
-    command => '/usr/sbin/ufw allow 67/udp comment "DHCP Server"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "67/udp.*ALLOW"',
-    require => Exec['ufw-enable'],
+  # DHCP clients send from 0.0.0.0, so a source-CIDR rule cannot match them.
+  # Scope DHCP to the two provisioning interfaces instead of opening 67/udp
+  # on the WAN interface (enp3s0).
+  exec { 'ufw-allow-dhcp-internal':
+    command => '/usr/sbin/ufw allow in on enp1s0 to any port 67 proto udp comment "DHCP internal"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "67/udp on enp1s0.*ALLOW"',
+    require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
   }
 
-  # DNS server (BIND9)
-  exec { 'ufw-allow-dns-udp':
-    command => '/usr/sbin/ufw allow 53/udp comment "DNS Server"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "53/udp.*ALLOW"',
-    require => Exec['ufw-enable'],
-  }
-
-  exec { 'ufw-allow-dns-tcp':
-    command => '/usr/sbin/ufw allow 53/tcp comment "DNS Server"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "53/tcp.*ALLOW"',
-    require => Exec['ufw-enable'],
-  }
-
-  # NTP server (Chrony)
-  exec { 'ufw-allow-ntp':
-    command => '/usr/sbin/ufw allow 123/udp comment "NTP Server"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "123/udp.*ALLOW"',
-    require => Exec['ufw-enable'],
-  }
-
-  # NFS server
-  exec { 'ufw-allow-nfs':
-    command => '/usr/sbin/ufw allow 2049 comment "NFS"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2049.*ALLOW"',
-    require => Exec['ufw-enable'],
-  }
-
-  exec { 'ufw-allow-rpcbind':
-    command => '/usr/sbin/ufw allow 111 comment "RPCbind"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "111.*ALLOW"',
-    require => Exec['ufw-enable'],
+  exec { 'ufw-allow-dhcp-main':
+    command => '/usr/sbin/ufw allow in on enp2s0 to any port 67 proto udp comment "DHCP main"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "67/udp on enp2s0.*ALLOW"',
+    require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
   }
 
   # Internal CA (step-ca) — the load balancers (main network) renew their TLS
   # certificates against it. Restricted to the two lab subnets; never public.
   exec { 'ufw-allow-step-ca-internal':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 8443 proto tcp comment "step-ca internal"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "8443/tcp.*192.168.10.0/24"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 8443 proto tcp comment \"step-ca internal\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"8443/tcp.*${internal_cidr}\"",
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-allow-step-ca-main':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 8443 proto tcp comment "step-ca main"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "8443/tcp.*192.168.20.0/24"',
+    command => "/usr/sbin/ufw allow from ${main_cidr} to any port 8443 proto tcp comment \"step-ca main\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"8443/tcp.*${main_cidr}\"",
     require => Exec['ufw-enable'],
   }
 }

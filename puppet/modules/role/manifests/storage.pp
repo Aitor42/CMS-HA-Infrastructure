@@ -40,7 +40,10 @@ class role::storage {
     owner   => 'root',
     group   => 'root',
     mode    => '0644',
-    content => "/srv/nfs/wp-uploads 192.168.20.0/24(rw,sync,no_subtree_check,no_root_squash)\n",
+    # Map every client identity to www-data instead of trusting root over NFS.
+    # The CMS only needs to write uploads, and anonuid/anongid 33 keeps the
+    # files usable by Apache without granting root on the storage server.
+    content => "/srv/nfs/wp-uploads 192.168.20.0/24(rw,sync,no_subtree_check,all_squash,anonuid=33,anongid=33)\n",
     require => [
       Package['nfs-kernel-server'],
       File['/srv/nfs/wp-uploads'],

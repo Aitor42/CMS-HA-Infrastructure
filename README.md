@@ -37,7 +37,7 @@ The environment is driven by three cooperating layers:
 | Area | Implementation |
 |:-----|:---------------|
 | **Zero-touch Provisioning** | Cobbler PXE server + Ubuntu autoinstall for unattended OS deployment |
-| **Idempotent Configuration** | Puppet 8 agent/server model with role-based manifests & auto SSL self-healing |
+| **Idempotent Configuration** | Puppet 8 agent/server model with role-based manifests & automatic recovery from stale Puppet SSL state (private-key mismatch or signature/verify failure) |
 | **HA Clustering** | K3s (lightweight Kubernetes) with 3 server nodes (embedded etcd, tolerates 1 failure) + 2 agent nodes |
 | **Synchronous Block Replication** | DRBD 9 Protocol C between master nodes for zero data loss with dynamic node affinity |
 | **Automated Failover** | Autonomous DRBD watchdog daemon (`drbd-failover-watchdog.service`) + gateway quorum verification + Kubernetes pod migration + chaos testing suite |
@@ -306,13 +306,13 @@ Each phase is invoked through the unified Go CLI (`cms-ha`). The numbers follow 
 | **02** | `cms-ha phase register-nodes` | `jumpstart` | Host profile definitions, static IPs and MAC bindings |
 | **03** | `cms-ha phase repair-ssh` | All client nodes | Post-install SSH key synchronization & Puppet CA reset |
 | **03.5** | `cms-ha phase bootstrap-router` | `ufw-router` | Router gateway bring-up: static gateway addresses, IP forwarding and NAT (checked with a real download before Puppet needs one) |
-| **04** | `cms-ha phase setup-puppet` | `jumpstart` + all clients | Bounded parallel Puppet catalog execution with SSL healing |
+| **04** | `cms-ha phase setup-puppet` | `jumpstart` + all clients | Bounded parallel Puppet catalog execution with stale SSL state recovery |
 | **05** | `cms-ha phase setup-drbd` | `internal-master1/2` | DRBD 9 synchronous block replication (Protocol C) |
 | **05.5** | `cms-ha phase setup-backup` | Hypervisor | Garage S3 store for the nightly database dumps |
 | **06** | `cms-ha phase setup-kubernetes` | Masters + Workers | K3s HA cluster, DRBD node affinity labeling & MariaDB |
 | **07** | `cms-ha phase setup-nginx-wordpress` | `main-lb1/2`, `main-cms1/2` | Nginx reverse proxy (+ keepalived VIP) & WordPress/Apache frontends |
 | **08** | `cms-ha phase setup-monitoring` | `internal-monitor` + all | Prometheus, Grafana, alert rules, blackbox probes & node exporters |
-| **09** | `cms-ha phase setup-ufw` | `ufw-router` + all nodes | Perimeter routing, dynamic WAN NAT & per-node UFW |
+| **09** | `cms-ha phase setup-ufw` | `ufw-router` + all nodes | Perimeter routing, dynamic WAN NAT & live UFW verification (node rules are Puppet-owned) |
 | **10** | `cms-ha phase setup-ca` | `jumpstart` + all nodes | Smallstep PKI (step-ca) & cluster-wide TLS trust |
 | **—** | `cms-ha traffic` | Workstations & LB | Post-deploy k6 load/smoke profile (RPS, p95/p99, error rate); every Grafana panel query is then checked for data |
 
@@ -323,10 +323,10 @@ Each phase is invoked through the unified Go CLI (`cms-ha`). The numbers follow 
 The Go orchestrator keeps the pipeline fast and safe:
 
 - **SSH connection pool** (`internal/ssh`) — one authenticated client per IP, safe for concurrent use, with in-memory SFTP uploads.
-- **Bounded parallelism** — clients converge in parallel (window from `deploy.puppet_concurrency`, auto 4–8 by CPU count) after the jumpstart node, so Puppet Server, DNS and Cobbler are up first. The CMS frontends converge sequentially because the first one creates the WordPress schema.
+- **Bounded parallelism** — clients converge in parallel (window from `deploy.puppet_concurrency`, auto 4–8 by CPU count) after the jumpstart node, so Puppet Server, DNS and Cobbler are up first. In phase 07 (Nginx/WordPress), the CMS frontends converge sequentially because the first one creates the WordPress schema; this ordering is not part of the parallel Puppet phase.
 - **Fast jumpstart (hosted workflow default)** — `phase init-vms --jumpstart-image cloud` boots a qcow2 overlay of the Ubuntu cloud image for iteration and CI. The CLI/config default remains ISO/PXE, and the ISO/PXE path remains the deliverable gate; the hosted workflow defaults to cloud because it is the fastest way to exercise the rest of the pipeline.
 - **Fast provisioning (hosted workflow default)** — `deploy --fast-provisioning` (or `vm.provisioning: cloud`) installs the jumpstart and every client node from the same cloud image, with per-node cloud-init for hostname, MACs, static addresses and SSH key. The CLI/config default remains PXE; the hosted workflow defaults to `fast_provisioning=true` for speed. The PXE/Cobbler run remains the deliverable gate (self-hosted `integration.yml`, or a hosted dispatch with `jumpstart_image=iso` and `fast_provisioning=false`).
-- **Self-healing** — stale Puppet certificates are revoked, re-signed and the catalog is re-run; broken DRBD/K3s state aborts the deploy instead of reporting success.
+- **Self-healing** — when a Puppet agent reports a private-key mismatch or a `certificate signature failure`/`certificate verify failed`, the stale certificate is cleaned, the client SSL state is removed and the catalog is retried once. If the retry still fails, use the manual recovery steps in [`docs/MANUAL.md`](docs/MANUAL.md). Broken DRBD/K3s state aborts the deploy instead of reporting success.
 - **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository. `cms-ha secrets rotate` rekeys the config and keeps timestamped backups; `gitleaks` scans the tree in CI.
 - **Checkpoints and run correlation** — `deploy.state` lets `--resume` and `--from-phase` continue after a failure. A `deploy.state.lock` file makes a second concurrent deploy fail fast instead of corrupting the checkpoint. Every run gets a `run_id` (or accepts `--run-id`), printed once and stored in both `deploy.state` and `timings.json`, so a CI log, checkpoint and timing report can be matched without parsing free text.
 

@@ -64,7 +64,7 @@ COMMIT
 
 ### Implementation
 
-- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — applies the perimeter and node firewall rules.
+- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — re-injects the router NAT, reloads UFW and verifies the live router policies, forwarding and NAT. Per-node service rules are owned by Puppet (`role::base` and each role manifest), not by this phase.
 - `internal/phases/router` (`cms-ha phase bootstrap-router`) — sets the gateway addresses, IP forwarding and NAT.
 
 ### Verification
@@ -74,12 +74,14 @@ COMMIT
 ssh ubuntu@192.168.10.1 "sudo ufw status verbose"
 ssh ubuntu@192.168.10.1 "sudo iptables -t nat -L -n -v"
 
-# From a hot-desk node: should access the internet and the internal subnet
+# From a hot-desk node: should access the internet and reach permitted TCP
+# services on the internal subnet. ICMP is intentionally denied by the node
+# UFW default policy, so ping is not the right routing test.
 ssh ubuntu@192.168.20.201 "sudo curl -s http://example.com"
-ssh ubuntu@192.168.20.201 "sudo ping -c 2 192.168.10.11"
+ssh ubuntu@192.168.20.201 "timeout 2 bash -c '</dev/tcp/192.168.10.11/22' && echo reachable"
 
 # From the internal subnet: should reach the internet through NAT (needed for
-# package/Puppet downloads) and the main-network VIP
+# package/Puppet downloads) and the main-network VIP over HTTP/S.
 ssh ubuntu@192.168.10.11 "sudo curl -s --connect-timeout 5 http://example.com"
-ssh ubuntu@192.168.10.11 "sudo ping -c 2 192.168.20.100"  # Should work
+ssh ubuntu@192.168.10.11 "curl -sS --connect-timeout 5 -o /dev/null -w '%{http_code}\n' http://192.168.20.100"
 ```

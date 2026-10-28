@@ -187,10 +187,10 @@ unknown value is rejected with the list of valid phases.
 
 **Orchestration in short:**
 1. The jumpstart node converges first, so Puppet Server, DNS, Cobbler, DHCP and TFTP are up before any client runs.
-2. Clients converge in parallel with automatic Puppet SSL repair; the window is `deploy.puppet_concurrency` (auto: 4–8 by CPU count, or `PUPPET_CONCURRENCY`). Each node converges once, in phase 04.
+2. Clients converge in parallel with automatic recovery from stale Puppet SSL state (private-key mismatch or signature/verify failure); the window is `deploy.puppet_concurrency` (auto: 4–8 by CPU count, or `PUPPET_CONCURRENCY`). Each node converges once, in phase 04.
 3. `bootstrap-router` gives the router static addresses, IP forwarding and NAT before clients download packages.
 4. DRBD is promoted and mounted on `internal-master1`; K3s then resolves the current DRBD primary and labels that node `drbd-status=primary` so `mariadb-0` can mount the volume.
-5. The CMS frontends converge sequentially (the first one creates the WordPress schema); monitoring, UFW and the CA fan out in parallel.
+5. In phase 07 (Nginx/WordPress), the CMS frontends converge sequentially (the first one creates the WordPress schema); monitoring, UFW and the CA fan out in parallel. This sequential CMS convergence is not part of the parallel Puppet phase.
 6. Every remote exit code is checked: a broken DRBD/K3s state aborts the deploy instead of reporting success.
 
 ---
@@ -878,21 +878,32 @@ scp /tmp/pause-3.6.tar ubuntu@192.168.10.11:/tmp/pause-3.6.tar
 ssh ubuntu@192.168.10.11 'sudo -H ctr -n k8s.io images import /tmp/pause-3.6.tar'
 ```
 
-#### Puppet SSL Certificate Mismatch (`certificate signature failure`)
+#### Puppet SSL Certificate Mismatch
 
-Symptom: `puppet agent -t` fails with:
-```text
-Error: certificate verify failed [certificate signature failure for /CN=internal-master1.internal.local]
-```
-Cause: The node was reprovisioned or the Puppet Server CA regenerated certificates, causing an SSL serial mismatch.
+Two related failures are common:
 
-Automated Solution:
-The Go CLI (`cms-ha phase setup-puppet`) automatically detects this condition, revokes the stale certificate on the master, deletes client SSL caches, and generates a fresh CSR:
-```bash
-./cms-ha phase setup-puppet
-```
+1. **Private key mismatch.** `puppet agent -t` fails with:
+   ```text
+   Error: The certificate for /CN=internal-master1.internal.local does not match its private key
+   ```
+   The Go CLI (`cms-ha phase setup-puppet`) detects this message, cleans the
+   stale certificate on the Puppet server, removes the client SSL state and
+   retries the catalog once. Re-running the phase is usually enough:
+   ```bash
+   ./cms-ha phase setup-puppet
+   ```
 
-Manual Solution:
+2. **Certificate signature failure.** `puppet agent -t` fails with:
+   ```text
+   Error: certificate verify failed [certificate signature failure for /CN=internal-master1.internal.local]
+   ```
+   Cause: the node was reprovisioned or the Puppet Server CA regenerated its
+   certificates, so the serial/signature no longer matches. The phase treats
+   this like a private-key mismatch: it cleans the server-side certificate,
+   removes the client SSL state and retries once. If the retry still fails,
+   use the manual recovery below.
+
+Manual recovery:
 ```bash
 # 1. Clean certificate on Jumpstart
 ssh ubuntu@192.168.10.10 "sudo /opt/puppetlabs/bin/puppetserver ca clean --certname <NODE_FQDN>"

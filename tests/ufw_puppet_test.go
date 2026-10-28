@@ -46,6 +46,54 @@ func TestNATRulesAreRenderedFromConfiguration(t *testing.T) {
 	}
 }
 
+// TestJumpstartUFWScopesProvisioningServices prevents the provisioning server
+// from regressing to "allow <port> from anywhere". DHCP is the one exception:
+// its clients source from 0.0.0.0, so it is scoped to the two provisioning
+// interfaces instead of a source CIDR.
+func TestJumpstartUFWScopesProvisioningServices(t *testing.T) {
+	jumpstart := readRepoFile(t, "puppet/modules/role/manifests/jumpstart.pp")
+	for _, line := range strings.Split(jumpstart, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "/usr/sbin/ufw allow ") {
+			continue
+		}
+		if strings.Contains(trimmed, " from ") || strings.Contains(trimmed, " in on ") {
+			continue
+		}
+		t.Errorf("jumpstart.pp still opens a provisioning port to any source: %s", trimmed)
+	}
+	for _, want := range []string{
+		"$provisioning_sources = [$internal_cidr, $main_cidr]",
+		"ufw-remove-public-provisioning-rules",
+		"ufw allow in on enp1s0 to any port 67 proto udp",
+		"ufw allow in on enp2s0 to any port 67 proto udp",
+	} {
+		if !strings.Contains(jumpstart, want) {
+			t.Errorf("jumpstart.pp is missing %q", want)
+		}
+	}
+}
+
+func TestStorageExportSquashesRoot(t *testing.T) {
+	storage := readRepoFile(t, "puppet/modules/role/manifests/storage.pp")
+	if strings.Contains(storage, "no_root_squash") {
+		t.Error("storage.pp still exports WordPress uploads with no_root_squash")
+	}
+	if !strings.Contains(storage, "all_squash,anonuid=33,anongid=33") {
+		t.Error("storage.pp does not map NFS clients to www-data")
+	}
+}
+
+func TestWordPressDeployPreservesUploadsAndConfig(t *testing.T) {
+	cms := readRepoFile(t, "puppet/modules/role/manifests/cms_frontend.pp")
+	if strings.Contains(cms, "rm -rf /var/www/html/*") {
+		t.Error("cms_frontend.pp still deletes the whole WordPress tree before deploying")
+	}
+	if !strings.Contains(cms, "/bin/cp -a /tmp/wordpress/. /var/www/html/") {
+		t.Error("cms_frontend.pp no longer deploys WordPress by copying over the existing tree")
+	}
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	data, err := os.ReadFile(repoFile(t, rel))
