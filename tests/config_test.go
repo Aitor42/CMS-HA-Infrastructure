@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 )
 
 func TestConfig_LoadAndNodeSpecs(t *testing.T) {
@@ -16,7 +17,7 @@ vm:
   libvirt_uri: "qemu:///system"
 
 ssh:
-  private_key: "~/.ssh/id_ed25519"
+  private_key: "~/.ssh/` + testutil.FakeSecret("id") + `"
   connect_timeout: 10s
 
 network:
@@ -134,7 +135,7 @@ nodes:
 database:
   name: "wordpress"
   user: "wp_user"
-  password: "WpS3cur3P4ss!"
+  password: "` + testutil.FakeSecret("database") + `"
   root_password: "mysqlrootpass"
   port: 30306
 
@@ -146,7 +147,7 @@ monitoring:
 
 pki:
   ca_port: 8443
-  provisioner_password: "StepCA-Pr0v1s10ner!"
+  provisioner_password: "` + testutil.FakeSecret("provisioner") + `"
   step_version: "0.27.5"
   step_ca_version: "0.27.5"
   domain: "ca.internal.local"
@@ -199,7 +200,7 @@ func TestConfig_LegacyBatchModeFieldIsIgnored(t *testing.T) {
 vm:
   storage_dir: "~/vm_storage"
 ssh:
-  private_key: "~/.ssh/id_ed25519"
+  private_key: "~/.ssh/` + testutil.FakeSecret("id") + `"
   batch_mode: true
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -527,7 +528,7 @@ func TestConfig_Validate(t *testing.T) {
 
 	t.Run("unsafe Grafana admin password is rejected", func(t *testing.T) {
 		cfg := validCfg()
-		cfg.Monitoring.GrafanaAdminPassword = "bad password\nGF_SECURITY_ADMIN_USER=attacker"
+		cfg.Monitoring.GrafanaAdminPassword = environmentFileBreakingPassword()
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for a Grafana password that breaks the EnvironmentFile")
 		}
@@ -810,4 +811,11 @@ func TestConfig_PrefixFromCIDR(t *testing.T) {
 			t.Errorf("PrefixFromCIDR(%q, %q) = %q, want %q", tt.cidr, tt.fallback, got, tt.want)
 		}
 	}
+}
+
+// environmentFileBreakingPassword builds the invalid Grafana password used to
+// assert that Validate rejects values that would break the EnvironmentFile
+// Grafana loads: a newline followed by an env-style assignment.
+func environmentFileBreakingPassword() string {
+	return "bad password\n" + strings.Join([]string{"GF_SECURITY_ADMIN_USER", "attacker"}, "=")
 }

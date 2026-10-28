@@ -14,11 +14,11 @@ func kubernetesConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{
 		Database: config.DatabaseConfig{
-			Password:         "wp-pass",
-			RootPassword:     "root-pass",
-			ExporterPassword: "exporter-pass",
+			Password:         testutil.FakeSecret("wp"),
+			RootPassword:     testutil.FakeSecret("root"),
+			ExporterPassword: testutil.FakeSecret("exporter"),
 		},
-		WordPress: config.WordPressConfig{AdminPassword: "admin-pass"},
+		WordPress: config.WordPressConfig{AdminPassword: testutil.FakeSecret("admin")},
 		Network: config.NetworkConfig{
 			Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
 		},

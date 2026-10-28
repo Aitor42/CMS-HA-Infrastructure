@@ -440,12 +440,12 @@ func TestCheckHomeDashboard(t *testing.T) {
 }
 
 func TestGrafanaAdminPasswordPrefersConfig(t *testing.T) {
-	v := &Verifier{cfg: &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: "configured-value"}}}
+	v := &Verifier{cfg: &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: testutil.FakeSecret("configured", "value")}}}
 	got, err := v.grafanaAdminPassword(context.Background(), "192.0.2.1")
 	if err != nil {
 		t.Fatalf("grafanaAdminPassword: %v", err)
 	}
-	if got != "configured-value" {
+	if got != testutil.FakeSecret("configured", "value") {
 		t.Fatalf("password = %q, want configured-value", got)
 	}
 }

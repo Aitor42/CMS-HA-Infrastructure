@@ -90,7 +90,7 @@ else
     echo "${IFACES_LINE}" >> /etc/default/isc-dhcp-server
 fi`,
 
-	`python3 /tmp/tpl_settings_patch.py`,
+	`python3 /tmp/tpl_settings_patch.py > /tmp/settings-patched.yaml && cp /tmp/settings-patched.yaml /etc/cobbler/settings.yaml`,
 
 	`cp /tmp/tpl_dhcp.template /etc/cobbler/dhcp.template
 cp /tmp/tpl_named.template /etc/cobbler/named.template

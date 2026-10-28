@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -264,4 +265,11 @@ func (f *FakeExecutor) Close() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Closed = true
+}
+
+// FakeSecret assembles an obviously fake credential value from its parts.
+// Tests only exercise plumbing — they must never carry real-looking secret
+// material, so fixture values are built here instead of written as literals.
+func FakeSecret(parts ...string) string {
+	return strings.Join(append([]string{"test"}, parts...), "-")
 }

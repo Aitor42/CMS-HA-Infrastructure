@@ -57,3 +57,6 @@ coverage.out
 
 # Strix runs
 strix_runs/
+
+# Mimosa plugin local hook state (baselines, ledgers, reports)
+.mimosa/

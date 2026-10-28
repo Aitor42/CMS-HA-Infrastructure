@@ -345,6 +345,15 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		}
 	}
 
+	// Everything below reaches a virt-install argv element; a config value
+	// outside the allowed sets must fail here, not at the hypervisor tooling.
+	if err := ValidateURI(c.URI); err != nil {
+		return err
+	}
+	if err := validateVirtInstallOpts(opts); err != nil {
+		return err
+	}
+
 	args := []string{"--connect", c.URI, "--name", opts.Name, "--memory", fmt.Sprintf("%d", opts.RAM), "--vcpus", fmt.Sprintf("%d", opts.VCPUs)}
 
 	if opts.OSVariant != "" {
@@ -454,6 +463,12 @@ func CreateDisk(ctx context.Context, path string, sizeGB int, format string) err
 	if format == "" {
 		return fmt.Errorf("disk format is required (use qcow2)")
 	}
+	if err := validatePath("disk path", path); err != nil {
+		return err
+	}
+	if err := validateDiskFormat("disk format", format); err != nil {
+		return err
+	}
 	args := []string{"create", "-f", format, path, fmt.Sprintf("%dG", sizeGB)}
 	cmd := exec.CommandContext(ctx, "qemu-img", args...) // #nosec G204 -- qemu-img command with validated options
 	out, err := cmd.CombinedOutput()
@@ -475,6 +490,12 @@ func CreateOverlayDisk(ctx context.Context, path, basePath string, sizeGB int) e
 	if sizeGB <= 0 {
 		return fmt.Errorf("overlay size must be positive (got %d)", sizeGB)
 	}
+	if err := validatePath("overlay path", path); err != nil {
+		return err
+	}
+	if err := validatePath("base image path", basePath); err != nil {
+		return err
+	}
 	baseAbs, err := filepath.Abs(basePath)
 	if err != nil {
 		return fmt.Errorf("resolve base image %s: %w", basePath, err)
@@ -492,6 +513,15 @@ func CreateOverlayDisk(ctx context.Context, path, basePath string, sizeGB int) e
 func CreateISO(ctx context.Context, outputPath, sourceDir, volID string) error {
 	if outputPath == "" || sourceDir == "" {
 		return fmt.Errorf("ISO output path and source directory are required")
+	}
+	if err := validatePath("ISO output path", outputPath); err != nil {
+		return err
+	}
+	if err := validatePath("ISO source directory", sourceDir); err != nil {
+		return err
+	}
+	if err := validateArg("ISO volume ID", volID); err != nil {
+		return err
 	}
 	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
 		// Failing to clear the old output would make xorrisofs fail with a

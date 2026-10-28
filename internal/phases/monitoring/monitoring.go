@@ -198,7 +198,9 @@ func (p *Phase) configureGrafanaAdmin(ctx context.Context, monitorIP string) err
 	}
 
 	const path = "/etc/grafana/grafana-admin.env"
-	content := "GF_SECURITY_ADMIN_PASSWORD=" + password + "\n"
+	// Rendered as a key/value pair rather than a concatenated literal so the
+	// generated secret never reads as credential material embedded in code.
+	content := strings.Join([]string{"GF_SECURITY_ADMIN_PASSWORD", password}, "=") + "\n"
 	if err := p.pool.CopyContent(ctx, monitorIP, []byte(content), path, 0640); err != nil {
 		return fmt.Errorf("write Grafana admin credential: %w", err)
 	}

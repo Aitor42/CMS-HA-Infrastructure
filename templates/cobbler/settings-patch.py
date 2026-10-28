@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # settings-patch.py
 #
-# Applies required Cobbler settings.yaml overrides for the CMS infrastructure.
-# Run on the Jumpstart node with: python3 settings-patch.py
+# Emits the Cobbler settings.yaml with the overrides the CMS infrastructure
+# needs. The script only reads the live configuration; the caller redirects
+# the output to a staging file and copies it into place.
+
+import sys
 
 import yaml
 
-path = "/etc/cobbler/settings.yaml"
-with open(path) as f:
+with open("/etc/cobbler/settings.yaml") as f:
     cfg = yaml.safe_load(f) or {}
 
 cfg["server"]                    = "192.168.10.10"
@@ -23,7 +25,5 @@ cfg["always_write_dhcp_entries"] = True
 cfg["bind_zonefile_path"]        = "/var/cache/bind"
 cfg["default_password_crypted"]  = "$6$LOCKED$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
 
-with open(path, "w") as f:
-    yaml.dump(cfg, f, default_flow_style=False)
-
-print("  [OK] settings.yaml updated successfully")
+yaml.safe_dump(cfg, sys.stdout, default_flow_style=False)
+print("  [OK] settings.yaml overrides rendered", file=sys.stderr)

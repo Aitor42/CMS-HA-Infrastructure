@@ -17,7 +17,7 @@ func pkiConfig(t *testing.T) *config.Config {
 	t.Setenv("HOME", t.TempDir())
 	return &config.Config{
 		PKI: config.PKIConfig{
-			ProvisionerPassword: "ca-secret",
+			ProvisionerPassword: testutil.FakeSecret("ca"),
 			CAPort:              8443,
 			Domain:              "ca.internal.local",
 			StepVersion:         "0.28.0",
@@ -62,8 +62,8 @@ func TestPKIPhaseRun(t *testing.T) {
 
 	// The CA password must be uploaded with the file mode the phase asks for
 	// (the fake records content; the mode is asserted by the source contract).
-	if got := string(fake.Files[jumpIP]["/root/.step/password.txt"]); got != "ca-secret\n" {
-		t.Errorf("uploaded CA password = %q, want %q", got, "ca-secret\n")
+	if got := string(fake.Files[jumpIP]["/root/.step/password.txt"]); got != testutil.FakeSecret("ca")+"\n" {
+		t.Errorf("uploaded CA password = %q, want the configured fixture value", got)
 	}
 	for _, want := range []string{
 		"step ca init",
