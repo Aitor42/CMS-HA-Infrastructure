@@ -113,6 +113,31 @@ func TestKubernetesPhaseRun(t *testing.T) {
 	}
 }
 
+func TestKubernetesPhaseIgnoresStaleEtcdNode(t *testing.T) {
+	cfg := kubernetesConfig(t)
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
+				return "K10test::server:token\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
+				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
+				// A stale object from an earlier failed join must not hide a
+				// missing configured member: the phase checks expected names,
+				// not just the row count.
+				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\nstale-node Ready control-plane,etcd\n", "", 0, nil
+			default:
+				return "", "", 0, nil
+			}
+		},
+	}
+
+	if err := kubernetes.NewPhase(cfg, fake).Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestKubernetesPhaseRequiresThreeMasters(t *testing.T) {
 	cfg := kubernetesConfig(t)
 	cfg.Nodes.Masters = cfg.Nodes.Masters[:2]

@@ -60,7 +60,3 @@ func buildKustomizeTar() ([]byte, error) {
 	}
 	return buf.Bytes(), nil
 }
-
-// countNonEmptyLines counts the entries of a `kubectl get ... --no-headers`
-// listing. It lives outside the retry closure so the counting rule (blank lines
-// are not members) is unit tested.

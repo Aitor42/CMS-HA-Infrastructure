@@ -10,14 +10,20 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-func countNonEmptyLines(out string) int {
-	count := 0
+// etcdMemberNames returns the node names in a `kubectl get nodes -l
+// node-role.kubernetes.io/etcd --no-headers` listing. Counting names in Go
+// keeps a stale node object from being mistaken for a live member, and lets the
+// caller report which configured server is actually missing.
+func etcdMemberNames(out string) map[string]bool {
+	members := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) != "" {
-			count++
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
 		}
+		members[fields[0]] = true
 	}
-	return count
+	return members
 }
 
 func runChecked(ctx context.Context, pool ssh.Executor, host, command, action string) error {
