@@ -92,6 +92,72 @@ func TestLibvirt_VirtInstallBuildsExpectedArgs(t *testing.T) {
 	}
 }
 
+// TestLibvirt_VirtInstallISOLocationArgs pins the ISO jumpstart path: the
+// combined --location "<iso>,kernel=...,initrd=..." form must pass validation
+// and reach virt-install verbatim.
+func TestLibvirt_VirtInstallISOLocationArgs(t *testing.T) {
+	argsFile := fakeVirtInstall(t)
+	c := libvirt.NewClient("test:///default")
+
+	err := c.VirtInstall(t.Context(), libvirt.VirtInstallOpts{
+		Name:      "iso-jumpstart",
+		RAM:       3072,
+		VCPUs:     2,
+		OSVariant: "ubuntu24.04",
+		Disks: []libvirt.DiskOpt{
+			{Path: "/var/lib/libvirt/images/jumpstart.qcow2", SizeGB: 30},
+			{Path: "/var/lib/libvirt/images/ubuntu-24.04.5-live-server-amd64.iso"},
+			{Path: "/var/lib/libvirt/images/seed.iso"},
+		},
+		Networks: []libvirt.NetworkOpt{
+			{Network: "internal"},
+		},
+		Location:      "/var/lib/libvirt/images/ubuntu-24.04.5-live-server-amd64.iso,kernel=casper/vmlinuz,initrd=casper/initrd",
+		ExtraArgs:     "autoinstall ds=nocloud console=ttyS0,115200n8",
+		GraphicsNone:  true,
+		NoAutoConsole: true,
+		NoReboot:      true,
+		Wait:          -1,
+	})
+	if err != nil {
+		t.Fatalf("VirtInstall: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	for _, want := range []string{
+		"--location", "/var/lib/libvirt/images/ubuntu-24.04.5-live-server-amd64.iso,kernel=casper/vmlinuz,initrd=casper/initrd",
+		"--extra-args", "autoinstall ds=nocloud console=ttyS0,115200n8",
+	} {
+		found := false
+		for _, arg := range got {
+			if arg == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("virt-install argv missing %q (got %v)", want, got)
+		}
+	}
+}
+
+func TestLibvirt_VirtInstallISOLocationRejectsUnsafeOptions(t *testing.T) {
+	c := libvirt.NewClient("test:///default")
+	err := c.VirtInstall(t.Context(), libvirt.VirtInstallOpts{
+		Name:     "iso-jumpstart",
+		RAM:      3072,
+		VCPUs:    2,
+		Location: "/var/lib/libvirt/images/ubuntu.iso,kernel=casper/vmlinuz,evil=$(reboot)",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not a supported key=value pair") {
+		t.Fatalf("VirtInstall with an unsafe location option = %v, want a key=value pair error", err)
+	}
+}
+
 func TestLibvirt_VirtInstallImportArgs(t *testing.T) {
 	argsFile := fakeVirtInstall(t)
 	c := libvirt.NewClient("test:///default")

@@ -42,6 +42,12 @@ var (
 	// virt-install forwards to the installer kernel command line.
 	extraArgsRe = regexp.MustCompile(`^[A-Za-z0-9 ._=/,:+-]*$`)
 
+	// locationKeyRe/locationValueRe bound the key=value segments that may
+	// follow an install location (e.g. "kernel=casper/vmlinuz" selects the
+	// kernel virt-install boots from inside an ISO).
+	locationKeyRe   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
+	locationValueRe = regexp.MustCompile(`^[A-Za-z0-9._+/:@-]*$`)
+
 	// diskFormats are the on-disk formats the lab may create.
 	diskFormats = map[string]bool{"qcow2": true, "raw": true}
 )
@@ -139,15 +145,31 @@ func validateVirtInstallOpts(opts VirtInstallOpts) error {
 	return nil
 }
 
-// validateInstallLocation accepts an http(s) URL or an absolute on-disk tree,
-// which are the two install sources virt-install understands here.
+// validateInstallLocation accepts an http(s) URL, an on-disk tree, or the
+// virt-install combined form "<url-or-path>,kernel=...,initrd=..." used to
+// boot directly from an ISO's kernel and initrd (the ISO jumpstart path).
 func validateInstallLocation(location string) error {
-	if strings.HasPrefix(location, "http://") || strings.HasPrefix(location, "https://") {
-		u, err := url.Parse(location)
+	segments := strings.Split(location, ",")
+	if err := validateLocationSource(segments[0]); err != nil {
+		return err
+	}
+	for _, segment := range segments[1:] {
+		key, value, ok := strings.Cut(segment, "=")
+		if !ok || !locationKeyRe.MatchString(key) || !locationValueRe.MatchString(value) {
+			return fmt.Errorf("install location option %q is not a supported key=value pair (allowed keys are option names with paths or flags)", segment)
+		}
+	}
+	return nil
+}
+
+// validateLocationSource validates the URL or path part of an install location.
+func validateLocationSource(source string) error {
+	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		u, err := url.Parse(source)
 		if err != nil || u.Host == "" {
-			return fmt.Errorf("install location %q is not a valid URL", location)
+			return fmt.Errorf("install location %q is not a valid URL", source)
 		}
 		return nil
 	}
-	return validatePath("install location", location)
+	return validatePath("install location", source)
 }
