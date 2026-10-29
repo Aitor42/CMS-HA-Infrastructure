@@ -235,14 +235,21 @@ class role::cms_frontend {
 
   # Copy over the tree instead of deleting /var/www/html first. The uploads
   # directory is an NFS mount and wp-config.php contains generated secrets;
-  # a re-run of this resource must not wipe either of them. The Apache package's
-  # default index.html is removed explicitly: DirectoryIndex prefers index.html
-  # over index.php, so it would shadow the WordPress home page.
+  # a re-run of this resource must not wipe either of them.
   exec { 'wordpress-deploy':
-    command => '/bin/rm -f /var/www/html/index.html && /bin/cp -a /tmp/wordpress/. /var/www/html/ && \
+    command => '/bin/cp -a /tmp/wordpress/. /var/www/html/ && \
                 /bin/chown -R www-data:www-data /var/www/html/',
     creates => '/var/www/html/wp-config-sample.php',
     require => Exec['wordpress-extract'],
+  }
+
+  # Apache ships /var/www/html/index.html and DirectoryIndex prefers it over
+  # index.php, so it shadows the WordPress home page. Keep this as its own
+  # resource: wordpress-deploy has a creates guard and is skipped on re-runs,
+  # so an inline removal would leave the file behind on an upgraded node.
+  file { '/var/www/html/index.html':
+    ensure  => absent,
+    require => [Package['apache2'], Exec['wordpress-deploy']],
   }
 
   # ---------------------------------------------------------------------------

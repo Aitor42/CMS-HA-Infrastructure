@@ -94,6 +94,51 @@ func TestWordPressDeployPreservesUploadsAndConfig(t *testing.T) {
 	}
 }
 
+// TestWordPressDefaultIndexRemovalIsIndependentOfDeployGuard guards the upgrade
+// path: wordpress-deploy is guarded by creates, so removing Apache's default
+// index.html inside that command only works on a fresh node. On an existing
+// node the whole exec is skipped and the "It works" page keeps shadowing
+// WordPress. The removal must be its own idempotent resource that still runs
+// after the apache2 package may have (re)created the file.
+func TestWordPressDefaultIndexRemovalIsIndependentOfDeployGuard(t *testing.T) {
+	cms := readRepoFile(t, "puppet/modules/role/manifests/cms_frontend.pp")
+
+	deploy := puppetResourceBlock(t, cms, "exec { 'wordpress-deploy':")
+	if strings.Contains(deploy, "/var/www/html/index.html") {
+		t.Error("wordpress-deploy still removes index.html behind its creates guard; an upgrade re-run would skip it")
+	}
+
+	removal := puppetResourceBlock(t, cms, "file { '/var/www/html/index.html':")
+	if !strings.Contains(removal, "ensure  => absent") && !strings.Contains(removal, "ensure => absent") {
+		t.Error("index.html removal is not an idempotent ensure => absent file resource")
+	}
+	if !strings.Contains(removal, "Package['apache2']") {
+		t.Error("index.html removal does not run after the apache2 package can recreate it")
+	}
+}
+
+func puppetResourceBlock(t *testing.T, manifest, header string) string {
+	t.Helper()
+	start := strings.Index(manifest, header)
+	if start < 0 {
+		t.Fatalf("manifest does not declare %s", header)
+	}
+	depth := 0
+	for i := start; i < len(manifest); i++ {
+		switch manifest[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return manifest[start : i+1]
+			}
+		}
+	}
+	t.Fatalf("unbalanced braces after %s", header)
+	return ""
+}
+
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
 	data, err := os.ReadFile(repoFile(t, rel))
