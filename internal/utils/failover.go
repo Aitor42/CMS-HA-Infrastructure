@@ -252,7 +252,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	// It is generous on purpose: a slow-but-correct failover must not be
 	// recorded as a broken one.
 	mariadbRunning := retry.Wait(ctx, 480*time.Second, 5*time.Second, func() bool {
-		return f.mariadbRunningOn(ctx, standby.IP, standby.Name)
+		return f.mariadbRunningOn(ctx, standby.IP, standby)
 	})
 	if !mariadbRunning {
 		pass = false
@@ -342,7 +342,7 @@ func (f *FailoverTester) requireDRBDPreflight(ctx context.Context, primary, stan
 	if err := f.requireWatchdog(ctx, standby); err != nil {
 		return err
 	}
-	if !f.mariadbRunningOn(ctx, primary.IP, primary.Name) {
+	if !f.mariadbRunningOn(ctx, primary.IP, primary) {
 		return fmt.Errorf("mariadb-0 is not Running and Ready on %s before the failover", primary.Name)
 	}
 	return nil
@@ -384,14 +384,21 @@ func (f *FailoverTester) mariadbPod(ctx context.Context, host string) (node, pha
 }
 
 // mariadbRunningOn reports whether mariadb-0 is Running and Ready on node,
-// using host's kubectl view. The node is compared exactly: a substring match
-// would let "internal-master2" match "internal-master20".
-func (f *FailoverTester) mariadbRunningOn(ctx context.Context, host, node string) bool {
+// using host's kubectl view. The node is compared exactly (by configured name
+// or FQDN): a substring match would let "internal-master2" match
+// "internal-master20".
+func (f *FailoverTester) mariadbRunningOn(ctx context.Context, host string, node config.NodeDetail) bool {
 	podNode, phase, ready, err := f.mariadbPod(ctx, host)
 	if err != nil {
 		return false
 	}
-	return podNode == node && phase == "Running" && ready
+	return nodeMatches(podNode, node) && phase == "Running" && ready
+}
+
+// nodeMatches reports whether a Kubernetes node identity (the configured name
+// or its FQDN, both accepted by the readiness check) refers to node.
+func nodeMatches(identity string, node config.NodeDetail) bool {
+	return identity == node.Name || (node.FQDN != "" && identity == node.FQDN)
 }
 
 // testDRBDPowerCutFailover loses the master that currently holds the Primary
@@ -448,7 +455,7 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 	// it is already off) and promote itself. Same generous budget as scenario 1:
 	// a slow-but-correct failover must not be recorded as a broken one.
 	mariadbRunning := retry.Wait(ctx, 480*time.Second, 5*time.Second, func() bool {
-		return f.mariadbRunningOn(ctx, standby.IP, standby.Name)
+		return f.mariadbRunningOn(ctx, standby.IP, standby)
 	})
 	if !mariadbRunning {
 		pass = false
@@ -772,10 +779,11 @@ func (f *FailoverTester) reachableMaster(ctx context.Context) (config.NodeDetail
 	return config.NodeDetail{}, errors.New("no master node accepted a command")
 }
 
-// nodeIsMaster reports whether name is one of the configured masters.
+// nodeIsMaster reports whether name (a Kubernetes node identity) is one of the
+// configured masters.
 func (f *FailoverTester) nodeIsMaster(name string) bool {
 	for _, master := range f.cfg.Nodes.Masters {
-		if master.Name == name {
+		if nodeMatches(name, master) {
 			return true
 		}
 	}

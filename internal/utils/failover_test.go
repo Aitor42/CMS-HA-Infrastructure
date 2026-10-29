@@ -92,8 +92,8 @@ func failoverConfig() *config.Config {
 		},
 		Nodes: config.NodesConfig{
 			Masters: []config.NodeDetail{
-				{Name: "internal-master1", IP: "192.168.10.11"},
-				{Name: "internal-master2", IP: "192.168.10.12"},
+				{Name: "internal-master1", IP: "192.168.10.11", FQDN: "internal-master1.internal.local"},
+				{Name: "internal-master2", IP: "192.168.10.12", FQDN: "internal-master2.internal.local"},
 			},
 			Workers: []config.NodeDetail{
 				{Name: "internal-worker1", IP: "192.168.10.13"},
@@ -262,6 +262,40 @@ func TestMariadbPodParsesNodePhaseAndReady(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMariadbRunningOnAcceptsNameOrFQDN(t *testing.T) {
+	cfg := failoverConfig()
+	node := cfg.Nodes.Masters[0]
+
+	for _, identity := range []string{node.Name, node.FQDN} {
+		t.Run(identity, func(t *testing.T) {
+			ft := newTester(cfg, newFakeDomain(), func(_ context.Context, _, cmd string) (string, string, int, error) {
+				if cmd != mariadbPodQuery {
+					return "", "", 1, fmt.Errorf("unexpected command %q", cmd)
+				}
+				return identity + " Running True\n", "", 0, nil
+			})
+			if !ft.mariadbRunningOn(t.Context(), node.IP, node) {
+				t.Fatalf("mariadbRunningOn(%q) = false, want true", identity)
+			}
+			if !ft.nodeIsMaster(identity) {
+				t.Fatalf("nodeIsMaster(%q) = false, want true", identity)
+			}
+		})
+	}
+
+	t.Run("substring is not a match", func(t *testing.T) {
+		ft := newTester(cfg, newFakeDomain(), func(_ context.Context, _, cmd string) (string, string, int, error) {
+			if cmd != mariadbPodQuery {
+				return "", "", 1, fmt.Errorf("unexpected command %q", cmd)
+			}
+			return node.Name + "0 Running True\n", "", 0, nil
+		})
+		if ft.mariadbRunningOn(t.Context(), node.IP, node) {
+			t.Fatal("mariadbRunningOn matched a node whose name merely contains the configured name")
+		}
+	})
 }
 
 func TestDRBDFailoverShutsDownCurrentPrimary(t *testing.T) {
