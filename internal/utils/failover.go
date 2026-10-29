@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,16 +26,71 @@ type FailoverOpts struct {
 // test (and must not be reported as a failover failure) — see shutdownForTest.
 const shutdownGracePeriod = 90 * time.Second
 
+// restoreSSHTimeout is how long a restarted node has to accept SSH. A node that
+// never comes back must fail the scenario: otherwise a test could report PASS
+// after leaving the "restored" node down. restoreRoleTimeout covers the DRBD
+// reconnect and the after-sb-1pri resync after a power cut.
+const (
+	restoreSSHTimeout  = 180 * time.Second
+	restoreRoleTimeout = 180 * time.Second
+)
+
+// errDRBDPairUnavailable means the two-node DRBD pair cannot be inspected
+// because at least one master did not answer. The power-cut scenario treats
+// this as an expected SKIP under --skip-restore (the previous scenario
+// intentionally left a node down) but as a failure otherwise.
+var errDRBDPairUnavailable = errors.New("DRBD pair is not fully reachable")
+
+// DomainController is the libvirt subset the failover scenarios use.
+// *libvirt.Client implements it; tests use a fake so the orchestration can be
+// exercised without a hypervisor.
+type DomainController interface {
+	Shutdown(ctx context.Context, name string) error
+	Destroy(ctx context.Context, name string) error
+	Start(ctx context.Context, name string) error
+	Resume(ctx context.Context, name string) error
+	DomainState(ctx context.Context, name string) (string, error)
+}
+
+// The production client must keep satisfying the interface the scenarios use.
+var _ DomainController = (*libvirt.Client)(nil)
+
 // FailoverTester struct contains dependencies for failover tests.
 type FailoverTester struct {
-	cfg     *config.Config
-	ssh     ssh.Executor
-	libvirt *libvirt.Client
+	cfg            *config.Config
+	ssh            ssh.Executor
+	libvirt        DomainController
+	reachable      func(ctx context.Context, host, vhost string) bool
+	reachableHTTPS func(ctx context.Context, host, vhost string) bool
 }
 
 // NewFailoverTester initializes a new FailoverTester.
-func NewFailoverTester(cfg *config.Config, s ssh.Executor, l *libvirt.Client) *FailoverTester {
-	return &FailoverTester{cfg: cfg, ssh: s, libvirt: l}
+func NewFailoverTester(cfg *config.Config, s ssh.Executor, l DomainController) *FailoverTester {
+	return &FailoverTester{
+		cfg:            cfg,
+		ssh:            s,
+		libvirt:        l,
+		reachable:      httpcheck.LBReachable,
+		reachableHTTPS: httpcheck.LBReachableHTTPS,
+	}
+}
+
+// lbReachable asks whether the VIP serves the CMS over HTTPS or HTTP. The
+// function field keeps the failover orchestration testable without a live LB.
+func (f *FailoverTester) lbReachable(ctx context.Context, host string) bool {
+	if f.reachable == nil {
+		return httpcheck.LBReachable(ctx, host, f.cfg.TrafficVHost())
+	}
+	return f.reachable(ctx, host, f.cfg.TrafficVHost())
+}
+
+// lbReachableHTTPS is the strict probe used by the VIP scenario, whose claim is
+// that the surviving balancer serves HTTPS, not merely the HTTP->HTTPS redirect.
+func (f *FailoverTester) lbReachableHTTPS(ctx context.Context, host string) bool {
+	if f.reachableHTTPS == nil {
+		return httpcheck.LBReachableHTTPS(ctx, host, f.cfg.TrafficVHost())
+	}
+	return f.reachableHTTPS(ctx, host, f.cfg.TrafficVHost())
 }
 
 // Run executes the failover scenarios.
@@ -91,7 +147,25 @@ func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
 // the ACPI request past the grace period is powered off the hard way: a power
 // cut is still a valid node-loss scenario, and aborting because the guest
 // wedged its own shutdown would report a healthy cluster as broken.
+//
+// The domain is inspected first. A paused guest ignores ACPI, so it is resumed
+// before the request; a guest that is already off or crashed is rejected,
+// because shutting down a node that was never running would let the scenario
+// report a failover that the test did not cause.
 func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error {
+	state, err := f.libvirt.DomainState(ctx, name)
+	if err != nil {
+		return fmt.Errorf("query state of %s before shutdown: %w", name, err)
+	}
+	switch state {
+	case "shut off", "crashed":
+		return fmt.Errorf("%s is already %q: the scenario cannot prove a failover from a running node", name, state)
+	case "paused", "pmsuspended":
+		if err := f.libvirt.Resume(ctx, name); err != nil {
+			return fmt.Errorf("resume paused domain %s: %w", name, err)
+		}
+	}
+
 	if err := f.libvirt.Shutdown(ctx, name); err != nil {
 		return fmt.Errorf("shutdown %s: %w", name, err)
 	}
@@ -135,40 +209,60 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 		return true
 	}
 
-	master1 := f.cfg.Nodes.Masters[0]
-	master2 := f.cfg.Nodes.Masters[1]
+	// Fail over the node that actually holds the Primary role, not Masters[0].
+	// Shutting down a Secondary leaves the writer untouched: the cluster keeps
+	// serving and the scenario would report PASS without exercising failover.
+	primary, standby, err := f.drbdPrimary(ctx)
+	if err != nil {
+		if errors.Is(err, errDRBDPairUnavailable) && opts.SkipRestore {
+			logging.Warn("Skipping DRBD failover test: --skip-restore left a master down (%v)", err)
+			f.printSkipped("DRBD Master Failover")
+			return true
+		}
+		logging.Error("cannot determine the DRBD Primary before the test: %v", err)
+		f.logFailoverDiagnostics(ctx, "DRBD role could not be established before the failover")
+		f.printSummary("DRBD Master Failover", false, time.Since(start))
+		return false
+	}
 
-	if err := f.shutdownForTest(ctx, master1.Name); err != nil {
+	// The watchdog on the survivor is what promotes it, and MariaDB must be
+	// healthy on the writer before the test starts: otherwise a failed
+	// promotion cannot be attributed to the node loss.
+	if err := f.requireDRBDPreflight(ctx, primary, standby); err != nil {
+		logging.Error("%v", err)
+		f.logFailoverDiagnostics(ctx, "DRBD preflight failed before the failover")
+		f.printSummary("DRBD Master Failover", false, time.Since(start))
+		return false
+	}
+
+	logging.Info("Shutting down %s, the current DRBD Primary", primary.Name)
+	if err := f.shutdownForTest(ctx, primary.Name); err != nil {
 		f.printSummary("DRBD Master Failover", false, time.Since(start))
 		logging.Error("%v", err)
 		return false
 	}
-	// Wait until master2 has promoted DRBD and MariaDB is running *on master2*.
-	// Matching the pod by name only would also match the pod object left behind
-	// on the dead node and would pass without any failover at all, so the node
-	// it is scheduled on is part of the assertion. The window has to cover the
-	// DRBD ping timeout and its strikes, the fence action, the promote, the node
-	// label, the forced deletion of the pod stranded on the dead node, the pod
-	// reschedule and the container start (which may have to pull the MariaDB
-	// image on a master that never ran it). It is generous on purpose: a
-	// slow-but-correct failover must not be recorded as a broken one.
+	// Wait until standby has promoted DRBD and MariaDB is Running and Ready
+	// *on standby*. Matching the pod by name only would also match the pod
+	// object left behind on the dead node and would pass without any failover
+	// at all, so the node it is scheduled on is part of the assertion. The
+	// window has to cover the DRBD ping timeout and its strikes, the fence
+	// action, the promote, the node label, the forced deletion of the pod
+	// stranded on the dead node, the pod reschedule and the container start
+	// (which may have to pull the MariaDB image on a master that never ran it).
+	// It is generous on purpose: a slow-but-correct failover must not be
+	// recorded as a broken one.
 	mariadbRunning := retry.Wait(ctx, 480*time.Second, 5*time.Second, func() bool {
-		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP,
-			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
-		if err != nil {
-			return false
-		}
-		return strings.Contains(out, master2.Name) && strings.Contains(out, "Running")
+		return f.mariadbRunningOn(ctx, standby.IP, standby.Name)
 	})
 	if !mariadbRunning {
 		pass = false
-		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running on %s", master2.Name))
+		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running and Ready on %s", standby.Name))
 	}
 
 	// Only then check the CMS: every WordPress request needs the database, so
 	// the VIP is expected to serve again as soon as MariaDB is back.
 	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+		return f.lbReachable(ctx, f.cfg.LBVIP())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the database recovered")
@@ -176,22 +270,20 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	}
 
 	if !opts.SkipRestore {
-		if err := f.libvirt.Start(ctx, master1.Name); err != nil {
+		if err := f.restoreNode(ctx, primary); err != nil {
 			pass = false
-			logging.Error("failed to restore %s: %v", master1.Name, err)
-		}
-		f.waitForSSH(ctx, master1.IP, 120*time.Second)
-
-		// The return path is part of the scenario: a restarted master must come
-		// back as the Secondary. A node that keeps the Primary role it had before
-		// the restart is a split brain — the pod runs on master2 while master1
-		// also believes it owns the volume.
-		if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
-			out, _, _, err := f.ssh.RunCommand(ctx, master2.IP, "drbdadm role cms_data")
+			logging.Error("%v", err)
+			f.logFailoverDiagnostics(ctx, "the DRBD Primary did not come back after the failover")
+		} else if !retry.Wait(ctx, restoreRoleTimeout, 5*time.Second, func() bool {
+			// The return path is part of the scenario: a restarted master must
+			// come back as the Secondary. A node that keeps the Primary role it
+			// had before the restart is a split brain — the pod runs on standby
+			// while the restarted node also believes it owns the volume.
+			out, _, _, err := f.ssh.RunCommand(ctx, standby.IP, "drbdadm role cms_data")
 			return err == nil && strings.TrimSpace(out) == "Primary/Secondary"
 		}) {
 			pass = false
-			logging.Error("%s did not return as Secondary (%s is not Primary/Secondary)", master1.Name, master2.Name)
+			logging.Error("%s did not return as Secondary (%s is not Primary/Secondary)", primary.Name, standby.Name)
 			f.logFailoverDiagnostics(ctx, "restarted master did not come back as Secondary")
 		}
 	}
@@ -201,22 +293,105 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	return pass
 }
 
-// drbdPrimary reports which master currently holds the Primary role, as seen
-// from master1's DRBD ("<local>/<peer>").
+// drbdPrimary reports which master currently holds the Primary role and which
+// one is the standby. Both masters are queried and each answer is read as
+// "<local>/<peer>": relying on Masters[0] alone breaks as soon as that node is
+// the one that is down (for example on a --skip-restore re-run) and, worse,
+// could pick a Secondary as the node to fail over.
 func (f *FailoverTester) drbdPrimary(ctx context.Context) (primary, standby config.NodeDetail, err error) {
-	master1, master2 := f.cfg.Nodes.Masters[0], f.cfg.Nodes.Masters[1]
-	out, _, _, runErr := f.ssh.RunCommand(ctx, master1.IP, "drbdadm role cms_data")
+	masters := f.cfg.Nodes.Masters[:2]
+	roles := make(map[string]string, len(masters))
+	reachable := 0
+	for _, master := range masters {
+		out, _, code, runErr := f.ssh.RunCommand(ctx, master.IP, "drbdadm role cms_data")
+		if runErr != nil || code != 0 {
+			continue
+		}
+		role := strings.TrimSpace(out)
+		local, _, _ := strings.Cut(role, "/")
+		if local == "" {
+			continue
+		}
+		roles[master.Name] = local
+		reachable++
+	}
+	if reachable != len(masters) {
+		return primary, standby, errDRBDPairUnavailable
+	}
+
+	var primaries, secondaries []config.NodeDetail
+	for _, master := range masters {
+		switch roles[master.Name] {
+		case "Primary":
+			primaries = append(primaries, master)
+		case "Secondary":
+			secondaries = append(secondaries, master)
+		}
+	}
+	if len(primaries) != 1 || len(secondaries) != 1 {
+		return primary, standby, fmt.Errorf("expected one Primary and one Secondary, got roles %v (the volume is not a healthy Primary/Secondary pair)", roles)
+	}
+	return primaries[0], secondaries[0], nil
+}
+
+// requireDRBDPreflight asserts the state the failover depends on: the watchdog
+// on the survivor is active and can promote, and the database is healthy on the
+// writer. Without this a broken watchdog or an already-down MariaDB is reported
+// as a failed failover even though the node loss was not the cause.
+func (f *FailoverTester) requireDRBDPreflight(ctx context.Context, primary, standby config.NodeDetail) error {
+	if err := f.requireWatchdog(ctx, standby); err != nil {
+		return err
+	}
+	if !f.mariadbRunningOn(ctx, primary.IP, primary.Name) {
+		return fmt.Errorf("mariadb-0 is not Running and Ready on %s before the failover", primary.Name)
+	}
+	return nil
+}
+
+// requireWatchdog fails unless drbd-failover-watchdog is active on node.
+func (f *FailoverTester) requireWatchdog(ctx context.Context, node config.NodeDetail) error {
+	_, stderr, code, err := f.ssh.RunCommand(ctx, node.IP, "systemctl is-active --quiet drbd-failover-watchdog")
+	if err != nil || code != 0 {
+		return fmt.Errorf("drbd-failover-watchdog is not active on %s (exit %d: %s): the survivor could not promote the volume",
+			node.Name, code, strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+// mariadbPodQuery asks kubectl for the MariaDB pod's node, phase and Ready
+// condition in one call. The Ready condition matters: a pod that is Running but
+// not Ready (still starting, or Terminating) cannot serve the CMS.
+const mariadbPodQuery = "kubectl --request-timeout=10s get pod mariadb-0 -n cms " +
+	"-o jsonpath='{.spec.nodeName} {.status.phase} {.status.conditions[?(@.type==\"Ready\")].status}'"
+
+// mariadbPod parses the node, phase and readiness of mariadb-0 as seen from
+// host. kubectl is run on the host whose cluster view is being used, so a
+// failure here means the pod (or the node) is not available to that host.
+func (f *FailoverTester) mariadbPod(ctx context.Context, host string) (node, phase string, ready bool, err error) {
+	out, stderr, code, runErr := f.ssh.RunCommand(ctx, host, mariadbPodQuery)
 	if runErr != nil {
-		return primary, standby, fmt.Errorf("querying DRBD role on %s: %w", master1.IP, runErr)
+		return "", "", false, fmt.Errorf("query mariadb-0 on %s: %w", host, runErr)
 	}
-	switch role := strings.TrimSpace(out); role {
-	case "Primary/Secondary":
-		return master1, master2, nil
-	case "Secondary/Primary":
-		return master2, master1, nil
-	default:
-		return primary, standby, fmt.Errorf("unexpected DRBD role on %s: %q (the volume is not a healthy Primary/Secondary pair)", master1.IP, role)
+	if code != 0 {
+		return "", "", false, fmt.Errorf("query mariadb-0 on %s exited %d: %s", host, code, strings.TrimSpace(stderr))
 	}
+	fields := strings.Fields(out)
+	if len(fields) < 2 {
+		return "", "", false, fmt.Errorf("unexpected mariadb-0 output on %s: %q", host, strings.TrimSpace(out))
+	}
+	ready = len(fields) >= 3 && fields[2] == "True"
+	return fields[0], fields[1], ready, nil
+}
+
+// mariadbRunningOn reports whether mariadb-0 is Running and Ready on node,
+// using host's kubectl view. The node is compared exactly: a substring match
+// would let "internal-master2" match "internal-master20".
+func (f *FailoverTester) mariadbRunningOn(ctx context.Context, host, node string) bool {
+	podNode, phase, ready, err := f.mariadbPod(ctx, host)
+	if err != nil {
+		return false
+	}
+	return podNode == node && phase == "Running" && ready
 }
 
 // testDRBDPowerCutFailover loses the master that currently holds the Primary
@@ -238,7 +413,19 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 
 	primary, standby, err := f.drbdPrimary(ctx)
 	if err != nil {
+		if errors.Is(err, errDRBDPairUnavailable) && opts.SkipRestore {
+			logging.Warn("Skipping DRBD power-cut test: --skip-restore left a master down (%v)", err)
+			f.printSkipped("DRBD Master Power Cut")
+			return true
+		}
 		logging.Error("%v", err)
+		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
+		return false
+	}
+
+	if err := f.requireDRBDPreflight(ctx, primary, standby); err != nil {
+		logging.Error("%v", err)
+		f.logFailoverDiagnostics(ctx, "DRBD preflight failed before the power cut")
 		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
 		return false
 	}
@@ -261,16 +448,14 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 	// it is already off) and promote itself. Same generous budget as scenario 1:
 	// a slow-but-correct failover must not be recorded as a broken one.
 	mariadbRunning := retry.Wait(ctx, 480*time.Second, 5*time.Second, func() bool {
-		out, _, _, err := f.ssh.RunCommand(ctx, standby.IP,
-			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName} {.status.phase}'")
-		return err == nil && strings.Contains(out, standby.Name) && strings.Contains(out, "Running")
+		return f.mariadbRunningOn(ctx, standby.IP, standby.Name)
 	})
 	if !mariadbRunning {
 		pass = false
-		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running on %s after the power cut", standby.Name))
+		f.logFailoverDiagnostics(ctx, fmt.Sprintf("MariaDB pod did not come back Running and Ready on %s after the power cut", standby.Name))
 	}
 	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+		return f.lbReachable(ctx, f.cfg.LBVIP())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on Load Balancer VIP after the power-cut failover")
@@ -278,17 +463,15 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 	}
 
 	if !opts.SkipRestore {
-		if err := f.libvirt.Start(ctx, primary.Name); err != nil {
+		if err := f.restoreNode(ctx, primary); err != nil {
 			pass = false
-			logging.Error("failed to restore %s: %v", primary.Name, err)
-		}
-		f.waitForSSH(ctx, primary.IP, 120*time.Second)
-
-		// The point of the scenario: the node that comes back with stale Primary
-		// metadata must end up as the Secondary, with the survivor as the only
-		// writer. The budget covers the boot guard, the reconnect and the resync
-		// after-sb-1pri triggers.
-		if !retry.Wait(ctx, 180*time.Second, 5*time.Second, func() bool {
+			logging.Error("%v", err)
+			f.logFailoverDiagnostics(ctx, "the power-cut master did not come back")
+		} else if !retry.Wait(ctx, restoreRoleTimeout, 5*time.Second, func() bool {
+			// The point of the scenario: the node that comes back with stale
+			// Primary metadata must end up as the Secondary, with the survivor
+			// as the only writer. The budget covers the boot guard, the
+			// reconnect and the resync after-sb-1pri triggers.
 			out, _, _, err := f.ssh.RunCommand(ctx, standby.IP, "drbdadm role cms_data")
 			return err == nil && strings.TrimSpace(out) == "Primary/Secondary"
 		}) {
@@ -326,7 +509,7 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	// covers nginx noticing the dead backend and the surviving frontend serving
 	// the request on its own.
 	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+		return f.lbReachable(ctx, f.cfg.LBVIP())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not returning HTTP 200/301/302 after cms1 shutdown")
@@ -334,11 +517,11 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	}
 
 	if !opts.SkipRestore {
-		if err := f.libvirt.Start(ctx, cms1.Name); err != nil {
+		if err := f.restoreNode(ctx, cms1); err != nil {
 			pass = false
-			logging.Error("failed to restore %s: %v", cms1.Name, err)
+			logging.Error("%v", err)
+			f.logFailoverDiagnostics(ctx, "the CMS frontend did not come back after the failover")
 		}
-		f.waitForSSH(ctx, cms1.IP, 120*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -358,7 +541,15 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	}
 
 	worker1 := f.cfg.Nodes.Workers[0]
-	master2 := f.cfg.Nodes.Masters[1]
+
+	// Any master can answer kubectl: Masters[1] is not guaranteed to be up (a
+	// previous scenario may have left it down), so pick the first that answers.
+	master, err := f.reachableMaster(ctx)
+	if err != nil {
+		logging.Error("cannot run the worker failover test: %v", err)
+		f.printSummary("K3s Worker Failover", false, time.Since(start))
+		return false
+	}
 
 	if err := f.shutdownForTest(ctx, worker1.Name); err != nil {
 		f.printSummary("K3s Worker Failover", false, time.Since(start))
@@ -374,17 +565,17 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
 		// Query mariadb-0 by name: `grep mariadb` also matches the backup and
 		// restore CronJob pods, so a running backup could hide a database that
-		// is actually down.
-		out, _, _, err := f.ssh.RunCommand(ctx, master2.IP,
-			"kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.status.phase}'")
-		return err == nil && strings.TrimSpace(out) == "Running"
+		// is actually down. It must stay Running and Ready on a master; a pod
+		// that lands on a worker has lost its hostPath volume.
+		podNode, phase, ready, err := f.mariadbPod(ctx, master.IP)
+		return err == nil && phase == "Running" && ready && f.nodeIsMaster(podNode)
 	}) {
 		pass = false
-		logging.Warn("MariaDB pod is not Running after worker1 was shut down")
-		f.logFailoverDiagnostics(ctx, "MariaDB pod is not Running after the worker failover")
+		logging.Warn("MariaDB pod is not Running and Ready on a master after worker1 was shut down")
+		f.logFailoverDiagnostics(ctx, "MariaDB pod is not Running and Ready after the worker failover")
 	}
 	if !retry.Wait(ctx, 60*time.Second, 2*time.Second, func() bool {
-		return httpcheck.LBReachable(ctx, f.cfg.LBVIP(), f.cfg.TrafficVHost())
+		return f.lbReachable(ctx, f.cfg.LBVIP())
 	}) {
 		pass = false
 		logging.Warn("CMS frontend not reachable on the Load Balancer VIP after worker1 was shut down")
@@ -392,11 +583,11 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	}
 
 	if !opts.SkipRestore {
-		if err := f.libvirt.Start(ctx, worker1.Name); err != nil {
+		if err := f.restoreNode(ctx, worker1); err != nil {
 			pass = false
-			logging.Error("failed to restore %s: %v", worker1.Name, err)
+			logging.Error("%v", err)
+			f.logFailoverDiagnostics(ctx, "the worker did not come back after the failover")
 		}
-		f.waitForSSH(ctx, worker1.IP, 120*time.Second)
 	}
 
 	duration := time.Since(start)
@@ -426,23 +617,31 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 		return true
 	}
 
-	var holders []*config.NodeDetail
-	for i := range f.cfg.Nodes.LBs {
-		lb := &f.cfg.Nodes.LBs[i]
-		if lb.IP != "" && f.lbHoldsVIP(ctx, lb.IP, vip) {
-			holders = append(holders, lb)
-		}
-	}
-	if len(holders) != 1 {
+	holders, reachable, total := f.vipOwnership(ctx, vip)
+	if holders != 1 || reachable != total {
 		// Zero holders means the front door is already down; two holders is a
-		// VRRP split. Neither is a failover the test caused, so report it
-		// instead of shutting a balancer down on top of a broken VIP.
-		logging.Warn("Expected exactly one balancer to hold the VIP %s before the test, found %d", vip, len(holders))
+		// VRRP split; an unreachable balancer means the state cannot be
+		// established. None is a failover the test caused, so report it instead
+		// of shutting a balancer down on top of a broken VIP.
+		logging.Warn("Expected exactly one balancer to hold the VIP %s before the test, found %d (reachable %d/%d)",
+			vip, holders, reachable, total)
 		f.logLBState(ctx, "VIP ownership is not 1-of-2 before the LB failover")
 		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
 		return false
 	}
-	holder := holders[0]
+	var holder *config.NodeDetail
+	for i := range f.cfg.Nodes.LBs {
+		lb := &f.cfg.Nodes.LBs[i]
+		if lb.IP != "" && f.lbHoldsVIP(ctx, lb.IP, vip) {
+			holder = lb
+			break
+		}
+	}
+	if holder == nil {
+		logging.Warn("Skipping LB failover test: the VIP holder could not be identified")
+		f.printSkipped("Load Balancer VIP Failover")
+		return true
+	}
 	var survivor *config.NodeDetail
 	for i := range f.cfg.Nodes.LBs {
 		lb := &f.cfg.Nodes.LBs[i]
@@ -472,35 +671,43 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 		return false
 	}
 
-	// The survivor must both acquire the address and serve the CMS through it.
-	// Waiting on the address alone would pass while nginx is still down, and
-	// waiting on HTTPS alone could be answered by a stale connection.
+	// The survivor must both acquire the address and serve the CMS through it
+	// over HTTPS. Waiting on the address alone would pass while nginx is still
+	// down; accepting plain HTTP would pass on the redirect alone, without
+	// proving that the survivor terminates TLS.
 	if !retry.Wait(ctx, 90*time.Second, 2*time.Second, func() bool {
 		return f.lbHoldsVIP(ctx, survivor.IP, vip) &&
-			httpcheck.LBReachable(ctx, vip, f.cfg.TrafficVHost())
+			f.lbReachableHTTPS(ctx, vip)
 	}) {
 		pass = false
 		logging.Warn("%s did not take over the VIP %s after %s was shut down", survivor.Name, vip, holder.Name)
 		f.logLBState(ctx, "VIP did not move to the surviving balancer")
 	}
 
+	restored := true
 	if !opts.SkipRestore {
-		if err := f.libvirt.Start(ctx, holder.Name); err != nil {
+		if err := f.restoreNode(ctx, *holder); err != nil {
 			pass = false
-			logging.Error("failed to restore %s: %v", holder.Name, err)
+			restored = false
+			logging.Error("%v", err)
+			f.logFailoverDiagnostics(ctx, "the balancer did not come back after the failover")
 		}
-		f.waitForSSH(ctx, holder.IP, 120*time.Second)
 	}
 
-	// After the reboot exactly one balancer must own the VIP again. keepalived
-	// preempts back to the higher-priority node, so give it time to settle.
-	if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
-		return f.countVIPHolders(ctx, vip) == 1 &&
-			httpcheck.LBReachable(ctx, vip, f.cfg.TrafficVHost())
-	}) {
-		pass = false
-		logging.Warn("VIP %s is not owned by exactly one balancer after %s recovered", vip, holder.Name)
-		f.logLBState(ctx, "VIP ownership did not settle after the balancer recovered")
+	// After the reboot exactly one balancer must own the VIP again, and both
+	// must be reachable: counting holders only would report "1-of-2" while the
+	// restored node is still down. keepalived preempts back to the
+	// higher-priority node, so give it time to settle. Under --skip-restore the
+	// node is intentionally left down, so the post-restore state is not checked.
+	if !opts.SkipRestore && restored {
+		if !retry.Wait(ctx, 120*time.Second, 5*time.Second, func() bool {
+			h, r, t := f.vipOwnership(ctx, vip)
+			return h == 1 && r == t && f.lbReachableHTTPS(ctx, vip)
+		}) {
+			pass = false
+			logging.Warn("VIP %s is not owned by exactly one balancer after %s recovered", vip, holder.Name)
+			f.logLBState(ctx, "VIP ownership did not settle after the balancer recovered")
+		}
 	}
 
 	duration := time.Since(start)
@@ -514,6 +721,12 @@ func (f *FailoverTester) lbHoldsVIP(ctx context.Context, host, vip string) bool 
 	if err != nil || code != 0 {
 		return false
 	}
+	return addressListHasVIP(out, vip)
+}
+
+// addressListHasVIP looks for the VIP (with its prefix length) in `ip -4 -o
+// addr show` output.
+func addressListHasVIP(out, vip string) bool {
 	for _, field := range strings.Fields(out) {
 		if strings.HasPrefix(field, vip+"/") {
 			return true
@@ -522,15 +735,51 @@ func (f *FailoverTester) lbHoldsVIP(ctx context.Context, host, vip string) bool 
 	return false
 }
 
-// countVIPHolders returns how many balancers currently own the VIP.
-func (f *FailoverTester) countVIPHolders(ctx context.Context, vip string) int {
-	holders := 0
+// vipOwnership counts how many balancers hold the VIP and how many answered at
+// all. The caller needs both: one holder out of one reachable balancer is not
+// the same as one holder out of two, and an unreachable node must not silently
+// disappear from the denominator.
+func (f *FailoverTester) vipOwnership(ctx context.Context, vip string) (holders, reachable, total int) {
 	for _, lb := range f.cfg.Nodes.LBs {
-		if lb.IP != "" && f.lbHoldsVIP(ctx, lb.IP, vip) {
+		if lb.IP == "" {
+			continue
+		}
+		total++
+		out, _, code, err := f.ssh.RunCommand(ctx, lb.IP, "ip -4 -o addr show")
+		if err != nil || code != 0 {
+			continue
+		}
+		reachable++
+		if addressListHasVIP(out, vip) {
 			holders++
 		}
 	}
-	return holders
+	return holders, reachable, total
+}
+
+// reachableMaster returns the first master that accepts a command. Scenarios
+// that only need a cluster view must not assume a specific master is up: an
+// earlier scenario may have shut one down and left it that way.
+func (f *FailoverTester) reachableMaster(ctx context.Context) (config.NodeDetail, error) {
+	for _, master := range f.cfg.Nodes.Masters {
+		if master.IP == "" {
+			continue
+		}
+		if _, _, code, err := f.ssh.RunCommand(ctx, master.IP, "true"); err == nil && code == 0 {
+			return master, nil
+		}
+	}
+	return config.NodeDetail{}, errors.New("no master node accepted a command")
+}
+
+// nodeIsMaster reports whether name is one of the configured masters.
+func (f *FailoverTester) nodeIsMaster(name string) bool {
+	for _, master := range f.cfg.Nodes.Masters {
+		if master.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // logLBState dumps the balancers' addresses and keepalived state when a VIP
@@ -603,11 +852,25 @@ func (f *FailoverTester) printSkipped(name string) {
 	logging.Warn("Scenario: %-25s | Status: %-4s | Duration: %s", name, "SKIP", "0s")
 }
 
+// restoreNode powers a node that a scenario shut down back on and waits until
+// it accepts SSH. The wait is part of the verdict: reporting PASS while the
+// node that was supposed to be restored is still unreachable hides a failed
+// restore and leaves the lab degraded for the next scenario.
+func (f *FailoverTester) restoreNode(ctx context.Context, node config.NodeDetail) error {
+	if err := f.libvirt.Start(ctx, node.Name); err != nil {
+		return fmt.Errorf("restore %s: %w", node.Name, err)
+	}
+	if !f.waitForSSH(ctx, node.IP, restoreSSHTimeout) {
+		return fmt.Errorf("%s did not accept SSH within %s after the restart", node.Name, restoreSSHTimeout)
+	}
+	return nil
+}
+
 // waitForSSH blocks until host accepts a trivial SSH command or the timeout
-// elapses. Used after restoring a VM so the next scenario starts as soon as the
-// node is back, rather than after a fixed delay.
-func (f *FailoverTester) waitForSSH(ctx context.Context, host string, timeout time.Duration) {
-	retry.Wait(ctx, timeout, 5*time.Second, func() bool {
+// elapses. It returns whether the host answered, so a restore can be treated as
+// failed instead of silently proceeding.
+func (f *FailoverTester) waitForSSH(ctx context.Context, host string, timeout time.Duration) bool {
+	return retry.Wait(ctx, timeout, 5*time.Second, func() bool {
 		_, _, code, err := f.ssh.RunCommand(ctx, host, "true")
 		return err == nil && code == 0
 	})

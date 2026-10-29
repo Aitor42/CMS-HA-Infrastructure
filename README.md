@@ -509,17 +509,17 @@ Automated failover tests validate the HA design under real failure conditions:
 ```bash
 ./cms-ha test failover
 
-# Inspect state without restoring
+# Inspect state without restoring the failed node (later scenarios may SKIP)
 ./cms-ha test failover --skip-restore
 ```
 
 | Test | Simulated Failure | Validated Behaviour |
 |:-----|:------------------|:-------------------|
-| DRBD Master Failover | Primary master node shutdown | Watchdog detects failure (15s), promotes Secondary, migrates MariaDB pod, CMS stays online; the restarted master must come back as Secondary |
-| DRBD Master Power Cut | Primary master destroyed (no shutdown) | Same failover with stale `Primary` metadata left on the dead node: the survivor promotes, and the restarted node stands down as Secondary instead of becoming a second writer |
+| DRBD Master Failover | Shutdown of the node that currently holds the DRBD `Primary` role | Watchdog detects failure (15s), promotes the Secondary, MariaDB comes back Running and Ready on the survivor, CMS stays online; the restarted master must come back as Secondary |
+| DRBD Master Power Cut | The current DRBD Primary destroyed (no shutdown) | Same failover with stale `Primary` metadata left on the dead node: the survivor promotes, and the restarted node stands down as Secondary instead of becoming a second writer |
 | CMS Frontend Failover | WordPress node shutdown | Nginx routes traffic to surviving frontend with zero downtime |
-| K3s Worker Failover | Worker node shutdown | Pods reschedule to remaining worker |
-| Load Balancer VIP Failover | Shutdown of the balancer holding the VIP | keepalived moves the floating address to the survivor, which serves HTTPS; after the node returns exactly one balancer owns the VIP again |
+| K3s Worker Failover | Worker node shutdown | MariaDB stays Running and Ready on its master (pinned by affinity + hostPath, it is not rescheduled onto a worker) and the VIP keeps serving the CMS |
+| Load Balancer VIP Failover | Shutdown of the balancer holding the VIP | keepalived moves the floating address to the survivor, which serves HTTPS; after the node returns both balancers are reachable and exactly one owns the VIP again |
 
 ---
 

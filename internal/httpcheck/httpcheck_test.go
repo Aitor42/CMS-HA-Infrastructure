@@ -96,6 +96,45 @@ func TestLBReachable(t *testing.T) {
 	})
 }
 
+func TestLBReachableHTTPSRequiresTLS(t *testing.T) {
+	const vhost = "cms.example.test"
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != vhost {
+			http.Error(w, "wrong host", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("tls", func(t *testing.T) {
+		srv := httptest.NewTLSServer(handler)
+		defer srv.Close()
+		if !LBReachableHTTPS(t.Context(), hostOf(t, srv.URL), vhost) {
+			t.Fatal("LBReachableHTTPS = false, want true")
+		}
+	})
+
+	t.Run("plain http is not accepted", func(t *testing.T) {
+		srv := httptest.NewServer(handler)
+		defer srv.Close()
+		host := hostOf(t, srv.URL)
+		// The permissive probe still accepts the HTTP answer, but the strict
+		// one must not: the VIP scenario claims TLS termination.
+		if !LBReachable(t.Context(), host, vhost) {
+			t.Fatal("LBReachable = false, want true")
+		}
+		if LBReachableHTTPS(t.Context(), host, vhost) {
+			t.Fatal("LBReachableHTTPS = true for a plain-HTTP server, want false")
+		}
+	})
+
+	t.Run("unreachable", func(t *testing.T) {
+		if LBReachableHTTPS(t.Context(), "127.0.0.1:1", vhost) {
+			t.Fatal("LBReachableHTTPS = true, want false")
+		}
+	})
+}
+
 func hostOf(t *testing.T, rawURL string) string {
 	t.Helper()
 	u, err := url.Parse(rawURL)

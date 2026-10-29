@@ -58,7 +58,21 @@ var lbClient = &http.Client{
 // HTTP with a page a browser would accept. Failover and the TLS drill both ask
 // the same question, so they share one definition of "reachable".
 func LBReachable(ctx context.Context, lbIP, vhost string) bool {
-	for _, scheme := range []string{"https", "http"} {
+	return lbReachable(ctx, lbIP, vhost, "https", "http")
+}
+
+// LBReachableHTTPS is the strict variant: it accepts only an HTTPS answer and
+// does not fall back to plain HTTP. The LB VIP scenario claims that the
+// surviving balancer terminates TLS, so an HTTP-only answer (typically the
+// nginx redirect) must not satisfy it.
+func LBReachableHTTPS(ctx context.Context, lbIP, vhost string) bool {
+	return lbReachable(ctx, lbIP, vhost, "https")
+}
+
+// lbReachable probes the given schemes in order and reports the first one that
+// answers with a status a browser would accept.
+func lbReachable(ctx context.Context, lbIP, vhost string, schemes ...string) bool {
+	for _, scheme := range schemes {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+lbIP, nil)
 		if err != nil {
 			continue
