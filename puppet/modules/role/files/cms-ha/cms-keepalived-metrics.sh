@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
-# cms-keepalived-metrics.sh <vip> — publish VIP ownership as node-exporter
+# cms-keepalived-metrics.sh [vip] — publish VIP ownership as node-exporter
 # textfile metrics.
+#
+# The VIP comes from the first argument or CMS_VIP (set by
+# /etc/default/cms-keepalived-metrics from the same Puppet parameter that feeds
+# keepalived.conf). There is deliberately no built-in default: a wrong address
+# would publish a permanent "nobody is MASTER" instead of surfacing the broken
+# configuration.
 #
 # Runs from a systemd timer on both load balancers. The VRRP state is derived from whether
 # the floating VIP is actually present on this host, which is what matters for
@@ -9,7 +15,11 @@
 # (more than one).
 set -uo pipefail
 
-VIP="${1:-${CMS_VIP:-192.168.20.100}}"
+VIP="${1:-${CMS_VIP:-}}"
+if [[ -z "${VIP}" ]]; then
+  echo "cms-keepalived-metrics: no VIP given; set CMS_VIP in /etc/default/cms-keepalived-metrics" >&2
+  exit 1
+fi
 OUT_DIR="${CMS_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 OUT="${OUT_DIR}/cms_keepalived.prom"
 TMP="${OUT}.$$"

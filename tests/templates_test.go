@@ -3,6 +3,8 @@ package tests
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -343,6 +345,63 @@ func TestTemplates_KeepalivedMetricsUsesTheConfiguredVIP(t *testing.T) {
 			t.Errorf("cms-keepalived-metrics.service is missing %q", want)
 		}
 	}
+}
+
+func TestTemplates_KeepalivedMetricsFailsClosedWithoutVIP(t *testing.T) {
+	script := repoFile(t, "puppet/modules/role/files/cms-ha/cms-keepalived-metrics.sh")
+	data, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("failed to read cms-keepalived-metrics.sh: %v", err)
+	}
+	if strings.Contains(string(data), "192.168.20.100") {
+		t.Error("cms-keepalived-metrics.sh still has a hardcoded VIP fallback; a stale address would publish a permanent 'nobody is MASTER'")
+	}
+
+	// A missing CMS_VIP must fail loudly. Falling back to a built-in address
+	// would hide a broken /etc/default file behind a plausible metric.
+	cmd := exec.Command("bash", script)
+	cmd.Env = keepalivedMetricsEnv(t, "")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("script exited 0 without a VIP; output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "CMS_VIP") {
+		t.Errorf("script error does not mention CMS_VIP: %s", out)
+	}
+
+	// With an explicit VIP the publisher writes the textfile series and marks
+	// the address as absent when this host does not hold it.
+	dir := t.TempDir()
+	cmd = exec.Command("bash", script, "192.0.2.1")
+	cmd.Env = keepalivedMetricsEnv(t, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("script failed with a VIP: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "cms_keepalived.prom"))
+	if err != nil {
+		t.Fatalf("metrics textfile was not written: %v", err)
+	}
+	if !strings.Contains(string(body), "cms_keepalived_vip_present 0") {
+		t.Errorf("metrics do not report the VIP as absent on this host:\n%s", body)
+	}
+}
+
+// keepalivedMetricsEnv returns the current environment without any inherited
+// CMS_VIP/CMS_TEXTFILE_DIR, so the script under test only sees what the test
+// sets.
+func keepalivedMetricsEnv(t *testing.T, textfileDir string) []string {
+	t.Helper()
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CMS_VIP=") || strings.HasPrefix(kv, "CMS_TEXTFILE_DIR=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	if textfileDir != "" {
+		env = append(env, "CMS_TEXTFILE_DIR="+textfileDir)
+	}
+	return env
 }
 
 func TestTemplates_CasperHelperSingleSource(t *testing.T) {
