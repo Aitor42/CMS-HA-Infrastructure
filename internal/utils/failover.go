@@ -181,21 +181,35 @@ func (f *FailoverTester) shutdownForTest(ctx context.Context, name string) error
 		if time.Now().After(deadline) {
 			logging.Warn("%s is still %s after %s; forcing a power-off so the node-loss test can proceed",
 				name, state, shutdownGracePeriod)
-			if err := f.libvirt.Destroy(ctx, name); err != nil {
-				return fmt.Errorf("force power-off %s: %w", name, err)
-			}
-			if !retry.Wait(ctx, 30*time.Second, 2*time.Second, func() bool {
-				st, derr := f.libvirt.DomainState(ctx, name)
-				return derr == nil && st == "shut off"
-			}) {
-				return fmt.Errorf("%s did not reach \"shut off\" even after a forced power-off (test aborted so it cannot be reported as PASS)", name)
-			}
-			return nil
+			return f.forceOff(ctx, name)
 		}
 		if !sleepCtx(ctx, 2*time.Second) {
 			return fmt.Errorf("context cancelled waiting for %s to shut off", name)
 		}
 	}
+}
+
+// forceOff powers off a domain that did not honour the ACPI shutdown. The
+// guest may finish shutting down between the state read and the destroy call;
+// that race (libvirt: "domain is not running") means the node is already down
+// and must not be reported as a failed power-off.
+func (f *FailoverTester) forceOff(ctx context.Context, name string) error {
+	if state, err := f.libvirt.DomainState(ctx, name); err == nil && state == "shut off" {
+		return nil
+	}
+	if err := f.libvirt.Destroy(ctx, name); err != nil {
+		if state, derr := f.libvirt.DomainState(ctx, name); derr == nil && state == "shut off" {
+			return nil
+		}
+		return fmt.Errorf("force power-off %s: %w", name, err)
+	}
+	if !retry.Wait(ctx, 30*time.Second, 2*time.Second, func() bool {
+		st, derr := f.libvirt.DomainState(ctx, name)
+		return derr == nil && st == "shut off"
+	}) {
+		return fmt.Errorf("%s did not reach \"shut off\" even after a forced power-off (test aborted so it cannot be reported as PASS)", name)
+	}
+	return nil
 }
 
 func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts) bool {
@@ -871,17 +885,29 @@ func (f *FailoverTester) restoreNode(ctx context.Context, node config.NodeDetail
 	if !f.waitForSSH(ctx, node.IP, restoreSSHTimeout) {
 		return fmt.Errorf("%s did not accept SSH within %s after the restart", node.Name, restoreSSHTimeout)
 	}
-	// SSH answering only means sshd is up: the next scenario treats this node
-	// as the survivor's peer and its preflight requires the watchdog, which
-	// systemd may not have started yet. Wait for it here so a restored node is
-	// fully back before it is used again.
-	if !retry.Wait(ctx, restoreSSHTimeout, 5*time.Second, func() bool {
+	// A restored DRBD master is the next scenario's survivor's peer, and that
+	// preflight requires drbd-failover-watchdog, which systemd may not have
+	// started yet when SSH answers. Frontends, workers and balancers do not run
+	// that unit at all, so waiting there would time out on a healthy node.
+	if f.isDRBDMaster(node) && !retry.Wait(ctx, restoreSSHTimeout, 5*time.Second, func() bool {
 		_, _, code, err := f.ssh.RunCommand(ctx, node.IP, "systemctl is-active --quiet drbd-failover-watchdog")
 		return err == nil && code == 0
 	}) {
 		return fmt.Errorf("%s did not start drbd-failover-watchdog within %s after the restart", node.Name, restoreSSHTimeout)
 	}
 	return nil
+}
+
+// isDRBDMaster reports whether node runs the DRBD stack (and therefore the
+// failover watchdog). Only the master pair is deployed with role::drbd.
+func (f *FailoverTester) isDRBDMaster(node config.NodeDetail) bool {
+	for _, m := range f.cfg.Nodes.Masters {
+		if m.Name == node.Name || (m.FQDN != "" && m.FQDN == node.FQDN) ||
+			(m.IP != "" && m.IP == node.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // waitForSSH blocks until host accepts a trivial SSH command or the timeout

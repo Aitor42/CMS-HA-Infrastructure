@@ -19,9 +19,11 @@ type sshRunFunc func(ctx context.Context, host, cmd string) (stdout, stderr stri
 // the state transitions the failover scenarios depend on and records every
 // call, so a test can assert which node was actually taken down.
 type fakeDomainController struct {
-	states   map[string]string
-	calls    []string
-	startErr error
+	states       map[string]string
+	calls        []string
+	startErr     error
+	destroyErr   error
+	destroyState string
 }
 
 func newFakeDomain(names ...string) *fakeDomainController {
@@ -48,8 +50,12 @@ func (d *fakeDomainController) Shutdown(_ context.Context, name string) error {
 
 func (d *fakeDomainController) Destroy(_ context.Context, name string) error {
 	d.calls = append(d.calls, "destroy:"+name)
-	d.states[name] = "shut off"
-	return nil
+	if d.destroyState != "" {
+		d.states[name] = d.destroyState
+	} else {
+		d.states[name] = "shut off"
+	}
+	return d.destroyErr
 }
 
 func (d *fakeDomainController) Start(_ context.Context, name string) error {
@@ -433,7 +439,7 @@ func TestRestoreNodeFailsWhenSSHNeverReturns(t *testing.T) {
 
 func TestRestoreNodeFailsWhenWatchdogNeverStarts(t *testing.T) {
 	cfg := failoverConfig()
-	node := cfg.Nodes.CMSFrontends[0]
+	node := cfg.Nodes.Masters[0]
 	domain := newFakeDomain(node.Name)
 	domain.states[node.Name] = "shut off"
 
@@ -453,6 +459,54 @@ func TestRestoreNodeFailsWhenWatchdogNeverStarts(t *testing.T) {
 	err := ft.restoreNode(ctx, node)
 	if err == nil || !strings.Contains(err.Error(), "drbd-failover-watchdog") {
 		t.Fatalf("restoreNode = %v, want the watchdog readiness error", err)
+	}
+}
+
+func TestRestoreNodeDoesNotWaitForWatchdogOffDRBD(t *testing.T) {
+	cfg := failoverConfig()
+	node := cfg.Nodes.CMSFrontends[0]
+	domain := newFakeDomain(node.Name)
+	domain.states[node.Name] = "shut off"
+
+	watchdogCalls := 0
+	ft := newTester(cfg, domain, func(_ context.Context, _, cmd string) (string, string, int, error) {
+		switch cmd {
+		case "true":
+			return "", "", 0, nil
+		case "systemctl is-active --quiet drbd-failover-watchdog":
+			watchdogCalls++
+			return "", "", 3, nil
+		}
+		return "", "", 1, fmt.Errorf("unexpected command %q", cmd)
+	})
+
+	if err := ft.restoreNode(t.Context(), node); err != nil {
+		t.Fatalf("restoreNode = %v, want success: frontends do not run the DRBD watchdog", err)
+	}
+	if watchdogCalls != 0 {
+		t.Fatalf("watchdog was queried %d times on a frontend, want 0", watchdogCalls)
+	}
+}
+
+func TestForceOffAcceptsAGuestThatFinishedShuttingDown(t *testing.T) {
+	cfg := failoverConfig()
+	node := cfg.Nodes.Masters[0]
+	domain := newFakeDomain(node.Name)
+	// The guest finishes its ACPI shutdown between the state read and the
+	// destroy call: libvirt reports "domain is not running", but the node is
+	// already down, which is exactly what the test wanted.
+	domain.destroyErr = errors.New("Requested operation is not valid: domain is not running")
+	domain.destroyState = "shut off"
+
+	ft := newTester(cfg, domain, func(_ context.Context, _, cmd string) (string, string, int, error) {
+		return "", "", 1, fmt.Errorf("unexpected command %q", cmd)
+	})
+
+	if err := ft.forceOff(t.Context(), node.Name); err != nil {
+		t.Fatalf("forceOff = %v, want success when the guest already shut down", err)
+	}
+	if !domain.hasCall("destroy:" + node.Name) {
+		t.Fatalf("calls = %v, want a destroy attempt", domain.calls)
 	}
 }
 
