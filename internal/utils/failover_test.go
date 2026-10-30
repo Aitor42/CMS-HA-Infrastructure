@@ -431,6 +431,31 @@ func TestRestoreNodeFailsWhenSSHNeverReturns(t *testing.T) {
 	}
 }
 
+func TestRestoreNodeFailsWhenWatchdogNeverStarts(t *testing.T) {
+	cfg := failoverConfig()
+	node := cfg.Nodes.CMSFrontends[0]
+	domain := newFakeDomain(node.Name)
+	domain.states[node.Name] = "shut off"
+
+	ft := newTester(cfg, domain, func(_ context.Context, _, cmd string) (string, string, int, error) {
+		switch cmd {
+		case "true":
+			return "", "", 0, nil
+		case "systemctl is-active --quiet drbd-failover-watchdog":
+			return "", "", 3, nil
+		}
+		return "", "", 1, fmt.Errorf("unexpected command %q", cmd)
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	err := ft.restoreNode(ctx, node)
+	if err == nil || !strings.Contains(err.Error(), "drbd-failover-watchdog") {
+		t.Fatalf("restoreNode = %v, want the watchdog readiness error", err)
+	}
+}
+
 func TestWorkerFailoverUsesReachableMaster(t *testing.T) {
 	cfg := failoverConfig()
 	m1, m2 := cfg.Nodes.Masters[0], cfg.Nodes.Masters[1]

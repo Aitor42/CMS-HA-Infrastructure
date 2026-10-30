@@ -871,6 +871,16 @@ func (f *FailoverTester) restoreNode(ctx context.Context, node config.NodeDetail
 	if !f.waitForSSH(ctx, node.IP, restoreSSHTimeout) {
 		return fmt.Errorf("%s did not accept SSH within %s after the restart", node.Name, restoreSSHTimeout)
 	}
+	// SSH answering only means sshd is up: the next scenario treats this node
+	// as the survivor's peer and its preflight requires the watchdog, which
+	// systemd may not have started yet. Wait for it here so a restored node is
+	// fully back before it is used again.
+	if !retry.Wait(ctx, restoreSSHTimeout, 5*time.Second, func() bool {
+		_, _, code, err := f.ssh.RunCommand(ctx, node.IP, "systemctl is-active --quiet drbd-failover-watchdog")
+		return err == nil && code == 0
+	}) {
+		return fmt.Errorf("%s did not start drbd-failover-watchdog within %s after the restart", node.Name, restoreSSHTimeout)
+	}
 	return nil
 }
 
