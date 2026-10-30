@@ -168,7 +168,12 @@ func (p *Pool) ForgetHost(host string) {
 // AptLockWaitSnippet is the shared shell preamble that waits for
 // unattended-upgrades, dpkg or cloud-init to release apt locks before apt
 // operations; callers embed it at the top of their install scripts.
-const AptLockWaitSnippet = `cloud-init status --wait 2>/dev/null || true
+//
+// `cloud-init status --wait` has no timeout of its own and can stay in
+// "running" indefinitely on a host whose seed or snapd seeding is stuck; an
+// unbounded wait would hang the deploy at a log line with no progress. Bound
+// it and fall back to the lock probe below.
+const AptLockWaitSnippet = `timeout 120 cloud-init status --wait >/dev/null 2>&1 || true
 for i in {1..30}; do
     if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
         break
@@ -177,12 +182,10 @@ for i in {1..30}; do
 done
 `
 
-// WaitForAptLock waits for unattended-upgrades, dpkg or cloud-init to release
-// apt locks on the target host. Fails (exit 1) if no lock is released in
-// time, instead of falsely reporting success.
-func (p *Pool) WaitForAptLock(ctx context.Context, host string) error {
-	waitScript := `
-cloud-init status --wait 2>/dev/null || true
+// aptLockWaitScript waits for cloud-init and then for the dpkg/apt locks. It
+// fails instead of reporting success when a lock is still held after 120s.
+const aptLockWaitScript = `
+timeout 120 cloud-init status --wait >/dev/null 2>&1 || true
 for i in {1..60}; do
     if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
         exit 0
@@ -192,7 +195,23 @@ done
 echo "apt lock still held after 120s (unattended-upgrades/dpkg?)" >&2
 exit 1
 `
-	_, err := p.RunScript(ctx, host, waitScript)
+
+// aptLockWaitTimeout bounds the whole wait. The remote script is bounded too,
+// but an SSH session that never returns (frozen guest, dropped network) would
+// otherwise block the deploy forever; the context makes that a normal error.
+var aptLockWaitTimeout = 5 * time.Minute
+
+// WaitForAptLock waits for unattended-upgrades, dpkg or cloud-init to release
+// apt locks on the target host. Fails (exit 1) if no lock is released in
+// time, instead of falsely reporting success.
+func (p *Pool) WaitForAptLock(ctx context.Context, host string) error {
+	ctx, cancel := context.WithTimeout(ctx, aptLockWaitTimeout)
+	defer cancel()
+
+	_, err := p.RunScript(ctx, host, aptLockWaitScript)
+	if err != nil && ctx.Err() != nil {
+		return fmt.Errorf("apt lock wait on %s exceeded %s: %w", host, aptLockWaitTimeout, err)
+	}
 	return err
 }
 

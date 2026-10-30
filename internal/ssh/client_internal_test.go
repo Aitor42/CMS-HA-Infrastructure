@@ -15,6 +15,20 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+func TestAptLockWaitBoundsCloudInit(t *testing.T) {
+	for name, script := range map[string]string{
+		"AptLockWaitSnippet": AptLockWaitSnippet,
+		"aptLockWaitScript":  aptLockWaitScript,
+	} {
+		if !strings.Contains(script, "timeout 120 cloud-init status --wait") {
+			t.Errorf("%s waits for cloud-init without a timeout; a stuck seed would hang the deploy", name)
+		}
+	}
+	if aptLockWaitTimeout < 4*time.Minute {
+		t.Errorf("aptLockWaitTimeout = %s, want room for the 120s cloud-init wait plus the 120s lock loop", aptLockWaitTimeout)
+	}
+}
+
 func TestRemoteCommandElevation(t *testing.T) {
 	root := &Pool{user: "root"}
 	if got := root.remoteCommand("id -u"); got != "id -u" {
