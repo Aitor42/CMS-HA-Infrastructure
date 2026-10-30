@@ -16,7 +16,8 @@
 - **Software:** `nfs-kernel-server` (storage node), `nfs-common` (CMS frontend nodes)
 - **Export directory:** `/srv/nfs/wp-uploads` (owner: `www-data:www-data`, mode: `0775`)
 - **Mount target on CMS frontends:** `/var/www/html/wp-content/uploads/`
-- **Mount options:** `_netdev,auto,nofail,rw,soft,timeo=50,retrans=3`
+- **Mount options:** `_netdev,auto,nofail,rw,soft,timeo=50,retrans=3,nfsvers=4`
+- **Export options:** `rw,sync,no_subtree_check,all_squash,anonuid=33,anongid=33` — both the root and `www-data` writers map to uid/gid 33, the owner of the shared directory.
 - **Network routing:** Routed across subnets from `192.168.20.0/24` to `192.168.10.15:2049` via `ufw-router`.
 - **Result:** 100% HA symmetry in the web tier. Uploads written by either CMS node are immediately accessible to both nodes without data drift.
 
@@ -35,11 +36,14 @@
   balancer addresses. It is issued once by the PKI phase on the CA host and
   copied to both balancers (no CA credential is stored on them). A self-signed
   certificate is generated only as a bootstrap fallback so Nginx can start
-  before the CA exists.
+  before the CA exists; it carries the same vhost/VIP/balancer SANs, so the
+  nginx phase can probe HTTPS before the PKI phase replaces it.
 - **Automatic renewal:** `role::loadbalancer` deploys `cms-tls-renew.sh` plus a
   daily systemd timer (`cms-tls-renew.timer`). Renewal uses `step ca renew`
   (mTLS, no secret) and reloads Nginx when the certificate is replaced, keeping
-  its remaining validity comfortably above 30 days.
+  its remaining validity comfortably above 30 days. The PKI phase writes the CA
+  URL, root and name it actually provisioned to `/etc/cms-ha/pki.env`; the
+  renewal script sources that file instead of keeping a second hardcoded copy.
 - **Port 80:** Redirects to HTTPS (301)
 - **Port 443:** Reverse proxy with TLS to the frontend pool
 - **Firewall:** Both nodes allow TCP 112 (VRRP) from `192.168.20.0/24`; the CA
@@ -104,8 +108,18 @@ server {
 ssh ubuntu@192.168.20.103 "sudo -H nginx -t && systemctl is-active nginx && systemctl is-active keepalived"
 ssh ubuntu@192.168.20.104 "sudo -H nginx -t && systemctl is-active nginx && systemctl is-active keepalived"
 
-# Verify the VIP is owned by the MASTER (main-lb1)
-ssh ubuntu@192.168.20.103 "ip -4 addr show | grep 192.168.20.100"
+# Verify exactly one balancer owns the VIP (the nginx phase fails otherwise)
+for ip in 192.168.20.103 192.168.20.104; do
+  echo -n "$ip: "
+  ssh ubuntu@$ip "ip -4 -o addr show | grep -w 192.168.20.100 || echo not-holder"
+done
+
+# Verify each balancer answers the configured vhost directly. TLS terminates
+# here and the phase runs before the PKI phase, so the bootstrap certificate is
+# skipped with -k; `cms-ha verify` later checks the CA-issued certificate.
+for ip in 192.168.20.103 192.168.20.104; do
+  ssh ubuntu@$ip "curl -s -k -f --resolve cms.fake-enterprise.com:443:127.0.0.1 -o /dev/null -w '%{http_code}\n' https://cms.fake-enterprise.com/"
+done
 
 # Verify web frontends individually. TLS terminates on the LBs, so the vhost
 # answers a plain HTTP request with a redirect to HTTPS (expect 301).
@@ -121,12 +135,12 @@ ssh ubuntu@192.168.20.104 "ip -4 addr show | grep 192.168.20.100"   # VIP now he
 curl -sk https://192.168.20.100/                                        # still served
 ssh ubuntu@192.168.20.103 "sudo systemctl start keepalived"
 
-# Verify NFS export on internal-storage
-ssh ubuntu@192.168.10.15 "sudo -H exportfs -v && systemctl is-active nfs-kernel-server"
+# Verify the NFS export carries the identity mapping both writers rely on
+ssh ubuntu@192.168.10.15 "sudo -H exportfs -s | grep /srv/nfs/wp-uploads | grep -E 'all_squash.*anonuid=33.*anongid=33'"
 
-# Verify shared uploads mount on CMS frontends
-ssh ubuntu@192.168.20.101 "mountpoint -q /var/www/html/wp-content/uploads && echo 'CMS1 NFS mounted'"
-ssh ubuntu@192.168.20.102 "mountpoint -q /var/www/html/wp-content/uploads && echo 'CMS2 NFS mounted'"
+# Verify the shared uploads mount points at the storage node over NFSv4
+ssh ubuntu@192.168.20.101 "findmnt -n -o SOURCE,FSTYPE -T /var/www/html/wp-content/uploads"
+ssh ubuntu@192.168.20.102 "findmnt -n -o SOURCE,FSTYPE -T /var/www/html/wp-content/uploads"
 
 # Verify the PHP runtime carries the fix for CVE-2026-109618 / CVE-2026-109619.
 # Ubuntu backports the upstream patch, so the Debian revision is what tells a

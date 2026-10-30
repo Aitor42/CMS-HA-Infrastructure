@@ -4,14 +4,26 @@
 # internal step-ca) + automated renewal timer, keepalived (shared VIP
 # 192.168.20.100), and UFW rules for HTTP/HTTPS/metrics/VRRP.
 
-class role::loadbalancer {
+class role::loadbalancer (
+  # Single source of truth for the addresses shared by the bootstrap
+  # certificate, the keepalived instance and the VIP metrics publisher. The
+  # values must match network.main.vip and nodes.lb* in config.yaml;
+  # tests/templates_test.go asserts that drift stays visible.
+  String $cms_vhost      = 'cms.fake-enterprise.com',
+  String $vip            = '192.168.20.100',
+  String $master_ip      = '192.168.20.103',
+  String $backup_ip      = '192.168.20.104',
+  String $vrrp_auth_pass = 'cmshakeep',
+) {
 
   include role::base
 
   # ---------------------------------------------------------------------------
   # PACKAGES
   # ---------------------------------------------------------------------------
-  package { ['nginx', 'openssl', 'prometheus-nginx-exporter', 'keepalived', 'wget']:
+  # curl is used by the nginx phase and the operational drills to probe the
+  # HTTPS vhost from each balancer; it is not guaranteed by the base image.
+  package { ['nginx', 'openssl', 'prometheus-nginx-exporter', 'keepalived', 'wget', 'curl']:
     ensure => installed,
   }
 
@@ -32,10 +44,7 @@ class role::loadbalancer {
   }
 
   exec { 'generate-ssl-cert':
-    command => '/usr/bin/openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-      -keyout /etc/nginx/ssl/cms.key \
-      -out    /etc/nginx/ssl/cms.crt \
-      -subj "/C=ES/ST=PaisVasco/L=Bilbao/O=FakeEnterprise/OU=IT/CN=cms.fake-enterprise.com"',
+    command => "/usr/bin/openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/nginx/ssl/cms.key -out /etc/nginx/ssl/cms.crt -addext \"subjectAltName=DNS:${cms_vhost},IP:${vip},IP:${master_ip},IP:${backup_ip}\" -subj \"/C=ES/ST=PaisVasco/L=Bilbao/O=FakeEnterprise/OU=IT/CN=${cms_vhost}\"",
     creates => '/etc/nginx/ssl/cms.crt',
     require => File['/etc/nginx/ssl'],
   }
@@ -161,9 +170,9 @@ class role::loadbalancer {
   # between the two nodes over the main network; a track_script demotes a node
   # whose nginx is unhealthy so the VIP follows a working balancer.
   $lb_is_master = $facts['networking']['hostname'] == 'main-lb1'
-  $lb_peer  = $lb_is_master ? { true => '192.168.20.104', default => '192.168.20.103' }
-  $lb_prio  = $lb_is_master ? { true => '101',           default => '100' }
-  $lb_state = $lb_is_master ? { true => 'MASTER',        default => 'BACKUP' }
+  $lb_peer  = $lb_is_master ? { true => $backup_ip, default => $master_ip }
+  $lb_prio  = $lb_is_master ? { true => '101',       default => '100' }
+  $lb_state = $lb_is_master ? { true => 'MASTER',    default => 'BACKUP' }
 
   # VRRP runs over the main network, but the kernel name of that NIC must not
   # be hardcoded: a load balancer only has one interface (enp1s0), while a node
@@ -208,10 +217,10 @@ class role::loadbalancer {
           }
           authentication {
               auth_type PASS
-              auth_pass cmshakeep
+              auth_pass ${vrrp_auth_pass}
           }
           virtual_ipaddress {
-              192.168.20.100/24
+              ${vip}/24
           }
           track_script {
               chk_nginx
@@ -239,6 +248,17 @@ class role::loadbalancer {
     group  => 'root',
     mode   => '0755',
     source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.sh',
+  }
+
+  # The VIP is published to the script through an environment file so the
+  # systemd unit carries no address of its own: keepalived.conf and the metrics
+  # publisher now read the same class parameter.
+  file { '/etc/default/cms-keepalived-metrics':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "CMS_VIP=${vip}\n",
   }
 
   # A systemd timer, not cron: the lab images do not reliably run a cron
@@ -274,6 +294,7 @@ class role::loadbalancer {
     require => [
       File['/usr/local/bin/cms-keepalived-metrics.sh'],
       File['/var/lib/prometheus/node-exporter'],
+      File['/etc/default/cms-keepalived-metrics'],
       File['/etc/systemd/system/cms-keepalived-metrics.service'],
       File['/etc/systemd/system/cms-keepalived-metrics.timer'],
       Exec['cms-keepalived-metrics-daemon-reload'],

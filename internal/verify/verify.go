@@ -207,6 +207,30 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 		}
 	}
 
+	// Exactly one balancer must hold the keepalived VIP. "keepalived is active"
+	// on both nodes is also true when nobody owns the VIP (no MASTER) or when
+	// both claim it (VRRP split); either case breaks the router DNAT path.
+	vip := v.cfg.LBVIP()
+	holders := []string{}
+	resVIP := v.ssh.RunParallel(ctx, lbIPs, "ip -4 -o addr show")
+	for _, r := range resVIP {
+		if r.Err != nil || r.ExitCode != 0 {
+			pass = false
+			issues = append(issues, fmt.Sprintf("%s: cannot list addresses", r.Host))
+			continue
+		}
+		if outputHasIPv4(r.Output, vip) {
+			holders = append(holders, r.Host)
+		}
+	}
+	if vip == "" {
+		pass = false
+		issues = append(issues, "network.main.vip is not configured")
+	} else if len(holders) != 1 {
+		pass = false
+		issues = append(issues, fmt.Sprintf("VIP %s must be held by exactly one load balancer, holders: %v", vip, holders))
+	}
+
 	var cmsIPs []string
 	for _, cms := range v.cfg.Nodes.CMSFrontends {
 		if cms.IP != "" {
@@ -405,4 +429,25 @@ func (v *Verifier) phase07(ctx context.Context) CheckResult {
 		}
 	}
 	return CheckResult{"Phase 07", "DRBD Status", false, "DRBD inactive or unreachable on masters"}
+}
+
+// outputHasIPv4 reports whether `ip -4 -o addr show` output contains the given
+// address. Matching a bare substring would accept 192.168.20.1001, so compare
+// the address column after stripping the prefix length.
+func outputHasIPv4(output, addr string) bool {
+	if addr == "" {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f != "inet" || i+1 >= len(fields) {
+				continue
+			}
+			if got, _, _ := strings.Cut(fields[i+1], "/"); got == addr {
+				return true
+			}
+		}
+	}
+	return false
 }

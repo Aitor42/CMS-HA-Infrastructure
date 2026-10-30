@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -222,6 +223,124 @@ func TestTemplates_EmbeddedNginxConfig(t *testing.T) {
 	for _, dir := range expectedDirectives {
 		if !strings.Contains(content, dir) {
 			t.Errorf("cms-lb.conf missing expected directive: %s", dir)
+		}
+	}
+}
+
+func TestTemplates_NginxConfigCopiesAreIdentical(t *testing.T) {
+	// templates/nginx/cms-lb.conf is embedded in the binary but only the
+	// Puppet fileserver copy is deployed. Keeping two hand-maintained copies
+	// meant an edit to the embedded one silently did nothing; fail loudly when
+	// they drift instead of relying on review.
+	embedded, err := cms.TemplatesFS.ReadFile("templates/nginx/cms-lb.conf")
+	if err != nil {
+		t.Fatalf("failed to read embedded cms-lb.conf: %v", err)
+	}
+	deployed, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/nginx/cms-lb.conf"))
+	if err != nil {
+		t.Fatalf("failed to read deployed cms-lb.conf: %v", err)
+	}
+	if string(embedded) != string(deployed) {
+		t.Error("templates/nginx/cms-lb.conf and the Puppet cms-lb.conf have drifted; the deployed copy is the one that matters")
+	}
+}
+
+// puppetStringParam returns the default of a `String $name = '...'` class
+// parameter from a Puppet manifest.
+func puppetStringParam(t *testing.T, manifest, name string) string {
+	t.Helper()
+	prefix := "String $" + name
+	for _, line := range strings.Split(manifest, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		_, value, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("cannot parse Puppet parameter %s from %q", name, line)
+		}
+		value = strings.TrimSpace(value)
+		value = strings.TrimSuffix(value, ",")
+		if len(value) < 2 || value[0] != '\'' || value[len(value)-1] != '\'' {
+			t.Fatalf("Puppet parameter %s is not a single-quoted string: %q", name, value)
+		}
+		return value[1 : len(value)-1]
+	}
+	t.Fatalf("Puppet parameter %s not found", name)
+	return ""
+}
+
+func TestTemplates_NginxConfigMatchesLabConfig(t *testing.T) {
+	// The vhost, upstream pool and keepalived addresses are duplicated in
+	// Puppet because it has no access to config.yaml. Pin the copies to both
+	// shipped configurations so a topology edit cannot leave nginx proxying to
+	// an address that no longer exists.
+	conf, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/nginx/cms-lb.conf"))
+	if err != nil {
+		t.Fatalf("failed to read cms-lb.conf: %v", err)
+	}
+	manifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/loadbalancer.pp"))
+	if err != nil {
+		t.Fatalf("failed to read loadbalancer.pp: %v", err)
+	}
+	pp := string(manifest)
+
+	for _, path := range []string{"config.yaml", "config.ci.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			cfg, err := config.Load(repoFile(t, path))
+			if err != nil {
+				t.Fatalf("load %s: %v", path, err)
+			}
+			if len(cfg.Nodes.CMSFrontends) == 0 || len(cfg.Nodes.LBs) < 2 {
+				t.Fatalf("%s does not define the expected frontends/balancers", path)
+			}
+			vhost := cfg.TrafficVHost()
+			for _, cmsNode := range cfg.Nodes.CMSFrontends {
+				if !strings.Contains(string(conf), "server "+cmsNode.IP+" ") {
+					t.Errorf("cms-lb.conf has no upstream for %s (%s)", cmsNode.Name, cmsNode.IP)
+				}
+			}
+			if !strings.Contains(string(conf), "server_name "+vhost+";") {
+				t.Errorf("cms-lb.conf does not serve the configured vhost %q", vhost)
+			}
+
+			want := map[string]string{
+				"cms_vhost": vhost,
+				"vip":       cfg.LBVIP(),
+				"master_ip": cfg.Nodes.LBs[0].IP,
+				"backup_ip": cfg.Nodes.LBs[1].IP,
+			}
+			for name, value := range want {
+				if got := puppetStringParam(t, pp, name); got != value {
+					t.Errorf("role::loadbalancer $%s = %q, want %q from %s", name, got, value, path)
+				}
+			}
+		})
+	}
+
+	// The bootstrap certificate is what nginx serves before the PKI phase, so
+	// it must cover the same names as the CA-issued certificate; otherwise the
+	// nginx phase's HTTPS probe would be the only thing that ever noticed.
+	if !strings.Contains(pp, "subjectAltName=DNS:${cms_vhost},IP:${vip},IP:${master_ip},IP:${backup_ip}") {
+		t.Error("the bootstrap certificate does not include the vhost, VIP and balancer SANs")
+	}
+}
+
+func TestTemplates_KeepalivedMetricsUsesTheConfiguredVIP(t *testing.T) {
+	service, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/cms-ha/cms-keepalived-metrics.service"))
+	if err != nil {
+		t.Fatalf("failed to read cms-keepalived-metrics.service: %v", err)
+	}
+	unit := string(service)
+	if strings.Contains(unit, "192.168.20.100") {
+		t.Error("cms-keepalived-metrics.service still hardcodes the VIP; it must come from /etc/default/cms-keepalived-metrics")
+	}
+	for _, want := range []string{
+		"EnvironmentFile=/etc/default/cms-keepalived-metrics",
+		"ExecStart=/usr/local/bin/cms-keepalived-metrics.sh",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("cms-keepalived-metrics.service is missing %q", want)
 		}
 	}
 }

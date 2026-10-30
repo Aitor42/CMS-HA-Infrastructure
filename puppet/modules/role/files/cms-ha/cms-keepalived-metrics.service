@@ -3,4 +3,7 @@ Description=Publish keepalived VIP ownership to node_exporter
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/cms-keepalived-metrics.sh 192.168.20.100
+# CMS_VIP is written by role::loadbalancer from the same parameter that feeds
+# keepalived.conf, so the publisher and the VRRP instance cannot drift.
+EnvironmentFile=/etc/default/cms-keepalived-metrics
+ExecStart=/usr/local/bin/cms-keepalived-metrics.sh

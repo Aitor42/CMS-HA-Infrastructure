@@ -94,3 +94,16 @@ func TestCountReadyNodes(t *testing.T) {
 		})
 	}
 }
+
+func TestOutputHasIPv4IsExact(t *testing.T) {
+	out := "2: enp1s0    inet 192.168.20.100/24 brd 192.168.20.255 scope global enp1s0\n"
+	if !outputHasIPv4(out, "192.168.20.100") {
+		t.Error("outputHasIPv4 did not find the exact address")
+	}
+	if outputHasIPv4(out, "192.168.20.10") {
+		t.Error("outputHasIPv4 matched a prefix of a longer address")
+	}
+	if outputHasIPv4(out, "") {
+		t.Error("outputHasIPv4 matched an empty address")
+	}
+}
