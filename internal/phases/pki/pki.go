@@ -14,6 +14,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -302,7 +303,8 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	if caDomain == "" {
 		caDomain = "ca.internal.local"
 	}
-	if err := p.issueLBCertificate(ctx, jumpIP, subject, caDomain, caPortOrDefault(p.cfg.PKI.CAPort), certHours, sanFlags); err != nil {
+	caPort := caPortOrDefault(p.cfg.PKI.CAPort)
+	if err := p.issueLBCertificate(ctx, jumpIP, subject, caDomain, caPort, certHours, sanFlags); err != nil {
 		return err
 	}
 
@@ -317,6 +319,9 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	}()
 
 	if err := p.installLBCertificate(ctx, lbs, certPEM, keyPEM); err != nil {
+		return err
+	}
+	if err := p.installLBEnvironment(ctx, lbs, caDomain, caPort); err != nil {
 		return err
 	}
 
@@ -393,6 +398,26 @@ func (p *Phase) installLBCertificate(ctx context.Context, lbs []config.NodeDetai
 		if out, errOut, code, err := p.pool.RunCommand(ctx, lb.IP, reload); err != nil || code != 0 {
 			return fmt.Errorf("failed to reload nginx on %s with the new certificate (exit %d): %v %s%s",
 				lb.Name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
+		}
+	}
+	return nil
+}
+
+// installLBEnvironment writes the CA endpoint the PKI phase actually
+// provisioned next to the certificate. cms-tls-renew.sh sources this file, so a
+// non-default pki.domain/ca_port/ca_name reaches the renewal timer without
+// duplicating the configuration in Puppet.
+func (p *Phase) installLBEnvironment(ctx context.Context, lbs []config.NodeDetail, caDomain string, caPort int) error {
+	env := fmt.Sprintf("CMS_CA_URL=%s\nCMS_ROOT_CA=%s\nCMS_CA_NAME=%s\n",
+		shell.Quote(fmt.Sprintf("https://%s:%d", caDomain, caPort)),
+		shell.Quote("/usr/local/share/ca-certificates/cms_root_ca.crt"),
+		shell.Quote(p.cfg.PKICommonName()))
+	for _, lb := range lbs {
+		if lb.IP == "" {
+			continue
+		}
+		if err := p.pool.CopyContent(ctx, lb.IP, []byte(env), "/etc/cms-ha/pki.env", 0644); err != nil {
+			return fmt.Errorf("failed to write PKI environment on %s: %w", lb.Name, err)
 		}
 	}
 	return nil

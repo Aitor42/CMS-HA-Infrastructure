@@ -12,9 +12,19 @@ set -euo pipefail
 
 CERT=/etc/nginx/ssl/cms.crt
 KEY=/etc/nginx/ssl/cms.key
-CA_URL="https://ca.internal.local:8443"
-ROOT_CA=/usr/local/share/ca-certificates/cms_root_ca.crt
-CA_NAME="CMS Local CA"
+# The PKI phase writes the CA endpoint it actually provisioned to this file.
+# Keep the defaults for a balancer whose Puppet catalog ran before the PKI
+# phase (or for a hand-run script), but never duplicate the configured values
+# here: a different pki.domain/ca_port/ca_name used to leave renewal pointed at
+# the old CA and the timer failing silently every hour.
+PKI_ENV=/etc/cms-ha/pki.env
+if [ -r "$PKI_ENV" ]; then
+  # shellcheck disable=SC1090
+  . "$PKI_ENV"
+fi
+CA_URL="${CMS_CA_URL:-https://ca.internal.local:8443}"
+ROOT_CA="${CMS_ROOT_CA:-/usr/local/share/ca-certificates/cms_root_ca.crt}"
+CA_NAME="${CMS_CA_NAME:-CMS Local CA}"
 # Ask the CA for a renewal once fewer than this remains; the CA enforces the
 # actual minimum against the provisioner's configured durations.
 RENEW_WITHIN="720h"

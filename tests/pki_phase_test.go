@@ -93,6 +93,18 @@ func TestPKIPhaseRun(t *testing.T) {
 	if got := string(fake.Files["192.168.20.101"]["/etc/nginx/ssl/cms.key"]); got != "KEY" {
 		t.Errorf("LB key = %q, want KEY", got)
 	}
+	// The renewal timer reads the CA endpoint from this file; without it the
+	// script falls back to the default domain/port/name.
+	env := string(fake.Files["192.168.20.101"]["/etc/cms-ha/pki.env"])
+	for _, want := range []string{
+		"CMS_CA_URL='https://ca.internal.local:8443'",
+		"CMS_ROOT_CA='/usr/local/share/ca-certificates/cms_root_ca.crt'",
+		"CMS_CA_NAME='CMS Local CA'",
+	} {
+		if !strings.Contains(env, want) {
+			t.Errorf("LB PKI environment is missing %q:\n%s", want, env)
+		}
+	}
 	if !hasCommand(fake.Commands, "192.168.20.101", "systemctl reload nginx") {
 		t.Error("LB did not reload nginx with the new certificate")
 	}

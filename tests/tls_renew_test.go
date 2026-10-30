@@ -27,10 +27,21 @@ func TestTLSRenewScript(t *testing.T) {
 		`step ca renew "${RENEW_ARGS[@]}"`,
 		`--exec "systemctl reload nginx"`,
 		`certificate renewed and nginx reloaded`,
+		`PKI_ENV=/etc/cms-ha/pki.env`,
+		`. "$PKI_ENV"`,
+		`CA_URL="${CMS_CA_URL:-https://ca.internal.local:8443}"`,
+		`ROOT_CA="${CMS_ROOT_CA:-/usr/local/share/ca-certificates/cms_root_ca.crt}"`,
+		`CA_NAME="${CMS_CA_NAME:-CMS Local CA}"`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("cms-tls-renew.sh is missing %q", want)
 		}
+	}
+
+	// The CA endpoint must come from the file the PKI phase writes, not from a
+	// second hardcoded copy that silently points at the old CA.
+	if strings.Contains(content, `CA_URL="https://`) {
+		t.Error("cms-tls-renew.sh hardcodes CA_URL instead of sourcing /etc/cms-ha/pki.env")
 	}
 
 	// A threshold above the configured 2160h lifetime is rejected by step, so
