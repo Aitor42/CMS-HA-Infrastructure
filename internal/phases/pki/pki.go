@@ -318,6 +318,12 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Wipe the CA-host copies as soon as they have been read: the key must only
+	// live on the balancers, including when the validation below rejects it.
+	defer func() {
+		_, _, _, _ = p.pool.RunCommand(ctx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key")
+	}()
+
 	// Never install a certificate the balancer cannot actually serve. step-ca
 	// only adds the subject to the SAN extension when no --san flag is given,
 	// so a SAN flag bug or a misconfigured pki.cert_dns_names would otherwise
@@ -331,11 +337,6 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	if err := validateIssuedCertificate(certPEM, keyPEM, rootPEM, p.cfg.LBTLSSANs(), time.Now()); err != nil {
 		return fmt.Errorf("refusing to install the load-balancer certificate: %w", err)
 	}
-
-	// Wipe the CA-host copies: the key now only lives on the balancers.
-	defer func() {
-		_, _, _, _ = p.pool.RunCommand(ctx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key")
-	}()
 
 	if err := p.installLBCertificate(ctx, lbs, certPEM, keyPEM); err != nil {
 		return err

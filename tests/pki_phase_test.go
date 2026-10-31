@@ -160,6 +160,10 @@ func TestPKIPhaseRejectsCertificateWithoutEverySAN(t *testing.T) {
 	if hasCommand(fake.Commands, "192.168.20.101", "systemctl reload nginx") {
 		t.Error("nginx was reloaded with a certificate that does not cover the VIP")
 	}
+	// The rejected certificate's key must not linger on the CA host.
+	if !hasCommand(fake.Commands, cfg.Nodes.Jumpstart.IP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key") {
+		t.Error("the CA host kept /tmp/cms-lb.crt and /tmp/cms-lb.key after a rejected certificate")
+	}
 }
 
 func TestPKIPhaseRequiresProvisionerPassword(t *testing.T) {
