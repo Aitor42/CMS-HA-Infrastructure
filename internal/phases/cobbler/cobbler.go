@@ -33,6 +33,13 @@ const (
 	cobblerMirrorStamp = "/var/lib/cobbler/isos/.cms-mirror-stamp"
 )
 
+// ProfileName and MirrorPath are exported so 02-register-nodes uses the same
+// objects the setup phase created instead of a second copy of the strings.
+const (
+	ProfileName = cobblerProfile
+	MirrorPath  = cobblerMirror
+)
+
 // cobblerVars expands the placeholders used by the remote scripts below. It
 // avoids fmt.Sprintf so shell formats such as stat's '%s:%Y' stay literal.
 var cobblerVars = strings.NewReplacer(
