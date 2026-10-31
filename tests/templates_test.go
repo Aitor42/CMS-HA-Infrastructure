@@ -71,6 +71,55 @@ func TestTemplates_EmbeddedCobblerAutoinstall(t *testing.T) {
 	}
 }
 
+func TestTemplates_CobblerRendersTheConfiguredNetwork(t *testing.T) {
+	// These files are rendered by internal/phases/cobbler before upload. A
+	// hardcoded lab address here would make network.*.cidr/gateway/domain in
+	// config.yaml silently ineffective on the PXE path.
+	files := map[string][]string{
+		"templates/cobbler/dhcp.template": {
+			"{{internal_network}}",
+			"{{internal_netmask}}",
+			"{{internal_gateway}}",
+			"{{internal_domain}}",
+			"{{internal_dhcp_start}}",
+			"{{internal_dhcp_end}}",
+			"{{jumpstart_ip}}",
+			"{{main_network}}",
+			"{{jumpstart_ip_main}}",
+		},
+		"templates/cobbler/settings-patch.py": {"{{jumpstart_ip}}"},
+		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": {
+			"{{jumpstart_ip}}",
+			"{{jumpstart_ip_main}}",
+		},
+	}
+	for file, wants := range files {
+		data, err := cms.TemplatesFS.ReadFile(file)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", file, err)
+		}
+		content := string(data)
+		for _, want := range wants {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s is missing the %s placeholder", file, want)
+			}
+		}
+		for _, unwanted := range []string{"192.168.10.10", "192.168.20.10", "192.168.10.0/24", "192.168.20.0/24"} {
+			if strings.Contains(content, unwanted) {
+				t.Errorf("%s hardcodes the default lab value %s", file, unwanted)
+			}
+		}
+	}
+
+	named, err := cms.TemplatesFS.ReadFile("templates/cobbler/named.template")
+	if err != nil {
+		t.Fatalf("failed to read named.template: %v", err)
+	}
+	if strings.Contains(string(named), "172.20.32.3") {
+		t.Error("named.template must not forward to the hosted runner's private resolver")
+	}
+}
+
 func TestTemplates_EmbeddedMonitoringConfigs(t *testing.T) {
 	t.Run("prometheus.yml", func(t *testing.T) {
 		// Puppet (role::monitor) is the single source of truth for the scrape

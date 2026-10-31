@@ -2,9 +2,13 @@ package cobbler
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +42,120 @@ var cobblerVars = strings.NewReplacer(
 	"{{distro}}", cobblerDistro,
 	"{{profile}}", cobblerProfile,
 )
+
+// cobblerNetworkPlan is one lab subnet rendered into the DHCP, DNS, NFS and
+// autoinstall templates. The templates used to hardcode 192.168.10.0/24 and
+// 192.168.20.0/24, so changing network.*.cidr/gateway/domain in config.yaml
+// produced a Cobbler server that answered for a network the lab no longer had.
+type cobblerNetworkPlan struct {
+	CIDR      string
+	Network   string
+	Netmask   string
+	Gateway   string
+	Domain    string
+	DHCPStart string
+	DHCPEnd   string
+}
+
+// cobblerTemplateData is the configuration subset the PXE templates need.
+type cobblerTemplateData struct {
+	JumpstartIP          string
+	JumpstartIPMain      string
+	JumpstartMACInternal string
+	JumpstartMACMain     string
+	Internal             cobblerNetworkPlan
+	Main                 cobblerNetworkPlan
+}
+
+// planCobblerNetwork derives the DHCP network/netmask/pool from a configured
+// CIDR. The pool keeps the lab's documented .50-.99 window and is clamped to
+// the usable host range for prefixes smaller than /24.
+func planCobblerNetwork(detail config.NetworkDetail) (cobblerNetworkPlan, error) {
+	_, ipnet, err := net.ParseCIDR(detail.CIDR)
+	if err != nil {
+		return cobblerNetworkPlan{}, fmt.Errorf("parse CIDR %q: %w", detail.CIDR, err)
+	}
+	if ipnet.IP.To4() == nil {
+		return cobblerNetworkPlan{}, fmt.Errorf("CIDR %q is not IPv4", detail.CIDR)
+	}
+	network := binary.BigEndian.Uint32(ipnet.IP.To4())
+	mask := binary.BigEndian.Uint32(ipnet.Mask)
+	broadcast := network | ^mask
+	start := network + 50
+	end := network + 99
+	if end > broadcast-1 {
+		end = broadcast - 1
+	}
+	if start < network+1 {
+		start = network + 1
+	}
+	if start > end {
+		return cobblerNetworkPlan{}, fmt.Errorf("CIDR %q is too small for the DHCP pool", detail.CIDR)
+	}
+	return cobblerNetworkPlan{
+		CIDR:      detail.CIDR,
+		Network:   ipv4String(network),
+		Netmask:   net.IP(ipnet.Mask).String(),
+		Gateway:   detail.Gateway,
+		Domain:    detail.Domain,
+		DHCPStart: ipv4String(start),
+		DHCPEnd:   ipv4String(end),
+	}, nil
+}
+
+func ipv4String(v uint32) string {
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
+}
+
+// cobblerTemplateReplacer builds the renderer used for both uploaded template
+// files and the inline install scripts.
+func (p *Phase) cobblerTemplateReplacer() (*strings.Replacer, error) {
+	if p.cfg.Nodes.Jumpstart.IP == "" {
+		return nil, fmt.Errorf("nodes.jumpstart.ip is empty; Cobbler cannot render its server address")
+	}
+	if p.cfg.Nodes.Jumpstart.IPMain == "" {
+		return nil, fmt.Errorf("nodes.jumpstart.ip_main is empty; main-network PXE clients need it")
+	}
+	if p.cfg.Nodes.Jumpstart.MACInternal == "" || p.cfg.Nodes.Jumpstart.MACMain == "" {
+		return nil, fmt.Errorf("nodes.jumpstart.mac_internal/mac_main are required to scope DHCP to the lab interfaces")
+	}
+	internal, err := planCobblerNetwork(p.cfg.Network.Internal)
+	if err != nil {
+		return nil, fmt.Errorf("internal network: %w", err)
+	}
+	main, err := planCobblerNetwork(p.cfg.Network.Main)
+	if err != nil {
+		return nil, fmt.Errorf("main network: %w", err)
+	}
+	data := cobblerTemplateData{
+		JumpstartIP:          p.cfg.Nodes.Jumpstart.IP,
+		JumpstartIPMain:      p.cfg.Nodes.Jumpstart.IPMain,
+		JumpstartMACInternal: p.cfg.Nodes.Jumpstart.MACInternal,
+		JumpstartMACMain:     p.cfg.Nodes.Jumpstart.MACMain,
+		Internal:             internal,
+		Main:                 main,
+	}
+	return strings.NewReplacer(
+		"{{jumpstart_ip}}", data.JumpstartIP,
+		"{{jumpstart_ip_main}}", data.JumpstartIPMain,
+		"{{jumpstart_mac_internal}}", data.JumpstartMACInternal,
+		"{{jumpstart_mac_main}}", data.JumpstartMACMain,
+		"{{internal_cidr}}", data.Internal.CIDR,
+		"{{internal_network}}", data.Internal.Network,
+		"{{internal_netmask}}", data.Internal.Netmask,
+		"{{internal_gateway}}", data.Internal.Gateway,
+		"{{internal_domain}}", data.Internal.Domain,
+		"{{internal_dhcp_start}}", data.Internal.DHCPStart,
+		"{{internal_dhcp_end}}", data.Internal.DHCPEnd,
+		"{{main_cidr}}", data.Main.CIDR,
+		"{{main_network}}", data.Main.Network,
+		"{{main_netmask}}", data.Main.Netmask,
+		"{{main_gateway}}", data.Main.Gateway,
+		"{{main_domain}}", data.Main.Domain,
+		"{{main_dhcp_start}}", data.Main.DHCPStart,
+		"{{main_dhcp_end}}", data.Main.DHCPEnd,
+	), nil
+}
 
 // cobblerInstallSteps is the ordered package/configuration payload for the
 // Cobbler host. It is data, not logic: runCobblerInstallSteps logs each
@@ -79,9 +197,9 @@ cat /tmp/tpl_isc_dhcp_timeout.conf >> /etc/systemd/system/isc-dhcp-server.servic
 cat /tmp/tpl_cobblerd_timeout.conf >> /etc/systemd/system/cobblerd.service.d/override.conf
 systemctl daemon-reload`,
 
-	`INT_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/52:54:00:10:00:01/{print $2}' | head -1)
+	`INT_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/{{jumpstart_mac_internal}}/{print $2}' | head -1)
 [ -z "$INT_IF" ] && INT_IF="enp1s0"
-MAIN_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/52:54:00:10:02:0a/{print $2}' | head -1)
+MAIN_IF=$(ip -o link show 2>/dev/null | awk -F': ' '/{{jumpstart_mac_main}}/{print $2}' | head -1)
 [ -z "$MAIN_IF" ] && MAIN_IF="enp2s0"
 IFACES_LINE="INTERFACESv4=\"${INT_IF} ${MAIN_IF}\""
 if grep -q 'INTERFACESv4=' /etc/default/isc-dhcp-server 2>/dev/null; then
@@ -104,10 +222,16 @@ fi
 mkdir -p /srv/tftpboot`,
 
 	`mkdir -p /var/www/cobbler/distro_mirror/ubuntu-24.04
-NFS_EXPORT="/var/www/cobbler/distro_mirror/ubuntu-24.04 *(ro,async,no_root_squash,no_subtree_check)"
-if ! grep -qF "/var/www/cobbler/distro_mirror/ubuntu-24.04" /etc/exports 2>/dev/null; then
-    echo "${NFS_EXPORT}" >> /etc/exports
-fi`,
+NFS_PATH="/var/www/cobbler/distro_mirror/ubuntu-24.04"
+# PXE clients live on both lab subnets; scope the export to those two CIDRs
+# instead of a wildcard, and rewrite an existing line so an upgraded host
+# loses the previous world-readable export.
+NFS_EXPORT="${NFS_PATH} {{internal_cidr}}(ro,async,no_subtree_check) {{main_cidr}}(ro,async,no_subtree_check)"
+if grep -qF "$NFS_PATH" /etc/exports 2>/dev/null; then
+    sed -i "\|^${NFS_PATH}|d" /etc/exports
+fi
+echo "$NFS_EXPORT" >> /etc/exports
+exportfs -ra`,
 
 	`a2enmod wsgi 2>/dev/null || true
 a2enconf cobbler 2>/dev/null || true`,
@@ -179,28 +303,21 @@ func (p *Phase) waitForJumpstartSSH(ctx context.Context, jumpIP string) error {
 }
 
 func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
-	pattern := filepath.Join(p.cfg.VM.StorageDir, "ubuntu-24.04*.iso")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) == 0 {
-		return fmt.Errorf("could not find Ubuntu ISO in %s", p.cfg.VM.StorageDir)
+	isoPath, err := selectLocalISO(p.cfg.VM.StorageDir)
+	if err != nil {
+		return err
 	}
-
-	isoPath := ""
-	for _, match := range matches {
-		info, err := os.Stat(match)
-		if err == nil && info.Size() > 1024*1024*1024 { // > 1GB
-			isoPath = match
-			break
-		}
-	}
-	if isoPath == "" {
-		return fmt.Errorf("could not find an Ubuntu ISO > 1GB in %s", p.cfg.VM.StorageDir)
+	info, err := os.Stat(isoPath)
+	if err != nil {
+		return fmt.Errorf("stat local ISO %s: %w", isoPath, err)
 	}
 
 	remotePath := cobblerISO
 
-	_, _, code, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("[ -f %s ] && [ $(stat -c%%s %s 2>/dev/null || echo 0) -gt 1000000000 ]", remotePath, remotePath))
-	if code == 0 {
+	// Compare the exact size, not just "larger than 1 GB": a local ISO upgrade
+	// with a different size would otherwise be ignored forever, and the mirror
+	// stamp would keep pointing at the old image.
+	if p.remoteISOMatches(ctx, jumpIP, remotePath, info.Size()) {
 		logging.Success("Ubuntu ISO already exists on Jumpstart (%s), skipping transfer", remotePath)
 		return nil
 	}
@@ -214,24 +331,50 @@ func (p *Phase) transferISO(ctx context.Context, jumpIP string) error {
 	return p.pool.CopyFile(ctx, jumpIP, isoPath, remotePath)
 }
 
+// remoteISOMatches reports whether the jumpstart already holds an ISO of
+// exactly this size. A missing file, an unreadable stat or a different size all
+// mean the transfer has to run.
+func (p *Phase) remoteISOMatches(ctx context.Context, jumpIP, remotePath string, size int64) bool {
+	out, _, _, _ := p.pool.RunCommand(ctx, jumpIP, fmt.Sprintf("stat -c%%s %s 2>/dev/null || echo 0", remotePath))
+	remoteSize, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	return err == nil && remoteSize == size
+}
+
+// selectLocalISO picks the preferred Ubuntu 24.04 ISO in dir. The candidate
+// order matches the jumpstart installer, so a host with several downloaded
+// point releases does not silently transfer an older one just because it sorts
+// first in a glob.
+func selectLocalISO(dir string) (string, error) {
+	const minISO = int64(1024 * 1024 * 1024)
+	candidates := []string{
+		"ubuntu-24.04.4-live-server-amd64.iso",
+		"ubuntu-24.04.2-live-server-amd64.iso",
+		"ubuntu-24.04-live-server-amd64.iso",
+	}
+	for _, name := range candidates {
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && info.Size() > minISO {
+			return path, nil
+		}
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "*ubuntu-24.04*.iso"))
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+	for _, match := range matches {
+		if info, err := os.Stat(match); err == nil && info.Size() > minISO {
+			return match, nil
+		}
+	}
+	return "", fmt.Errorf("could not find an Ubuntu ISO > 1GB in %s", dir)
+}
+
 func (p *Phase) uploadTemplates(ctx context.Context, jumpIP string) error {
-	templates := map[string]string{
-		"templates/systemd/no-rate-limit.conf":            "/tmp/tpl_no_rate_limit.conf",
-		"templates/systemd/isc-dhcp-timeout.conf":         "/tmp/tpl_isc_dhcp_timeout.conf",
-		"templates/systemd/cobblerd-timeout.conf":         "/tmp/tpl_cobblerd_timeout.conf",
-		"templates/cobbler/settings-patch.py":             "/tmp/tpl_settings_patch.py",
-		"templates/cobbler/dhcp.template":                 "/tmp/tpl_dhcp.template",
-		"templates/cobbler/named.template":                "/tmp/tpl_named.template",
-		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": "/tmp/tpl_autoinstall.yaml",
-		"templates/cobbler/casper_initrd_tcp.sh":          "/tmp/casper_initrd_tcp.sh",
+	templates, err := p.renderedTemplates()
+	if err != nil {
+		return err
 	}
 
 	return p.pool.WithSFTP(ctx, jumpIP, func(sftpClient *sftp.Client) error {
-		for src, dst := range templates {
-			content, err := cms.TemplatesFS.ReadFile(src)
-			if err != nil {
-				return fmt.Errorf("failed to read template %s: %w", src, err)
-			}
+		for dst, content := range templates {
 			f, err := sftpClient.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 			if err != nil {
 				return fmt.Errorf("failed to open remote file %s: %w", dst, err)
@@ -245,6 +388,36 @@ func (p *Phase) uploadTemplates(ctx context.Context, jumpIP string) error {
 		}
 		return nil
 	})
+}
+
+// renderedTemplates reads every embedded Cobbler template and substitutes the
+// configured network, jumpstart addresses and MACs. Keeping this separate from
+// the SFTP upload makes the rendering unit-testable (FakeExecutor cannot open a
+// real *sftp.Client).
+func (p *Phase) renderedTemplates() (map[string][]byte, error) {
+	templates := map[string]string{
+		"templates/systemd/no-rate-limit.conf":            "/tmp/tpl_no_rate_limit.conf",
+		"templates/systemd/isc-dhcp-timeout.conf":         "/tmp/tpl_isc_dhcp_timeout.conf",
+		"templates/systemd/cobblerd-timeout.conf":         "/tmp/tpl_cobblerd_timeout.conf",
+		"templates/cobbler/settings-patch.py":             "/tmp/tpl_settings_patch.py",
+		"templates/cobbler/dhcp.template":                 "/tmp/tpl_dhcp.template",
+		"templates/cobbler/named.template":                "/tmp/tpl_named.template",
+		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": "/tmp/tpl_autoinstall.yaml",
+		"templates/cobbler/casper_initrd_tcp.sh":          "/tmp/casper_initrd_tcp.sh",
+	}
+	renderer, err := p.cobblerTemplateReplacer()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]byte, len(templates))
+	for src, dst := range templates {
+		content, err := cms.TemplatesFS.ReadFile(src)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read template %s: %w", src, err)
+		}
+		out[dst] = []byte(renderer.Replace(string(content)))
+	}
+	return out, nil
 }
 
 func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
@@ -268,9 +441,13 @@ func (p *Phase) installCobbler(ctx context.Context, jumpIP string) error {
 // runCobblerInstallSteps executes the ordered package/configuration payloads
 // and stops at the first failure.
 func (p *Phase) runCobblerInstallSteps(ctx context.Context, jumpIP string) error {
+	renderer, err := p.cobblerTemplateReplacer()
+	if err != nil {
+		return err
+	}
 	for i, step := range cobblerInstallSteps {
 		logging.Info("Executing install step %d/%d...", i+1, len(cobblerInstallSteps))
-		if _, err := p.pool.RunScript(ctx, jumpIP, step); err != nil {
+		if _, err := p.pool.RunScript(ctx, jumpIP, renderer.Replace(step)); err != nil {
 			return fmt.Errorf("install step %d failed: %w", i+1, err)
 		}
 	}
@@ -296,27 +473,27 @@ func (p *Phase) ensureCobblerObjects(ctx context.Context, jumpIP string) error {
 	if err != nil {
 		return err
 	}
-	if mirrorFresh && objectsReady {
-		// Steady state: the ISO has not changed since the mirror was built and
-		// both objects exist. Re-rsyncing 3.9 GB and running md5sum -c cost
-		// 52.8s on the hosted run for no change at all.
-		logging.Success("Cobbler distro mirror and profile are current; skipping rebuild")
-		return nil
-	}
-
 	if !mirrorFresh {
 		logging.Info("Cobbler distro mirror is missing or stale; rebuilding from the ISO...")
 		if err := p.ensureMirror(ctx, jumpIP); err != nil {
 			return fmt.Errorf("rebuild distro mirror: %w", err)
 		}
 	} else {
-		logging.Info("Cobbler distro mirror is current; recreating the distro/profile only...")
+		logging.Info("Cobbler distro mirror is current; skipping the rsync and checking the profile...")
 	}
+
+	// The autoinstall template and profile are cheap to rewrite and are part
+	// of the desired state. The old steady-state shortcut returned before this
+	// point, so a template change was never applied to an existing host even
+	// though the ISO (the only thing the stamp tracks) had not changed.
 	if err := p.ensureProfile(ctx, jumpIP); err != nil {
 		return fmt.Errorf("create Cobbler distro/profile: %w", err)
 	}
 	if err := p.syncCobbler(ctx, jumpIP); err != nil {
 		return fmt.Errorf("sync Cobbler: %w", err)
+	}
+	if mirrorFresh && objectsReady {
+		logging.Success("Cobbler distro mirror and profile are current")
 	}
 	return nil
 }
@@ -397,7 +574,9 @@ if [ -f "$ISO_FILE" ]; then
     # mount/rsync failures must abort: an incomplete mirror breaks
     # 'cobbler distro add' or produces a PXE installer that never boots.
     mount -o loop "$ISO_FILE" "$MOUNT_POINT"
-    rsync -a "${MOUNT_POINT}/" "$MIRROR/"
+    # --delete keeps the mirror an exact copy: files removed from a newer ISO
+    # must not survive and be served to PXE clients.
+    rsync -a --delete "${MOUNT_POINT}/" "$MIRROR/"
     umount "$MOUNT_POINT"
 fi
 

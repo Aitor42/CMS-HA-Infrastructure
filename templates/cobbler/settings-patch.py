@@ -12,9 +12,13 @@ import yaml
 with open("/etc/cobbler/settings.yaml") as f:
     cfg = yaml.safe_load(f) or {}
 
-cfg["server"]                    = "192.168.10.10"
+# The Cobbler host address is rendered from config.yaml before this file is
+# uploaded.
+server = "{{jumpstart_ip}}"
+
+cfg["server"]                    = server
 cfg.pop("next_server", None)
-cfg["next_server_v4"]            = "192.168.10.10"
+cfg["next_server_v4"]            = server
 cfg["next_server_v6"]            = "::1"
 cfg["manage_dhcp"]               = True
 cfg["manage_dhcp_v4"]            = True

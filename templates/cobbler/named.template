@@ -8,8 +8,10 @@ options {
     recursion yes;
     dnssec-validation no;
     forward only;
+    # Public resolvers only: the previous first entry was the hosted runner's
+    # private resolver, which does not exist in a real lab.
     forwarders {
-        172.20.32.3;
+        1.1.1.1;
         8.8.8.8;
     };
 };
