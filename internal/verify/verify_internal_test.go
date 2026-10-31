@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -184,5 +185,70 @@ func TestPhase03FailsWhenTheChainVerificationFails(t *testing.T) {
 	}
 	if !strings.Contains(res.Details, "certificate check failed") {
 		t.Errorf("phase03() details = %q, want the certificate failure", res.Details)
+	}
+}
+
+func TestPhase05ChecksHTTPReadinessAndLoadedRules(t *testing.T) {
+	cfg := &config.Config{Nodes: config.NodesConfig{
+		Monitor: config.NodeDetail{Name: "internal-monitor", IP: "192.168.10.20"},
+	}}
+	var gotCmd string
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			gotCmd = cmd
+			return "active\nactive\nactive\n", "", 0, nil
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	res := v.phase05(t.Context())
+	if !res.Pass {
+		t.Fatalf("phase05() = %+v, want a pass", res)
+	}
+	for _, want := range []string{
+		"prometheus-alertmanager",
+		"http://127.0.0.1:3000/api/health",
+		"http://127.0.0.1:9090/-/ready",
+		"http://127.0.0.1:9093/-/ready",
+		`"infrastructure"`,
+	} {
+		if !strings.Contains(gotCmd, want) {
+			t.Errorf("phase05 command is missing %q:\n%s", want, gotCmd)
+		}
+	}
+	if !strings.Contains(res.Details, "alert rules loaded") {
+		t.Errorf("phase05() details = %q, want the loaded-rules detail", res.Details)
+	}
+}
+
+func TestPhase05FailsWhenAListenerIsNotReady(t *testing.T) {
+	cfg := &config.Config{Nodes: config.NodesConfig{
+		Monitor: config.NodeDetail{Name: "internal-monitor", IP: "192.168.10.20"},
+	}}
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, _ string) (string, string, int, error) {
+			return "active\nactive\nactive\n", "", 7, errors.New("exit status 7")
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	if res := v.phase05(t.Context()); res.Pass {
+		t.Fatalf("phase05() = %+v, want a failure when a listener is not ready", res)
+	}
+}
+
+func TestPhase05FailsWhenAUnitIsInactive(t *testing.T) {
+	cfg := &config.Config{Nodes: config.NodesConfig{
+		Monitor: config.NodeDetail{Name: "internal-monitor", IP: "192.168.10.20"},
+	}}
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, _ string) (string, string, int, error) {
+			return "active\ninactive\nactive\n", "", 3, nil
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	if res := v.phase05(t.Context()); res.Pass {
+		t.Fatalf("phase05() = %+v, want a failure when a unit is inactive", res)
 	}
 }

@@ -446,7 +446,7 @@ main-hotdesk3        192.168.20.203  running    OK
 | Service | URL | Purpose |
 |:--------|:----|:--------|
 | Prometheus | `http://192.168.10.20:9090` | Metrics collection and alerting engine (`/alerts` shows firing alerts) |
-| Grafana | `http://192.168.10.20:3000` | Dashboards and visualisation (opens on the HA overview; node overview + HA overview). The admin password is generated per deployment in `/etc/grafana/grafana-admin.env` on the monitor node, or set `monitoring.grafana_admin_password` in `config.yaml`. |
+| Grafana | `http://192.168.10.20:3000` | Dashboards and visualisation (opens on the HA overview; node overview + HA overview). The admin password is generated on the first deployment in `/etc/grafana/grafana-admin.env` on the monitor node and reused afterwards, or set `monitoring.grafana_admin_password` in `config.yaml`. |
 | Alertmanager | `http://192.168.10.20:9093` | Alert routing, grouping and deduplication; add a webhook/email/Slack receiver to enable delivery (see `docs/MANUAL.md` §4) |
 
 ### Alert Rules

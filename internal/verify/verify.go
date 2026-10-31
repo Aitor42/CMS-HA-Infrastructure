@@ -426,9 +426,21 @@ func etcdMemberNames(out string) map[string]bool {
 }
 
 func (v *Verifier) phase05(ctx context.Context) CheckResult {
-	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Monitor.IP, "systemctl is-active prometheus grafana-server")
+	// `systemctl is-active` alone passes while a listener is still starting or
+	// after Prometheus rejected a rule file on reload. Probe the same endpoints
+	// the monitoring phase waits for, and confirm the rule groups are loaded.
+	cmd := "systemctl is-active prometheus grafana-server prometheus-alertmanager && " +
+		"curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:3000/api/health && " +
+		"curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:9090/-/ready && " +
+		"curl -fsS --max-time 3 -o /dev/null http://127.0.0.1:9093/-/ready && " +
+		`curl -fsS --max-time 3 http://127.0.0.1:9090/api/v1/rules | grep -qE '"name"[[:space:]]*:[[:space:]]*"infrastructure"'`
+	out, _, _, err := v.ssh.RunCommand(ctx, v.cfg.Nodes.Monitor.IP, cmd)
 	pass := err == nil && serviceStatesActive(out)
-	return CheckResult{"Phase 05", "Prometheus & Grafana", pass, ""}
+	details := ""
+	if pass {
+		details = "services active, Grafana health OK, Prometheus and Alertmanager ready, alert rules loaded"
+	}
+	return CheckResult{"Phase 05", "Prometheus & Grafana", pass, details}
 }
 
 func (v *Verifier) phase06(ctx context.Context) CheckResult {

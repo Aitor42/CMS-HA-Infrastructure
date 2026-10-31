@@ -18,11 +18,17 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// monitoringVerifyCommand proves both services are active and that Grafana's
-// HTTP listener is actually accepting requests. A unit can be active while its
+// monitoringVerifyCommand proves the three services are active and that their
+// HTTP listeners actually accept requests. A unit can be active while its
 // listener is still starting, which made the end-to-end check flaky.
-const monitoringVerifyCommand = "systemctl is-active prometheus && systemctl is-active grafana-server && " +
-	"curl -fsS --max-time 2 http://127.0.0.1:3000/api/health >/dev/null"
+const monitoringVerifyCommand = "systemctl is-active prometheus grafana-server prometheus-alertmanager && " +
+	"curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:3000/api/health && " +
+	"curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:9090/-/ready && " +
+	"curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:9093/-/ready"
+
+// grafanaAdminEnvPath is the root:grafana EnvironmentFile read by the Puppet
+// drop-in. The phase keeps the generated password here so a re-run can reuse it.
+const grafanaAdminEnvPath = "/etc/grafana/grafana-admin.env"
 
 // Phase implements the Monitoring setup phase.
 type Phase struct {
@@ -81,6 +87,9 @@ func (p *Phase) Run(ctx context.Context) error {
 		addExporter(lb.IP)
 	}
 	addExporter(p.cfg.Nodes.Router.IP)
+	// The monitor node runs role::base too; without its exporter the
+	// dashboards lose the node that stores the monitoring data.
+	addExporter(p.cfg.Nodes.Monitor.IP)
 
 	if err := verifyNodeExporters(ctx, p.pool, exporterIPs); err != nil {
 		return err
@@ -123,12 +132,8 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	logging.Info("Deploying Prometheus alert rules...")
-	if rules, rerr := cms.TemplatesFS.ReadFile("templates/monitoring/alert-rules.yml"); rerr != nil {
-		logging.Warn("failed to read embedded alert rules: %v", rerr)
-	} else if cerr := p.pool.CopyContent(ctx, monitorIP, rules, "/etc/prometheus/alert-rules.yml", 0644); cerr != nil {
-		logging.Warn("failed to deploy alert rules: %v", cerr)
-	} else if _, _, _, rerr := p.pool.RunCommand(ctx, monitorIP, "chown prometheus:prometheus /etc/prometheus/alert-rules.yml && systemctl reload prometheus"); rerr != nil {
-		logging.Warn("failed to reload prometheus after deploying alert rules: %v", rerr)
+	if err := deployAlertRules(ctx, p.pool, monitorIP); err != nil {
+		return err
 	}
 
 	logging.Info("Configuring Grafana admin credentials...")
@@ -185,23 +190,19 @@ func (p *Phase) Run(ctx context.Context) error {
 // root:grafana 0640 EnvironmentFile and restarts the service. The Puppet
 // drop-in loads that file, and the CLI reset makes the change effective even
 // when the Grafana database already exists. An operator-supplied value wins;
-// otherwise the phase generates 256 bits of randomness and only tells the
-// operator where to read it.
+// otherwise an existing generated value is reused so a re-run does not lock the
+// operator out, and only a first run generates 256 bits of randomness and tells
+// the operator where to read it.
 func (p *Phase) configureGrafanaAdmin(ctx context.Context, monitorIP string) error {
-	password := strings.TrimSpace(p.cfg.Monitoring.GrafanaAdminPassword)
-	if password == "" {
-		raw := make([]byte, 32)
-		if _, err := rand.Read(raw); err != nil {
-			return fmt.Errorf("generate Grafana admin password: %w", err)
-		}
-		password = base64.RawURLEncoding.EncodeToString(raw)
+	password, generated, err := grafanaAdminPassword(ctx, p.pool, monitorIP, p.cfg.Monitoring.GrafanaAdminPassword)
+	if err != nil {
+		return err
 	}
 
-	const path = "/etc/grafana/grafana-admin.env"
 	// Rendered as a key/value pair rather than a concatenated literal so the
 	// generated secret never reads as credential material embedded in code.
 	content := strings.Join([]string{"GF_SECURITY_ADMIN_PASSWORD", password}, "=") + "\n"
-	if err := p.pool.CopyContent(ctx, monitorIP, []byte(content), path, 0640); err != nil {
+	if err := p.pool.CopyContent(ctx, monitorIP, []byte(content), grafanaAdminEnvPath, 0640); err != nil {
 		return fmt.Errorf("write Grafana admin credential: %w", err)
 	}
 	// GF_SECURITY_ADMIN_PASSWORD is only honoured when Grafana creates the
@@ -216,12 +217,64 @@ func (p *Phase) configureGrafanaAdmin(ctx context.Context, monitorIP string) err
 			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/share/grafana/bin/grafana; "+
 			"\"$GRAFANA_CLI\" cli --homepath /usr/share/grafana --config /etc/grafana/grafana.ini "+
 			"admin reset-admin-password %s && systemctl restart grafana-server",
-		path, path, shell.Quote(password))
+		grafanaAdminEnvPath, grafanaAdminEnvPath, shell.Quote(password))
 	if _, stderr, code, err := p.pool.RunCommand(ctx, monitorIP, cmd); err != nil || code != 0 {
 		return fmt.Errorf("install Grafana admin credential (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
 	}
-	if p.cfg.Monitoring.GrafanaAdminPassword == "" {
-		logging.Info("Grafana admin password generated; read it with: sudo cat %s", path)
+	if generated {
+		logging.Info("Grafana admin password generated; read it with: sudo cat %s", grafanaAdminEnvPath)
+	}
+	return nil
+}
+
+// grafanaAdminPassword returns the password to install and whether it was
+// generated. A configured value always wins. When none is configured, an
+// existing EnvironmentFile is reused: rotating the password on every deploy
+// would invalidate the value the operator stored after the previous run.
+func grafanaAdminPassword(ctx context.Context, pool ssh.Executor, monitorIP, configured string) (string, bool, error) {
+	if password := strings.TrimSpace(configured); password != "" {
+		return password, false, nil
+	}
+	if content, err := pool.ReadFile(ctx, monitorIP, grafanaAdminEnvPath); err == nil {
+		if password := parseGrafanaAdminPassword(string(content)); password != "" {
+			return password, false, nil
+		}
+	}
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", false, fmt.Errorf("generate Grafana admin password: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), true, nil
+}
+
+// parseGrafanaAdminPassword extracts GF_SECURITY_ADMIN_PASSWORD from the
+// EnvironmentFile the phase writes.
+func parseGrafanaAdminPassword(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "GF_SECURITY_ADMIN_PASSWORD="); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// deployAlertRules installs the embedded rules and makes a validation failure
+// fatal. `systemctl reload prometheus` only sends SIGHUP and reports success
+// even when Prometheus rejects the file, so without promtool a malformed rule
+// would leave the previous rules in place and the deploy would look healthy.
+func deployAlertRules(ctx context.Context, pool ssh.Executor, monitorIP string) error {
+	rules, err := cms.TemplatesFS.ReadFile("templates/monitoring/alert-rules.yml")
+	if err != nil {
+		return fmt.Errorf("read embedded alert rules: %w", err)
+	}
+	const path = "/etc/prometheus/alert-rules.yml"
+	if err := pool.CopyContent(ctx, monitorIP, rules, path, 0644); err != nil {
+		return fmt.Errorf("deploy alert rules: %w", err)
+	}
+	cmd := fmt.Sprintf("chown prometheus:prometheus %s && promtool check rules %s && systemctl reload prometheus", path, path)
+	if _, stderr, code, rerr := pool.RunCommand(ctx, monitorIP, cmd); rerr != nil || code != 0 {
+		return fmt.Errorf("validate or reload Prometheus alert rules (exit %d): %v %s",
+			code, rerr, strings.TrimSpace(stderr))
 	}
 	return nil
 }
