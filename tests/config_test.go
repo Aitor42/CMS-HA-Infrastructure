@@ -371,6 +371,39 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate node IP", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[1].IP = cfg.Nodes.Masters[0].IP
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reuses IP") {
+			t.Fatalf("Validate() = %v, want the duplicate IP error", err)
+		}
+	})
+
+	t.Run("duplicate node MAC", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[0].MAC = "52:54:00:10:01:11"
+		cfg.Nodes.Masters[1].MAC = "52:54:00:10:01:11"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reuses MAC") {
+			t.Fatalf("Validate() = %v, want the duplicate MAC error", err)
+		}
+	})
+
+	t.Run("duplicate node name", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[1].Name = cfg.Nodes.Masters[0].Name
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate node name") {
+			t.Fatalf("Validate() = %v, want the duplicate name error", err)
+		}
+	})
+
+	t.Run("invalid raw mac_internal", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Jumpstart.MACInternal = "not-a-mac"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mac_internal") {
+			t.Fatalf("Validate() = %v, want the mac_internal error", err)
+		}
+	})
+
 	t.Run("missing storage_dir", func(t *testing.T) {
 		cfg := validCfg()
 		cfg.VM.StorageDir = ""

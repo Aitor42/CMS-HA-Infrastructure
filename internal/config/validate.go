@@ -258,30 +258,82 @@ func (c *Config) validateHotdesks() error {
 }
 
 func (c *Config) validateNodeFields() error {
+	// mac_internal/mac_main reach libvirt directly (init-vms) even when `mac`
+	// is also set, so validate the raw fields before toSpec collapses them.
+	for _, n := range c.configuredNodes() {
+		for field, mac := range map[string]string{"mac_internal": n.MACInternal, "mac_main": n.MACMain} {
+			if mac != "" && !macPattern.MatchString(mac) {
+				return fmt.Errorf("node %s has an invalid %s address: %q", n.Name, field, mac)
+			}
+		}
+	}
+
 	// These fields are interpolated into remote SSH commands, Cobbler
 	// registration scripts and awk filters: an unvalidated value breaks or
 	// manipulates far-away infrastructure, so their shape must be exact.
+	// Cobbler also keys systems by name and MAC, and duplicate addresses make
+	// the DHCP host stanzas ambiguous, so reject collisions here.
+	seenNames := map[string]string{}
+	seenIPs := map[string]string{}
+	seenMACs := map[string]string{}
 	for _, n := range c.AllNodes() {
-		if n.Name != "" && !nodeNamePattern.MatchString(n.Name) {
-			return fmt.Errorf("node has an invalid name (letters, digits, dots, underscores, hyphens only): %q", n.Name)
+		if n.Name != "" {
+			if !nodeNamePattern.MatchString(n.Name) {
+				return fmt.Errorf("node has an invalid name (letters, digits, dots, underscores, hyphens only): %q", n.Name)
+			}
+			if prev, ok := seenNames[n.Name]; ok {
+				return fmt.Errorf("duplicate node name %q (already used by %s)", n.Name, prev)
+			}
+			seenNames[n.Name] = n.Name
 		}
 		if n.IP != "" {
 			if ip := net.ParseIP(n.IP); ip == nil || ip.To4() == nil {
 				return fmt.Errorf("node %s has an invalid IPv4 address: %q", n.Name, n.IP)
 			}
+			if prev, ok := seenIPs[n.IP]; ok {
+				return fmt.Errorf("node %s reuses IP %s (already used by %s)", n.Name, n.IP, prev)
+			}
+			seenIPs[n.IP] = n.Name
 		}
 		if n.FQDN != "" && !fqdnPattern.MatchString(n.FQDN) {
 			return fmt.Errorf("node %s has an invalid FQDN (letters, digits, dots, hyphens only): %q", n.Name, n.FQDN)
 		}
-		if n.MAC != "" && !macPattern.MatchString(n.MAC) {
-			return fmt.Errorf("node %s has an invalid MAC address: %q", n.Name, n.MAC)
+		if n.MAC != "" {
+			if !macPattern.MatchString(n.MAC) {
+				return fmt.Errorf("node %s has an invalid MAC address: %q", n.Name, n.MAC)
+			}
+			key := strings.ToLower(n.MAC)
+			if prev, ok := seenMACs[key]; ok {
+				return fmt.Errorf("node %s reuses MAC %s (already used by %s)", n.Name, n.MAC, prev)
+			}
+			seenMACs[key] = n.Name
 		}
 		// mac_wan is interpolated into an awk filter on the router too.
-		if n.MACWAN != "" && !macPattern.MatchString(n.MACWAN) {
-			return fmt.Errorf("node %s has an invalid WAN MAC address: %q", n.Name, n.MACWAN)
+		if n.MACWAN != "" {
+			if !macPattern.MatchString(n.MACWAN) {
+				return fmt.Errorf("node %s has an invalid WAN MAC address: %q", n.Name, n.MACWAN)
+			}
+			key := strings.ToLower(n.MACWAN)
+			if prev, ok := seenMACs[key]; ok {
+				return fmt.Errorf("node %s reuses MAC %s (already used by %s)", n.Name, n.MACWAN, prev)
+			}
+			seenMACs[key] = n.Name
 		}
 	}
 	return nil
+}
+
+// configuredNodes returns the NodeDetail entries the operator wrote in
+// config.yaml. AllNodes additionally synthesises hotdesks, whose MACs are
+// generated and have no raw mac_internal/mac_main fields to validate.
+func (c *Config) configuredNodes() []NodeDetail {
+	nodes := []NodeDetail{c.Nodes.Router, c.Nodes.Jumpstart}
+	nodes = append(nodes, c.Nodes.Masters...)
+	nodes = append(nodes, c.Nodes.Workers...)
+	nodes = append(nodes, c.Nodes.Storage, c.Nodes.Monitor)
+	nodes = append(nodes, c.Nodes.LBs...)
+	nodes = append(nodes, c.Nodes.CMSFrontends...)
+	return nodes
 }
 
 // validateInterpolatedValues checks the remaining values that are embedded in
