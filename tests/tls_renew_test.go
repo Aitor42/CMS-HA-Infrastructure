@@ -32,10 +32,17 @@ func TestTLSRenewScript(t *testing.T) {
 		`CA_URL="${CMS_CA_URL:-https://ca.internal.local:8443}"`,
 		`ROOT_CA="${CMS_ROOT_CA:-/usr/local/share/ca-certificates/cms_root_ca.crt}"`,
 		`CA_NAME="${CMS_CA_NAME:-CMS Local CA}"`,
+		`grep -Fq -- "$CA_NAME"`,
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("cms-tls-renew.sh is missing %q", want)
 		}
+	}
+
+	// The CA name is configuration, not a regular expression: a name with a
+	// regex metacharacter must still match the issuer line literally.
+	if strings.Contains(content, `grep -q "$CA_NAME"`) {
+		t.Error("cms-tls-renew.sh matches the CA name as a regular expression instead of a fixed string")
 	}
 
 	// The CA endpoint must come from the file the PKI phase writes, not from a

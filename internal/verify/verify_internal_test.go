@@ -107,3 +107,82 @@ func TestOutputHasIPv4IsExact(t *testing.T) {
 		t.Error("outputHasIPv4 matched an empty address")
 	}
 }
+
+func phase03Config() *config.Config {
+	return &config.Config{
+		PKI: config.PKIConfig{
+			CAName:           "CMS Local CA",
+			CertDNSNames:     []string{"cms.internal.local"},
+			CertMinValidDays: 30,
+		},
+		Network: config.NetworkConfig{
+			Main: config.NetworkDetail{VIP: "192.168.20.100"},
+		},
+		Nodes: config.NodesConfig{
+			LBs:          []config.NodeDetail{{Name: "lb1", IP: "192.168.20.103"}},
+			CMSFrontends: []config.NodeDetail{{Name: "cms1", IP: "192.168.20.101"}},
+		},
+	}
+}
+
+func TestPhase03VerifiesTheChainAndEverySAN(t *testing.T) {
+	cfg := phase03Config()
+	var lbCmd string
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			if strings.Contains(cmd, "openssl x509") {
+				lbCmd = cmd
+				return "issuer=CN = CMS Local CA\n", "", 0, nil
+			}
+			if strings.Contains(cmd, "ip -4 -o addr show") {
+				if host == "192.168.20.103" {
+					return "2: enp1s0    inet 192.168.20.100/24 brd 192.168.20.255 scope global enp1s0\n", "", 0, nil
+				}
+				return "", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	res := v.phase03(t.Context())
+	if !res.Pass {
+		t.Fatalf("phase03() = %+v, want a pass", res)
+	}
+	if lbCmd == "" {
+		t.Fatal("phase03 did not run the certificate check")
+	}
+	for _, want := range []string{
+		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -verify_hostname 'cms.internal.local'",
+		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -verify_ip '192.168.20.100'",
+		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -verify_ip '192.168.20.103'",
+	} {
+		if !strings.Contains(lbCmd, want) {
+			t.Errorf("certificate check is missing %q:\n%s", want, lbCmd)
+		}
+	}
+}
+
+func TestPhase03FailsWhenTheChainVerificationFails(t *testing.T) {
+	cfg := phase03Config()
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			if strings.Contains(cmd, "openssl x509") {
+				return "error 20 at 0 depth lookup: unable to get local issuer certificate\n", "", 1, nil
+			}
+			if strings.Contains(cmd, "ip -4 -o addr show") && host == "192.168.20.103" {
+				return "2: enp1s0    inet 192.168.20.100/24 brd 192.168.20.255 scope global enp1s0\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	res := v.phase03(t.Context())
+	if res.Pass {
+		t.Fatalf("phase03() = %+v, want a failure when the chain does not verify", res)
+	}
+	if !strings.Contains(res.Details, "certificate check failed") {
+		t.Errorf("phase03() details = %q, want the certificate failure", res.Details)
+	}
+}

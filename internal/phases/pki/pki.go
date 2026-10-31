@@ -1,7 +1,11 @@
 package pki
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
@@ -112,7 +116,9 @@ if ! command -v step >/dev/null 2>&1 || ! command -v step-ca >/dev/null 2>&1; th
 	}
 	install_deb /tmp/step-cli.deb %s
 	install_deb /tmp/step-ca.deb %s
-fi`,
+fi
+command -v step >/dev/null 2>&1 || { echo "step CLI missing after installation" >&2; exit 1; }
+command -v step-ca >/dev/null 2>&1 || { echo "step-ca missing after installation" >&2; exit 1; }`,
 		quoteURLs(stepReleaseURLs("cli", "step-cli", p.cfg.PKI.StepVersion)),
 		quoteURLs(stepReleaseURLs("certificates", "step-ca", p.cfg.PKI.StepCAVersion)))
 	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, installCmd); err != nil || code != 0 {
@@ -195,8 +201,8 @@ func (p *Phase) waitForCAHealth(ctx context.Context, jumpIP string, caPort int, 
 func (p *Phase) raiseProvisionerDurations(ctx context.Context, jumpIP, caDomain string, caPort int) error {
 	certHours := p.cfg.LBTLSCertLifetimeHours()
 	durationsCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca provisioner update admin \
---x509-min-dur 24h --x509-default-dur %dh --x509-max-dur 8760h \
---ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt`, certHours, caDomain, caPort)
+--x509-min-dur 24h --x509-default-dur %dh --x509-max-dur %dh \
+--ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt`, certHours, config.MaxPKICertLifetimeHours, caDomain, caPort)
 	if updOut, updErr, updCode, err := p.pool.RunCommand(ctx, jumpIP, durationsCmd); err != nil || updCode != 0 {
 		return fmt.Errorf("failed to raise the CA provisioner x509 durations to %dh (exit %d): %v %s%s",
 			certHours, updCode, err, strings.TrimSpace(updOut), strings.TrimSpace(updErr))
@@ -312,6 +318,15 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Never install a certificate the balancer cannot actually serve. step-ca
+	// only adds the subject to the SAN extension when no --san flag is given,
+	// so a SAN flag bug or a misconfigured pki.cert_dns_names would otherwise
+	// reach the balancers unnoticed: nginx accepts the certificate, and the
+	// nginx-phase probe uses -k. Checking here fails the deploy on the CA host
+	// instead of serving a certificate that does not cover the VIP.
+	if err := validateIssuedCertificate(certPEM, keyPEM, p.cfg.LBTLSSANs(), p.cfg.PKICommonName(), time.Now()); err != nil {
+		return fmt.Errorf("refusing to install the load-balancer certificate: %w", err)
+	}
 
 	// Wipe the CA-host copies: the key now only lives on the balancers.
 	defer func() {
@@ -381,6 +396,96 @@ func (p *Phase) readIssuedLBCertificate(ctx context.Context, jumpIP string) (str
 		return "", "", fmt.Errorf("issued certificate or key is empty")
 	}
 	return certPEM, keyPEM, nil
+}
+
+// certClockSkew tolerates a CA host whose clock is slightly ahead of the
+// orchestrator when checking NotBefore. Expiry is checked against the real
+// time: the verify phase re-checks the installed certificate.
+const certClockSkew = 5 * time.Minute
+
+// validateIssuedCertificate refuses a certificate that is not a usable server
+// certificate for every SAN the balancers are meant to serve.
+//
+// The certificate is issued on the CA host and installed on the balancers, so
+// this is the last place where a SAN mistake is visible: nginx only checks that
+// the key matches, not that the certificate covers the name clients use, and
+// the nginx-phase probe connects with -k while the bootstrap certificate is
+// still in place.
+func validateIssuedCertificate(certPEM, keyPEM string, sans []string, caName string, now time.Time) error {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return fmt.Errorf("issued certificate is not PEM encoded")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse issued certificate: %w", err)
+	}
+	if cert.IsCA {
+		return fmt.Errorf("issued certificate is a CA certificate, not a server certificate")
+	}
+	if err := certificateMatchesKey(cert, keyPEM); err != nil {
+		return err
+	}
+	if now.Add(certClockSkew).Before(cert.NotBefore) {
+		return fmt.Errorf("issued certificate is not valid before %s", cert.NotBefore.Format(time.RFC3339))
+	}
+	if !now.Before(cert.NotAfter) {
+		return fmt.Errorf("issued certificate expired at %s", cert.NotAfter.Format(time.RFC3339))
+	}
+	if caName != "" && cert.Issuer.CommonName != caName {
+		return fmt.Errorf("issued certificate was issued by %q, want %q", cert.Issuer.CommonName, caName)
+	}
+	for _, san := range sans {
+		if san == "" {
+			continue
+		}
+		// VerifyHostname ignores the CommonName and matches only SANs, which is
+		// exactly the modern TLS client behaviour this check must mirror.
+		if err := cert.VerifyHostname(san); err != nil {
+			return fmt.Errorf("issued certificate does not cover %q: %w", san, err)
+		}
+	}
+	return nil
+}
+
+// certificateMatchesKey reports whether keyPEM is the private key for cert, so
+// a mismatched pair never reaches a balancer.
+func certificateMatchesKey(cert *x509.Certificate, keyPEM string) error {
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block == nil {
+		return fmt.Errorf("issued key is not PEM encoded")
+	}
+	var key any
+	var err error
+	switch block.Type {
+	case "PRIVATE KEY":
+		key, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "EC PRIVATE KEY":
+		key, err = x509.ParseECPrivateKey(block.Bytes)
+	default:
+		return fmt.Errorf("unsupported issued key type %q", block.Type)
+	}
+	if err != nil {
+		return fmt.Errorf("parse issued key: %w", err)
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return fmt.Errorf("issued key %T cannot sign", key)
+	}
+	certPub, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		return fmt.Errorf("marshal certificate public key: %w", err)
+	}
+	keyPub, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return fmt.Errorf("marshal private key public part: %w", err)
+	}
+	if !bytes.Equal(certPub, keyPub) {
+		return fmt.Errorf("issued certificate does not match its private key")
+	}
+	return nil
 }
 
 func (p *Phase) installLBCertificate(ctx context.Context, lbs []config.NodeDetail, certPEM, keyPEM string) error {

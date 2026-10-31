@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -11,8 +12,13 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
+
+// lbRootCAPath is where the PKI phase installs the internal root CA on every
+// node; the verify phase uses it to check the balancer certificate chain.
+const lbRootCAPath = "/usr/local/share/ca-certificates/cms_root_ca.crt"
 
 // Verifier holds the dependencies needed to check the deployment.
 type Verifier struct {
@@ -187,12 +193,16 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 
 	// The load balancers must serve a certificate issued by the internal CA
 	// (not the self-signed bootstrap) that is valid for at least
-	// pki.cert_min_valid_days. `-checkend` makes openssl exit non-zero when the
-	// certificate expires before the given number of seconds.
+	// pki.cert_min_valid_days and chains to the distributed root CA. `-checkend`
+	// makes openssl exit non-zero when the certificate expires before the given
+	// number of seconds; the chain checks also prove every SAN the balancer
+	// serves (DNS names, the VIP and both balancer addresses) is present.
 	minDays := v.cfg.LBTLSCertMinValidDays()
 	caName := v.cfg.PKICommonName()
+	sans := v.cfg.LBTLSSANs()
 	lbCmd := fmt.Sprintf("systemctl is-active nginx && systemctl is-active keepalived && "+
-		"openssl x509 -in /etc/nginx/ssl/cms.crt -noout -issuer -checkend %d", minDays*86400)
+		"openssl x509 -in /etc/nginx/ssl/cms.crt -noout -issuer -checkend %d && %strue",
+		minDays*86400, certificateChainChecks(sans))
 
 	resLB := v.ssh.RunParallel(ctx, lbIPs, lbCmd)
 	for _, r := range resLB {
@@ -249,9 +259,31 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 	if len(issues) > 0 {
 		details = strings.Join(issues, "; ")
 	} else if len(lbIPs) > 0 {
-		details = fmt.Sprintf("certificate issued by %q, valid > %d days", caName, minDays)
+		details = fmt.Sprintf("certificate issued by %q, valid > %d days, chain and %d SANs verified",
+			caName, minDays, len(sans))
 	}
 	return CheckResult{"Phase 03", "Nginx & Apache & SSL", pass, details}
+}
+
+// certificateChainChecks renders the openssl verify commands that prove the
+// installed balancer certificate chains to the internal root CA and covers
+// every SAN the balancers serve. IP SANs need -verify_ip; DNS names need
+// -verify_hostname. Each command prints its error to stdout so a failure
+// reaches the verification report.
+func certificateChainChecks(sans []string) string {
+	var checks strings.Builder
+	for _, san := range sans {
+		if san == "" {
+			continue
+		}
+		flag := "-verify_hostname"
+		if net.ParseIP(san) != nil {
+			flag = "-verify_ip"
+		}
+		fmt.Fprintf(&checks, "openssl verify -CAfile %s %s %s /etc/nginx/ssl/cms.crt 2>&1 && ",
+			shell.Quote(lbRootCAPath), flag, shell.Quote(san))
+	}
+	return checks.String()
 }
 
 func (v *Verifier) phase04(ctx context.Context) CheckResult {

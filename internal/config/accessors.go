@@ -102,6 +102,11 @@ func (c *Config) LBTLSCertMinValidDays() int {
 	return 30
 }
 
+// MaxPKICertLifetimeHours is the provisioner's x509-max-dur, which the PKI
+// phase configures on every deploy. step-ca rejects an issuance above it, so
+// config validation and the provisioner update share this single bound.
+const MaxPKICertLifetimeHours = 8760
+
 // LBTLSCertLifetimeHours returns the requested LB certificate lifetime.
 func (c *Config) LBTLSCertLifetimeHours() int {
 	if c.PKI.CertLifetimeHours > 0 {

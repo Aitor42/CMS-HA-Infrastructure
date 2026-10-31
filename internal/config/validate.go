@@ -139,6 +139,28 @@ func (c *Config) validateServices() error {
 }
 
 func (c *Config) validatePKI() error {
+	// pki.domain becomes the CA URL host and one of the CA certificate SANs.
+	if c.PKI.Domain != "" && !fqdnPattern.MatchString(c.PKI.Domain) {
+		return fmt.Errorf("pki.domain is not a valid DNS name: %q", c.PKI.Domain)
+	}
+	// pki.ca_name is interpolated into `step ca init --name="..."` and is later
+	// matched against the issuer in the renewal script, so it must not be able
+	// to close the quote or inject shell syntax.
+	if c.PKI.CAName != "" && !caNamePattern.MatchString(c.PKI.CAName) {
+		return fmt.Errorf("pki.ca_name must be 1-64 characters of letters, digits, spaces, dots, dashes or underscores, starting and ending with a letter or digit: %q", c.PKI.CAName)
+	}
+	if c.PKI.CAPort != 0 && (c.PKI.CAPort < 1 || c.PKI.CAPort > 65535) {
+		return fmt.Errorf("pki.ca_port must be between 1 and 65535 (got %d)", c.PKI.CAPort)
+	}
+	if c.PKI.CertLifetimeHours < 0 {
+		return fmt.Errorf("pki.cert_lifetime_hours must not be negative (got %d)", c.PKI.CertLifetimeHours)
+	}
+	// step-ca rejects --not-after values above the provisioner's x509-max-dur,
+	// so a larger request would fail only after the CA is up and configured.
+	if c.PKI.CertLifetimeHours > MaxPKICertLifetimeHours {
+		return fmt.Errorf("pki.cert_lifetime_hours must not exceed the provisioner's %dh maximum (got %d)",
+			MaxPKICertLifetimeHours, c.PKI.CertLifetimeHours)
+	}
 	// A certificate whose total lifetime is shorter than the minimum validity
 	// asserted by verify would fail as soon as it is issued.
 	if c.PKI.CertMinValidDays > 0 && c.PKI.CertLifetimeHours > 0 &&
@@ -291,6 +313,7 @@ func (c *Config) ValidatePartial() error {
 }
 
 var fqdnPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+var caNamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$`)
 var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 
 // ValidMAC reports whether s is a colon-separated MAC address in the exact

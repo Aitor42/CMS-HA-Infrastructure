@@ -49,7 +49,7 @@ if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
   exit 0
 fi
 
-if ! openssl x509 -in "$CERT" -noout -issuer 2>/dev/null | grep -q "$CA_NAME"; then
+if ! openssl x509 -in "$CERT" -noout -issuer 2>/dev/null | grep -Fq -- "$CA_NAME"; then
   log "certificate was not issued by '$CA_NAME' (self-signed bootstrap); run the PKI phase"
   exit 0
 fi

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/pki"
@@ -43,13 +44,18 @@ func pkiConfig(t *testing.T) *config.Config {
 func TestPKIPhaseRun(t *testing.T) {
 	cfg := pkiConfig(t)
 	jumpIP := cfg.Nodes.Jumpstart.IP
+	certPEM, keyPEM, err := testutil.NewTestCertificate(cfg.LBTLSSANs(), cfg.PKICommonName(),
+		time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	if err != nil {
+		t.Fatalf("NewTestCertificate: %v", err)
+	}
 	fake := &testutil.FakeExecutor{
 		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
 			switch {
 			case strings.Contains(cmd, "cat /root/.step/certs/root_ca.crt"):
 				return "ROOTCA\n", "", 0, nil
 			case strings.Contains(cmd, "cat /tmp/cms-lb.crt"):
-				return "CERT\n===CMSKEY===\nKEY\n", "", 0, nil
+				return string(certPEM) + "===CMSKEY===\n" + string(keyPEM), "", 0, nil
 			default:
 				return "", "", 0, nil
 			}
@@ -72,6 +78,7 @@ func TestPKIPhaseRun(t *testing.T) {
 		"systemctl restart step-ca",
 		"curl -kf",
 		"step ca certificate",
+		"command -v step-ca",
 	} {
 		if !hasCommand(fake.Commands, jumpIP, want) {
 			t.Errorf("jumpstart never ran %q", want)
@@ -87,11 +94,11 @@ func TestPKIPhaseRun(t *testing.T) {
 	}
 
 	// The LB certificate and key are installed and nginx is reloaded.
-	if got := string(fake.Files["192.168.20.101"]["/etc/nginx/ssl/cms.crt"]); got != "CERT" {
-		t.Errorf("LB certificate = %q, want CERT", got)
+	if got := string(fake.Files["192.168.20.101"]["/etc/nginx/ssl/cms.crt"]); got != strings.TrimSpace(string(certPEM)) {
+		t.Errorf("LB certificate = %q, want the issued PEM", got)
 	}
-	if got := string(fake.Files["192.168.20.101"]["/etc/nginx/ssl/cms.key"]); got != "KEY" {
-		t.Errorf("LB key = %q, want KEY", got)
+	if got := string(fake.Files["192.168.20.101"]["/etc/nginx/ssl/cms.key"]); got != strings.TrimSpace(string(keyPEM)) {
+		t.Errorf("LB key = %q, want the issued key", got)
 	}
 	// The renewal timer reads the CA endpoint from this file; without it the
 	// script falls back to the default domain/port/name.
@@ -117,6 +124,41 @@ func TestPKIPhaseRun(t *testing.T) {
 	localCA := filepath.Join(home, ".cms-ha", "cms_root_ca.crt")
 	if got, err := os.ReadFile(localCA); err != nil || string(got) != "ROOTCA\n" {
 		t.Errorf("local root CA %s = %q, %v", localCA, got, err)
+	}
+}
+
+func TestPKIPhaseRejectsCertificateWithoutEverySAN(t *testing.T) {
+	cfg := pkiConfig(t)
+	// The VIP is the address clients actually use; a certificate without it
+	// would still load in nginx and pass a `curl -k` probe.
+	certPEM, keyPEM, err := testutil.NewTestCertificate(
+		[]string{"cms.internal.local", "192.168.20.101"}, cfg.PKICommonName(),
+		time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	if err != nil {
+		t.Fatalf("NewTestCertificate: %v", err)
+	}
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "cat /root/.step/certs/root_ca.crt"):
+				return "ROOTCA\n", "", 0, nil
+			case strings.Contains(cmd, "cat /tmp/cms-lb.crt"):
+				return string(certPEM) + "===CMSKEY===\n" + string(keyPEM), "", 0, nil
+			default:
+				return "", "", 0, nil
+			}
+		},
+	}
+
+	err = pki.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "192.168.20.100") {
+		t.Fatalf("Run() = %v, want the missing VIP SAN to fail the phase", err)
+	}
+	if _, ok := fake.Files["192.168.20.101"]["/etc/nginx/ssl/cms.crt"]; ok {
+		t.Error("the invalid certificate was installed on the load balancer")
+	}
+	if hasCommand(fake.Commands, "192.168.20.101", "systemctl reload nginx") {
+		t.Error("nginx was reloaded with a certificate that does not cover the VIP")
 	}
 }
 

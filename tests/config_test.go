@@ -703,6 +703,69 @@ func TestConfig_LoadBalancerTLS(t *testing.T) {
 	})
 }
 
+func TestConfig_ValidatePKI(t *testing.T) {
+	base := func() *config.Config {
+		return &config.Config{
+			VM: config.VMConfig{StorageDir: "/var/lib/libvirt/images"},
+			Network: config.NetworkConfig{
+				Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
+				Main:     config.NetworkDetail{CIDR: "192.168.20.0/24", VIP: "192.168.20.100"},
+			},
+			Nodes: config.NodesConfig{
+				Router:    config.NodeDetail{Name: "ufw-router", IP: "192.168.10.1"},
+				Jumpstart: config.NodeDetail{Name: "jumpstart", IP: "192.168.10.10"},
+				Masters: []config.NodeDetail{
+					{Name: "master1", IP: "192.168.10.11"},
+					{Name: "master2", IP: "192.168.10.12"},
+					{Name: "master3", IP: "192.168.10.16"},
+				},
+				LBs: []config.NodeDetail{
+					{Name: "lb1", IP: "192.168.20.103"},
+					{Name: "lb2", IP: "192.168.20.104"},
+				},
+				CMSFrontends: []config.NodeDetail{{Name: "cms1", IP: "192.168.20.101"}},
+			},
+		}
+	}
+
+	t.Run("valid custom PKI settings pass", func(t *testing.T) {
+		cfg := base()
+		cfg.PKI.Domain = "ca.example.test"
+		cfg.PKI.CAName = "Lab CA 2"
+		cfg.PKI.CAPort = 9443
+		cfg.PKI.CertLifetimeHours = config.MaxPKICertLifetimeHours
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want a pass", err)
+		}
+	})
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"invalid domain", func(c *config.Config) { c.PKI.Domain = "ca internal" }, "pki.domain"},
+		{"invalid CA name", func(c *config.Config) { c.PKI.CAName = "CA; rm -rf /" }, "pki.ca_name"},
+		{"CA name too long", func(c *config.Config) { c.PKI.CAName = strings.Repeat("a", 65) }, "pki.ca_name"},
+		{"CA port out of range", func(c *config.Config) { c.PKI.CAPort = 70000 }, "pki.ca_port"},
+		{"negative CA port", func(c *config.Config) { c.PKI.CAPort = -1 }, "pki.ca_port"},
+		{"lifetime above the provisioner maximum", func(c *config.Config) {
+			c.PKI.CertLifetimeHours = config.MaxPKICertLifetimeHours + 1
+		}, "pki.cert_lifetime_hours"},
+		{"negative lifetime", func(c *config.Config) { c.PKI.CertLifetimeHours = -1 }, "pki.cert_lifetime_hours"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mutate(cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want an error mentioning %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func contains(values []string, want string) bool {
 	for _, v := range values {
 		if v == want {
