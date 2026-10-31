@@ -153,9 +153,9 @@ func TestPhase03VerifiesTheChainAndEverySAN(t *testing.T) {
 		t.Fatal("phase03 did not run the certificate check")
 	}
 	for _, want := range []string{
-		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -verify_hostname 'cms.internal.local'",
-		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -verify_ip '192.168.20.100'",
-		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -verify_ip '192.168.20.103'",
+		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -untrusted /etc/nginx/ssl/cms.crt -verify_hostname 'cms.internal.local'",
+		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -untrusted /etc/nginx/ssl/cms.crt -verify_ip '192.168.20.100'",
+		"openssl verify -CAfile '/usr/local/share/ca-certificates/cms_root_ca.crt' -untrusted /etc/nginx/ssl/cms.crt -verify_ip '192.168.20.103'",
 	} {
 		if !strings.Contains(lbCmd, want) {
 			t.Errorf("certificate check is missing %q:\n%s", want, lbCmd)

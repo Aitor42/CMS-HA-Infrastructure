@@ -324,7 +324,11 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	// reach the balancers unnoticed: nginx accepts the certificate, and the
 	// nginx-phase probe uses -k. Checking here fails the deploy on the CA host
 	// instead of serving a certificate that does not cover the VIP.
-	if err := validateIssuedCertificate(certPEM, keyPEM, p.cfg.LBTLSSANs(), p.cfg.PKICommonName(), time.Now()); err != nil {
+	rootPEM, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /root/.step/certs/root_ca.crt")
+	if err != nil {
+		return fmt.Errorf("failed to read root CA: %w", err)
+	}
+	if err := validateIssuedCertificate(certPEM, keyPEM, rootPEM, p.cfg.LBTLSSANs(), time.Now()); err != nil {
 		return fmt.Errorf("refusing to install the load-balancer certificate: %w", err)
 	}
 
@@ -399,8 +403,8 @@ func (p *Phase) readIssuedLBCertificate(ctx context.Context, jumpIP string) (str
 }
 
 // certClockSkew tolerates a CA host whose clock is slightly ahead of the
-// orchestrator when checking NotBefore. Expiry is checked against the real
-// time: the verify phase re-checks the installed certificate.
+// orchestrator when verifying the chain. Expiry is still checked against the
+// real time: the verify phase re-checks the installed certificate.
 const certClockSkew = 5 * time.Minute
 
 // validateIssuedCertificate refuses a certificate that is not a usable server
@@ -411,30 +415,41 @@ const certClockSkew = 5 * time.Minute
 // the key matches, not that the certificate covers the name clients use, and
 // the nginx-phase probe connects with -k while the bootstrap certificate is
 // still in place.
-func validateIssuedCertificate(certPEM, keyPEM string, sans []string, caName string, now time.Time) error {
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil || block.Type != "CERTIFICATE" {
-		return fmt.Errorf("issued certificate is not PEM encoded")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+//
+// The certificate file contains the leaf followed by the intermediate CA, as
+// written by `step ca certificate`; rootPEM is the CA host's root certificate.
+// Verifying the chain here also rejects a certificate signed by a different CA
+// whose subject happens to match the configured name.
+func validateIssuedCertificate(certPEM, keyPEM, rootPEM string, sans []string, now time.Time) error {
+	chain, err := parseCertificateChain(certPEM)
 	if err != nil {
-		return fmt.Errorf("parse issued certificate: %w", err)
+		return err
 	}
+	cert := chain[0]
 	if cert.IsCA {
 		return fmt.Errorf("issued certificate is a CA certificate, not a server certificate")
 	}
 	if err := certificateMatchesKey(cert, keyPEM); err != nil {
 		return err
 	}
-	if now.Add(certClockSkew).Before(cert.NotBefore) {
-		return fmt.Errorf("issued certificate is not valid before %s", cert.NotBefore.Format(time.RFC3339))
+
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM([]byte(rootPEM)) {
+		return fmt.Errorf("internal root CA is not a valid PEM certificate")
 	}
-	if !now.Before(cert.NotAfter) {
-		return fmt.Errorf("issued certificate expired at %s", cert.NotAfter.Format(time.RFC3339))
+	intermediates := x509.NewCertPool()
+	for _, intermediate := range chain[1:] {
+		intermediates.AddCert(intermediate)
 	}
-	if caName != "" && cert.Issuer.CommonName != caName {
-		return fmt.Errorf("issued certificate was issued by %q, want %q", cert.Issuer.CommonName, caName)
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		CurrentTime:   now.Add(certClockSkew),
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return fmt.Errorf("issued certificate does not chain to the internal CA: %w", err)
 	}
+
 	for _, san := range sans {
 		if san == "" {
 			continue
@@ -446,6 +461,32 @@ func validateIssuedCertificate(certPEM, keyPEM string, sans []string, caName str
 		}
 	}
 	return nil
+}
+
+// parseCertificateChain decodes every CERTIFICATE block in a PEM bundle. The
+// first certificate is the leaf; the rest are its intermediates.
+func parseCertificateChain(certPEM string) ([]*x509.Certificate, error) {
+	var chain []*x509.Certificate
+	rest := []byte(certPEM)
+	for {
+		block, remaining := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = remaining
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse issued certificate: %w", err)
+		}
+		chain = append(chain, cert)
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("issued certificate is not PEM encoded")
+	}
+	return chain, nil
 }
 
 // certificateMatchesKey reports whether keyPEM is the private key for cert, so

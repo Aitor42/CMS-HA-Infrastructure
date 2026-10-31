@@ -268,8 +268,11 @@ func (v *Verifier) phase03(ctx context.Context) CheckResult {
 // certificateChainChecks renders the openssl verify commands that prove the
 // installed balancer certificate chains to the internal root CA and covers
 // every SAN the balancers serve. IP SANs need -verify_ip; DNS names need
-// -verify_hostname. Each command prints its error to stdout so a failure
-// reaches the verification report.
+// -verify_hostname. The installed file also carries the intermediate CA that
+// `step ca certificate` writes, so it is passed as -untrusted; without it
+// openssl only sees the leaf and cannot build the chain to the root. Each
+// command prints its error to stdout so a failure reaches the verification
+// report.
 func certificateChainChecks(sans []string) string {
 	var checks strings.Builder
 	for _, san := range sans {
@@ -280,7 +283,7 @@ func certificateChainChecks(sans []string) string {
 		if net.ParseIP(san) != nil {
 			flag = "-verify_ip"
 		}
-		fmt.Fprintf(&checks, "openssl verify -CAfile %s %s %s /etc/nginx/ssl/cms.crt 2>&1 && ",
+		fmt.Fprintf(&checks, "openssl verify -CAfile %s -untrusted /etc/nginx/ssl/cms.crt %s %s /etc/nginx/ssl/cms.crt 2>&1 && ",
 			shell.Quote(lbRootCAPath), flag, shell.Quote(san))
 	}
 	return checks.String()

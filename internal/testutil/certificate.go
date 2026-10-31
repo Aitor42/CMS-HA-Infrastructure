@@ -13,19 +13,21 @@ import (
 	"time"
 )
 
-// NewTestCertificate returns a PEM-encoded leaf certificate and its private
-// key, signed by a freshly generated CA whose subject CN is issuerCN.
+// NewTestCertificate returns a PEM-encoded leaf certificate, its private key
+// and the root CA that signs the chain. The certificate file contains the leaf
+// followed by the intermediate CA, mirroring what `step ca certificate` writes
+// for a default step-ca PKI (root -> intermediate -> leaf).
 //
 // Entries in sans that parse as IP addresses become IP SANs; the rest become
-// DNS SANs. The returned certificate is a normal server certificate
-// (serverAuth EKU, not a CA), so tests can exercise the same checks the PKI
-// phase applies to the certificate it installs.
-func NewTestCertificate(sans []string, issuerCN string, notBefore, notAfter time.Time) (certPEM, keyPEM []byte, err error) {
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+// DNS SANs. The returned leaf is a normal server certificate (serverAuth EKU,
+// not a CA), so tests can exercise the same checks the PKI phase applies to the
+// certificate it installs.
+func NewTestCertificate(sans []string, issuerCN string, notBefore, notAfter time.Time) (certPEM, keyPEM, rootPEM []byte, err error) {
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate CA key: %w", err)
+		return nil, nil, nil, fmt.Errorf("generate root key: %w", err)
 	}
-	caTemplate := &x509.Certificate{
+	rootTemplate := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: issuerCN},
 		NotBefore:             notBefore,
@@ -34,22 +36,44 @@ func NewTestCertificate(sans []string, issuerCN string, notBefore, notAfter time
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
 	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create CA certificate: %w", err)
+		return nil, nil, nil, fmt.Errorf("create root certificate: %w", err)
 	}
-	caCert, err := x509.ParseCertificate(caDER)
+	rootCert, err := x509.ParseCertificate(rootDER)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse CA certificate: %w", err)
+		return nil, nil, nil, fmt.Errorf("parse root certificate: %w", err)
+	}
+
+	intermediateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("generate intermediate key: %w", err)
+	}
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: issuerCN + " Intermediate CA"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	intermediateDER, err := x509.CreateCertificate(rand.Reader, intermediateTemplate, rootCert, &intermediateKey.PublicKey, rootKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create intermediate certificate: %w", err)
+	}
+	intermediateCert, err := x509.ParseCertificate(intermediateDER)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse intermediate certificate: %w", err)
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate leaf key: %w", err)
+		return nil, nil, nil, fmt.Errorf("generate leaf key: %w", err)
 	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate leaf serial: %w", err)
+		return nil, nil, nil, fmt.Errorf("generate leaf serial: %w", err)
 	}
 	template := &x509.Certificate{
 		SerialNumber:          serial,
@@ -67,18 +91,20 @@ func NewTestCertificate(sans []string, issuerCN string, notBefore, notAfter time
 		}
 		template.DNSNames = append(template.DNSNames, san)
 	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, template, caCert, &key.PublicKey, caKey)
+	leafDER, err := x509.CreateCertificate(rand.Reader, template, intermediateCert, &key.PublicKey, intermediateKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create leaf certificate: %w", err)
+		return nil, nil, nil, fmt.Errorf("create leaf certificate: %w", err)
 	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal leaf key: %w", err)
+		return nil, nil, nil, fmt.Errorf("marshal leaf key: %w", err)
 	}
 
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
-		nil
+	certPEM = append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: intermediateDER})...)
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	rootPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER})
+	return certPEM, keyPEM, rootPEM, nil
 }
 
 func firstSAN(sans []string) string {

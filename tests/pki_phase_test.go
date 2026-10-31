@@ -44,7 +44,7 @@ func pkiConfig(t *testing.T) *config.Config {
 func TestPKIPhaseRun(t *testing.T) {
 	cfg := pkiConfig(t)
 	jumpIP := cfg.Nodes.Jumpstart.IP
-	certPEM, keyPEM, err := testutil.NewTestCertificate(cfg.LBTLSSANs(), cfg.PKICommonName(),
+	certPEM, keyPEM, rootPEM, err := testutil.NewTestCertificate(cfg.LBTLSSANs(), cfg.PKICommonName(),
 		time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
@@ -53,7 +53,7 @@ func TestPKIPhaseRun(t *testing.T) {
 		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
 			switch {
 			case strings.Contains(cmd, "cat /root/.step/certs/root_ca.crt"):
-				return "ROOTCA\n", "", 0, nil
+				return string(rootPEM), "", 0, nil
 			case strings.Contains(cmd, "cat /tmp/cms-lb.crt"):
 				return string(certPEM) + "===CMSKEY===\n" + string(keyPEM), "", 0, nil
 			default:
@@ -86,8 +86,8 @@ func TestPKIPhaseRun(t *testing.T) {
 	}
 
 	// The root CA goes to every non-jumpstart node and is trusted there.
-	if got := string(fake.Files["192.168.10.11"]["/usr/local/share/ca-certificates/cms_root_ca.crt"]); got != "ROOTCA\n" {
-		t.Errorf("master root CA = %q, want ROOTCA", got)
+	if got := string(fake.Files["192.168.10.11"]["/usr/local/share/ca-certificates/cms_root_ca.crt"]); got != string(rootPEM) {
+		t.Errorf("master root CA = %q, want the CA PEM", got)
 	}
 	if !hasCommand(fake.Commands, "192.168.10.11", "update-ca-certificates") {
 		t.Error("master did not refresh its CA trust store")
@@ -122,7 +122,7 @@ func TestPKIPhaseRun(t *testing.T) {
 		t.Fatalf("home: %v", err)
 	}
 	localCA := filepath.Join(home, ".cms-ha", "cms_root_ca.crt")
-	if got, err := os.ReadFile(localCA); err != nil || string(got) != "ROOTCA\n" {
+	if got, err := os.ReadFile(localCA); err != nil || string(got) != string(rootPEM) {
 		t.Errorf("local root CA %s = %q, %v", localCA, got, err)
 	}
 }
@@ -131,7 +131,7 @@ func TestPKIPhaseRejectsCertificateWithoutEverySAN(t *testing.T) {
 	cfg := pkiConfig(t)
 	// The VIP is the address clients actually use; a certificate without it
 	// would still load in nginx and pass a `curl -k` probe.
-	certPEM, keyPEM, err := testutil.NewTestCertificate(
+	certPEM, keyPEM, rootPEM, err := testutil.NewTestCertificate(
 		[]string{"cms.internal.local", "192.168.20.101"}, cfg.PKICommonName(),
 		time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
 	if err != nil {
@@ -141,7 +141,7 @@ func TestPKIPhaseRejectsCertificateWithoutEverySAN(t *testing.T) {
 		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
 			switch {
 			case strings.Contains(cmd, "cat /root/.step/certs/root_ca.crt"):
-				return "ROOTCA\n", "", 0, nil
+				return string(rootPEM), "", 0, nil
 			case strings.Contains(cmd, "cat /tmp/cms-lb.crt"):
 				return string(certPEM) + "===CMSKEY===\n" + string(keyPEM), "", 0, nil
 			default:

@@ -81,27 +81,27 @@ func TestQuoteURLsKeepsArchExpansion(t *testing.T) {
 func TestValidateIssuedCertificateAcceptsEverySAN(t *testing.T) {
 	now := time.Now()
 	sans := []string{"cms.internal.local", "192.168.20.100", "192.168.20.101"}
-	certPEM, keyPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(90*24*time.Hour))
+	certPEM, keyPEM, rootPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(90*24*time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
 	}
 
-	if err := validateIssuedCertificate(string(certPEM), string(keyPEM), sans, "CMS Local CA", now); err != nil {
+	if err := validateIssuedCertificate(string(certPEM), string(keyPEM), string(rootPEM), sans, now); err != nil {
 		t.Fatalf("validateIssuedCertificate() = %v, want a pass", err)
 	}
 }
 
 func TestValidateIssuedCertificateRejectsMissingSAN(t *testing.T) {
 	now := time.Now()
-	certPEM, keyPEM, err := testutil.NewTestCertificate(
+	certPEM, keyPEM, rootPEM, err := testutil.NewTestCertificate(
 		[]string{"cms.internal.local", "192.168.20.101"}, "CMS Local CA",
 		now.Add(-time.Hour), now.Add(90*24*time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
 	}
 
-	err = validateIssuedCertificate(string(certPEM), string(keyPEM),
-		[]string{"cms.internal.local", "192.168.20.100", "192.168.20.101"}, "CMS Local CA", now)
+	err = validateIssuedCertificate(string(certPEM), string(keyPEM), string(rootPEM),
+		[]string{"cms.internal.local", "192.168.20.100", "192.168.20.101"}, now)
 	if err == nil || !strings.Contains(err.Error(), "192.168.20.100") {
 		t.Fatalf("validateIssuedCertificate() = %v, want the missing VIP SAN to be reported", err)
 	}
@@ -110,16 +110,16 @@ func TestValidateIssuedCertificateRejectsMissingSAN(t *testing.T) {
 func TestValidateIssuedCertificateRejectsMismatchedKey(t *testing.T) {
 	now := time.Now()
 	sans := []string{"cms.internal.local"}
-	certPEM, _, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(time.Hour))
+	certPEM, _, rootPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
 	}
-	_, otherKeyPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(time.Hour))
+	_, otherKeyPEM, _, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
 	}
 
-	err = validateIssuedCertificate(string(certPEM), string(otherKeyPEM), sans, "CMS Local CA", now)
+	err = validateIssuedCertificate(string(certPEM), string(otherKeyPEM), string(rootPEM), sans, now)
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("validateIssuedCertificate() = %v, want the key mismatch", err)
 	}
@@ -128,33 +128,37 @@ func TestValidateIssuedCertificateRejectsMismatchedKey(t *testing.T) {
 func TestValidateIssuedCertificateRejectsForeignIssuer(t *testing.T) {
 	now := time.Now()
 	sans := []string{"cms.internal.local"}
-	certPEM, keyPEM, err := testutil.NewTestCertificate(sans, "Other CA", now.Add(-time.Hour), now.Add(time.Hour))
+	certPEM, keyPEM, _, err := testutil.NewTestCertificate(sans, "Other CA", now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("NewTestCertificate: %v", err)
+	}
+	_, _, trustedRootPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-time.Hour), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
 	}
 
-	err = validateIssuedCertificate(string(certPEM), string(keyPEM), sans, "CMS Local CA", now)
-	if err == nil || !strings.Contains(err.Error(), "Other CA") {
-		t.Fatalf("validateIssuedCertificate() = %v, want the foreign issuer to be reported", err)
+	err = validateIssuedCertificate(string(certPEM), string(keyPEM), string(trustedRootPEM), sans, now)
+	if err == nil || !strings.Contains(err.Error(), "does not chain") {
+		t.Fatalf("validateIssuedCertificate() = %v, want the foreign issuer to be rejected", err)
 	}
 }
 
 func TestValidateIssuedCertificateRejectsExpiredCertificate(t *testing.T) {
 	now := time.Now()
 	sans := []string{"cms.internal.local"}
-	certPEM, keyPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-2*time.Hour), now.Add(-time.Hour))
+	certPEM, keyPEM, rootPEM, err := testutil.NewTestCertificate(sans, "CMS Local CA", now.Add(-2*time.Hour), now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("NewTestCertificate: %v", err)
 	}
 
-	err = validateIssuedCertificate(string(certPEM), string(keyPEM), sans, "CMS Local CA", now)
+	err = validateIssuedCertificate(string(certPEM), string(keyPEM), string(rootPEM), sans, now)
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("validateIssuedCertificate() = %v, want the expired certificate to be rejected", err)
 	}
 }
 
 func TestValidateIssuedCertificateRejectsNonPEM(t *testing.T) {
-	err := validateIssuedCertificate("not a certificate", "not a key", []string{"cms.internal.local"}, "CMS Local CA", time.Now())
+	err := validateIssuedCertificate("not a certificate", "not a key", "not a root", []string{"cms.internal.local"}, time.Now())
 	if err == nil || !strings.Contains(err.Error(), "not PEM") {
 		t.Fatalf("validateIssuedCertificate() = %v, want the non-PEM error", err)
 	}
