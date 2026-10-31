@@ -1,7 +1,9 @@
 package initvms
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -165,6 +167,7 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 		name       string
 		tmplPath   string
 		bridge     string
+		domain     string
 		hostCIDR   string
 		routerCIDR string
 	}
@@ -184,6 +187,7 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			name:       "internal",
 			tmplPath:   "templates/libvirt/internal-net.xml",
 			bridge:     p.cfg.Network.Internal.Bridge,
+			domain:     p.cfg.Network.Internal.Domain,
 			hostCIDR:   internalPrefix + "254/24",
 			routerCIDR: linkCIDR(p.cfg.Network.Internal.Gateway, internalPrefix),
 		},
@@ -191,16 +195,38 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			name:       "main",
 			tmplPath:   "templates/libvirt/main-net.xml",
 			bridge:     p.cfg.Network.Main.Bridge,
+			domain:     p.cfg.Network.Main.Domain,
 			hostCIDR:   mainPrefix + "254/24",
 			routerCIDR: linkCIDR(p.cfg.Network.Main.Gateway, mainPrefix),
 		},
 	}
 
 	for _, nd := range nets {
+		bridge := nd.bridge
+		if bridge == "" {
+			if nd.name == "internal" {
+				bridge = "virbr-int"
+			} else {
+				bridge = "virbr-main"
+			}
+		}
+		domain := nd.domain
+		if domain == "" {
+			if nd.name == "internal" {
+				domain = "internal.local"
+			} else {
+				domain = "main.local"
+			}
+		}
+
 		if !p.lv.NetExists(ctx, nd.name) {
 			content, err := cms.TemplatesFS.ReadFile(nd.tmplPath)
 			if err != nil {
 				return fmt.Errorf("failed to read network template %s: %w", nd.tmplPath, err)
+			}
+			content, err = renderNetworkXML(content, bridge, domain)
+			if err != nil {
+				return fmt.Errorf("render network %s XML: %w", nd.name, err)
 			}
 
 			tmpFile, err := os.CreateTemp("", nd.name+"-net-*.xml")
@@ -237,20 +263,28 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			}
 		}
 
-		bridge := nd.bridge
-		if bridge == "" {
-			if nd.name == "internal" {
-				bridge = "virbr-int"
-			} else {
-				bridge = "virbr-main"
-			}
-		}
 		if err := configureHostBridge(ctx, bridge, nd.hostCIDR, nd.routerCIDR); err != nil {
 			logging.Warn("Could not configure host IP %s on bridge %s: %v", nd.hostCIDR, bridge, err)
 		}
 	}
 
 	return nil
+}
+
+// renderNetworkXML fills the bridge and DNS domain of a libvirt network
+// template from the configuration. The static templates used to hardcode
+// virbr-int/internal.local, so setting network.*.bridge or .domain changed the
+// interface the host addressed while libvirt kept creating the default one.
+func renderNetworkXML(content []byte, bridge, domain string) ([]byte, error) {
+	var bridgeXML, domainXML bytes.Buffer
+	if err := xml.EscapeText(&bridgeXML, []byte(bridge)); err != nil {
+		return nil, fmt.Errorf("escape bridge name: %w", err)
+	}
+	if err := xml.EscapeText(&domainXML, []byte(domain)); err != nil {
+		return nil, fmt.Errorf("escape domain name: %w", err)
+	}
+	replacer := strings.NewReplacer("{{BRIDGE}}", bridgeXML.String(), "{{DOMAIN}}", domainXML.String())
+	return []byte(replacer.Replace(string(content))), nil
 }
 
 // configureHostBridge assigns a .254 IP address to a host bridge interface to allow host routing to VMs.

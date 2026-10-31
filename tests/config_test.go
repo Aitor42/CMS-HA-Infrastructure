@@ -338,6 +338,39 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	})
 
+	t.Run("custom network bridge and domain pass", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Bridge = "br-lab0"
+		cfg.Network.Internal.Domain = "lab.internal"
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected custom bridge and domain to pass, got: %v", err)
+		}
+	})
+
+	t.Run("invalid network bridge", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.Bridge = "br main"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a bridge name with a space")
+		}
+	})
+
+	t.Run("network bridge too long", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.Bridge = strings.Repeat("b", 16)
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a bridge name longer than IFNAMSIZ")
+		}
+	})
+
+	t.Run("invalid network domain", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Domain = "not a domain"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a domain name with a space")
+		}
+	})
+
 	t.Run("missing storage_dir", func(t *testing.T) {
 		cfg := validCfg()
 		cfg.VM.StorageDir = ""

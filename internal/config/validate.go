@@ -60,13 +60,29 @@ func (c *Config) validateDeploy() error {
 	return nil
 }
 
-// validateNetworks checks the CIDRs both subnets are built from.
+// validateNetworks checks the CIDRs both subnets are built from, and the
+// interface and DNS domain names that go into the libvirt network XML.
 func (c *Config) validateNetworks() error {
 	if _, _, err := net.ParseCIDR(c.Network.Internal.CIDR); err != nil {
 		return fmt.Errorf("network.internal.cidr is not a valid CIDR: %w", err)
 	}
 	if _, _, err := net.ParseCIDR(c.Network.Main.CIDR); err != nil {
 		return fmt.Errorf("network.main.cidr is not a valid CIDR: %w", err)
+	}
+	for _, n := range []struct {
+		name string
+		net  NetworkDetail
+	}{
+		{"internal", c.Network.Internal},
+		{"main", c.Network.Main},
+	} {
+		if n.net.Bridge != "" && !bridgePattern.MatchString(n.net.Bridge) {
+			return fmt.Errorf("network.%s.bridge is not a valid Linux bridge name (1-15 letters, digits, '.', '_' or '-', starting with a letter or digit): %q",
+				n.name, n.net.Bridge)
+		}
+		if n.net.Domain != "" && !fqdnPattern.MatchString(n.net.Domain) {
+			return fmt.Errorf("network.%s.domain is not a valid DNS domain: %q", n.name, n.net.Domain)
+		}
 	}
 	return nil
 }
@@ -314,6 +330,11 @@ func (c *Config) ValidatePartial() error {
 
 var fqdnPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
 var caNamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9 ._-]{0,62}[A-Za-z0-9])?$`)
+
+// bridgePattern matches a Linux interface name (IFNAMSIZ is 16 bytes, so at
+// most 15 characters) and keeps XML/shell metacharacters out of the network
+// definition the init phase renders.
+var bridgePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$`)
 var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 
 // ValidMAC reports whether s is a colon-separated MAC address in the exact

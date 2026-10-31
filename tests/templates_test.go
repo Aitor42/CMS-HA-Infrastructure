@@ -14,13 +14,16 @@ import (
 )
 
 func TestTemplates_EmbeddedNetworkXML(t *testing.T) {
+	// The bridge and domain are rendered from config.yaml at deploy time, so
+	// the embedded files keep placeholders; a hardcoded value here would make
+	// network.*.bridge and network.*.domain silently ineffective.
 	nets := []struct {
 		file   string
 		bridge string
 		domain string
 	}{
-		{"templates/libvirt/internal-net.xml", "virbr-int", "internal.local"},
-		{"templates/libvirt/main-net.xml", "virbr-main", "main.local"},
+		{"templates/libvirt/internal-net.xml", "{{BRIDGE}}", "{{DOMAIN}}"},
+		{"templates/libvirt/main-net.xml", "{{BRIDGE}}", "{{DOMAIN}}"},
 	}
 
 	for _, n := range nets {
@@ -34,10 +37,10 @@ func TestTemplates_EmbeddedNetworkXML(t *testing.T) {
 				t.Errorf("template %s must enable STP (stp='on') for loop prevention", n.file)
 			}
 			if !strings.Contains(content, fmt.Sprintf("bridge name='%s'", n.bridge)) {
-				t.Errorf("template %s missing expected bridge %s", n.file, n.bridge)
+				t.Errorf("template %s missing the bridge placeholder", n.file)
 			}
 			if !strings.Contains(content, fmt.Sprintf("domain name='%s'", n.domain)) {
-				t.Errorf("template %s missing expected domain %s", n.file, n.domain)
+				t.Errorf("template %s missing the domain placeholder", n.file)
 			}
 		})
 	}

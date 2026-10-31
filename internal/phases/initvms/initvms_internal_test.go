@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"gopkg.in/yaml.v3"
@@ -442,5 +443,27 @@ func TestRenderCloudNodeUserDataShapes(t *testing.T) {
 				t.Errorf("network-config has %d default routes, want at most one:\n%s", routes, netOut)
 			}
 		})
+	}
+}
+
+func TestRenderNetworkXMLUsesConfiguredBridgeAndDomain(t *testing.T) {
+	tmpl, err := cms.TemplatesFS.ReadFile("templates/libvirt/internal-net.xml")
+	if err != nil {
+		t.Fatalf("read template: %v", err)
+	}
+	out, err := renderNetworkXML(tmpl, "br-lab0", "lab.internal")
+	if err != nil {
+		t.Fatalf("renderNetworkXML: %v", err)
+	}
+	for _, want := range []string{
+		"<bridge name='br-lab0' stp='on' delay='0'/>",
+		"<domain name='lab.internal'/>",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("rendered XML is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), "{{") {
+		t.Errorf("rendered XML still has placeholders:\n%s", out)
 	}
 }
