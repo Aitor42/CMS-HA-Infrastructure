@@ -361,12 +361,22 @@ func (p *Phase) waitForS3(ctx context.Context, hostIP string, port int) error {
 }
 
 // ensureBucket creates the backup bucket when it is missing and always grants
-// the default key access. With `--default-bucket` Garage usually creates it on
-// first start; this keeps a pre-existing volume convergent too. The access
-// grant is fatal: a bucket the CronJobs cannot write to fails every backup
-// silently, which is exactly the failure the restore drill is meant to catch.
+// the configured access key. With `--default-bucket` Garage usually creates
+// both on first start; this keeps a pre-existing volume convergent too. The
+// access grant is fatal: a bucket the CronJobs cannot write to fails every
+// backup silently, which is exactly the failure the restore drill is meant to
+// catch.
 func (p *Phase) ensureBucket(ctx context.Context, runtime string) error {
 	bucket := p.cfg.BackupBucket()
+	// `garage server --single-node --default-bucket` creates the access key
+	// from GARAGE_DEFAULT_ACCESS_KEY verbatim: the id is the configured
+	// backup.access_key, not a fixed "default" name. Verifying it first turns a
+	// stale volume where the key was deleted into an actionable error instead
+	// of Garage's "Access key not found".
+	keyID := p.cfg.BackupAccessKey()
+	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "key", "info", keyID); err != nil {
+		return fmt.Errorf("garage access key %q does not exist (garage server --default-bucket creates it from GARAGE_DEFAULT_ACCESS_KEY): %w", keyID, err)
+	}
 	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "info", bucket); err != nil {
 		logging.Info("Creating Garage bucket %q...", bucket)
 		if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "create", bucket); err != nil {
@@ -376,8 +386,8 @@ func (p *Phase) ensureBucket(ctx context.Context, runtime string) error {
 	// Run the grant on every deploy, not only after a create: a bucket left
 	// behind by an earlier failed run would otherwise stay inaccessible.
 	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "allow",
-		"--read", "--write", "--owner", bucket, "--key", "default"); err != nil {
-		return fmt.Errorf("failed to grant the default key access to Garage bucket %q: %w", bucket, err)
+		"--read", "--write", "--owner", bucket, "--key", keyID); err != nil {
+		return fmt.Errorf("failed to grant access key %q access to Garage bucket %q: %w", keyID, bucket, err)
 	}
 	return nil
 }

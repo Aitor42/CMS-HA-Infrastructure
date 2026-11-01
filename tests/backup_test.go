@@ -93,6 +93,26 @@ func TestConfig_BackupDefaultsAndValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("validation rejects an access key Garage cannot import", func(t *testing.T) {
+		cfg := base()
+		cfg.Backup.Engine = "garage"
+		cfg.Backup.AccessKey = "short"
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "backup.access_key") {
+			t.Fatalf("expected the backup.access_key error, got: %v", err)
+		}
+	})
+
+	t.Run("validation rejects a secret Garage cannot import", func(t *testing.T) {
+		cfg := base()
+		cfg.Backup.Engine = "garage"
+		cfg.Backup.SecretKey = "too-short"
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "backup.secret_key") {
+			t.Fatalf("expected the backup.secret_key error, got: %v", err)
+		}
+	})
+
 	t.Run("valid configuration passes", func(t *testing.T) {
 		cfg := base()
 		cfg.Backup.Engine = "garage"

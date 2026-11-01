@@ -34,6 +34,7 @@ case "$*" in
   "rm -f cms-garage") exit "${FAKE_RM_EXIT:-0}" ;;
   run*) exit "${FAKE_RUN_EXIT:-0}" ;;
   start*) exit 0 ;;
+  *"key info"*) exit "${FAKE_KEY_EXIT:-0}" ;;
   *"bucket info"*) exit "${FAKE_INFO_EXIT:-0}" ;;
   *"bucket create"*) exit "${FAKE_CREATE_EXIT:-0}" ;;
   *"bucket allow"*) exit "${FAKE_ALLOW_EXIT:-0}" ;;
@@ -190,15 +191,25 @@ func TestEnsureBucketGrantsAccessAndFailsWhenItCannot(t *testing.T) {
 	runtime := fakeRuntime(t)
 	p := &Phase{cfg: testConfig()}
 
-	// A bucket that already exists must still be granted to the default key:
-	// a previous failed run can leave it inaccessible.
+	// A bucket that already exists must still be granted to the configured
+	// key: a previous failed run can leave it inaccessible.
+	t.Setenv("FAKE_KEY_EXIT", "0")
 	t.Setenv("FAKE_INFO_EXIT", "0")
 	t.Setenv("FAKE_ALLOW_EXIT", "0")
 	if err := p.ensureBucket(ctx, runtime); err != nil {
 		t.Fatalf("ensureBucket failed on an existing bucket: %v", err)
 	}
-	if log := runtimeLog(t); !strings.Contains(log, "bucket allow") {
+	log := runtimeLog(t)
+	if !strings.Contains(log, "bucket allow") {
 		t.Errorf("ensureBucket skipped the access grant for an existing bucket:\n%s", log)
+	}
+	// Garage names the default key exactly after GARAGE_DEFAULT_ACCESS_KEY;
+	// "default" is not a key it ever creates.
+	if !strings.Contains(log, "--key access") {
+		t.Errorf("ensureBucket did not grant the configured access key:\n%s", log)
+	}
+	if strings.Contains(log, "--key default") {
+		t.Errorf("ensureBucket granted a key named \"default\", which Garage never creates:\n%s", log)
 	}
 
 	// A failed grant is fatal: the CronJobs would upload into a bucket they
@@ -206,8 +217,18 @@ func TestEnsureBucketGrantsAccessAndFailsWhenItCannot(t *testing.T) {
 	os.Remove(os.Getenv("FAKE_RUNTIME_LOG"))
 	t.Setenv("FAKE_ALLOW_EXIT", "1")
 	err := p.ensureBucket(ctx, runtime)
-	if err == nil || !strings.Contains(err.Error(), "grant the default key access") {
+	if err == nil || !strings.Contains(err.Error(), "failed to grant access key") {
 		t.Fatalf("ensureBucket() = %v, want the access-grant failure", err)
+	}
+
+	// A volume whose key was deleted must fail with an actionable message
+	// instead of Garage's bare "Access key not found".
+	os.Remove(os.Getenv("FAKE_RUNTIME_LOG"))
+	t.Setenv("FAKE_ALLOW_EXIT", "0")
+	t.Setenv("FAKE_KEY_EXIT", "1")
+	err = p.ensureBucket(ctx, runtime)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("ensureBucket() = %v, want the missing-key error", err)
 	}
 }
 

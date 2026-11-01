@@ -237,6 +237,15 @@ func (c *Config) validateBackup() error {
 			return fmt.Errorf("%s cannot contain line breaks", field)
 		}
 	}
+	// Garage refuses to start when the default access key or secret does not
+	// satisfy Key::import, and the container then crash-loops before the bucket
+	// exists. Reject the same shapes here so the failure names the field.
+	if key := c.Backup.AccessKey; key != "" && (len(key) < 8 || !garageKeyPattern.MatchString(key)) {
+		return fmt.Errorf("backup.access_key must be at least 8 characters of letters, digits, '-', '_' or '.': %q", key)
+	}
+	if secret := c.Backup.SecretKey; secret != "" && (len(secret) < 16 || !garageSecretPattern.MatchString(secret)) {
+		return fmt.Errorf("backup.secret_key must be at least 16 printable ASCII characters without spaces")
+	}
 	return nil
 }
 
@@ -431,6 +440,12 @@ var nodeNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 var dbIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 var cronPattern = regexp.MustCompile(`^[0-9A-Za-z*,/ @-]+$`)
 var grafanaPasswordPattern = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
+// garageKeyPattern and garageSecretPattern mirror the constraints Garage's
+// Key::import applies to the default access key created from
+// GARAGE_DEFAULT_ACCESS_KEY / GARAGE_DEFAULT_SECRET_KEY.
+var garageKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var garageSecretPattern = regexp.MustCompile(`^[\x21-\x7E]+$`)
 
 // validUnixUser matches a conservative portable POSIX user name (lowercase
 // letters, digits, underscore and hyphen, not starting with a digit or hyphen).
