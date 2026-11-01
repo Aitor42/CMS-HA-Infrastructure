@@ -12,6 +12,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -177,12 +178,11 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	// Inter-node SSH must use the non-root deploy account: the installers
 	// disable direct root logins (PermitRootLogin no), so authorising the
-	// jumpstart key for root would be dead weight.
+	// jumpstart key for root would be dead weight. Resolve the account's home
+	// from the passwd database instead of assuming /home/<user>: a custom
+	// ssh.user with a different home (or root, whose home is /root) would
+	// otherwise receive the key in a directory the account cannot use.
 	deployUser := p.cfg.SSHUser()
-	deployHome := "/home/" + deployUser
-	if deployUser == "root" {
-		deployHome = "/root"
-	}
 	for _, n := range nodes {
 		if n.IP == jumpstartIP || n.IP == "" {
 			continue
@@ -190,12 +190,17 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		nodeIP := n.IP
 		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			cmd := fmt.Sprintf(`
-				mkdir -p %[1]s/.ssh
-				chmod 700 %[1]s/.ssh
-				grep -qxF '%[2]s' %[1]s/.ssh/authorized_keys 2>/dev/null || echo '%[2]s' >> %[1]s/.ssh/authorized_keys
-				chmod 600 %[1]s/.ssh/authorized_keys
-				chown -R %[3]s:%[3]s %[1]s/.ssh 2>/dev/null || true
-			`, deployHome, pubKeyStr, deployUser)
+				set -eu
+				deploy_home=$(getent passwd %[1]s | cut -d: -f6)
+				if [ -z "$deploy_home" ]; then
+					echo "deploy account %[1]s does not exist on $(hostname)" >&2
+					exit 1
+				fi
+				install -d -m 700 -o %[1]s -g %[1]s "$deploy_home/.ssh"
+				grep -qxF %[2]s "$deploy_home/.ssh/authorized_keys" 2>/dev/null || printf '%%s\n' %[2]s >> "$deploy_home/.ssh/authorized_keys"
+				chmod 600 "$deploy_home/.ssh/authorized_keys"
+				chown %[1]s:%[1]s "$deploy_home/.ssh/authorized_keys"
+			`, shell.Quote(deployUser), shell.Quote(pubKeyStr))
 			_, _, code, err := pool.RunCommand(c, nodeIP, cmd)
 			if err != nil || code != 0 {
 				return fmt.Errorf("failed to add pubkey on %s (exit %d): %v", nodeIP, code, err)

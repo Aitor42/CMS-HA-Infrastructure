@@ -113,9 +113,44 @@ func TestFindCloudImage(t *testing.T) {
 	})
 }
 
+func TestRenderISOUserDataUsesTheConfiguredDeployUser(t *testing.T) {
+	data := autoinstallData{
+		Hostname:        "jumpstart",
+		DeployUser:      "deploy",
+		PasswordHash:    "$6$rounds=4096$salt$hash",
+		PubKey:          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
+		MACInternal:     "52:54:00:10:00:01",
+		IPInternal:      "192.168.10.10",
+		GatewayInternal: "192.168.10.1",
+		MACMain:         "52:54:00:10:02:0a",
+		IPMain:          "192.168.20.10",
+	}
+
+	out, err := renderTemplate("templates/autoinstall/user-data.tmpl", data)
+	if err != nil {
+		t.Fatalf("renderTemplate: %v", err)
+	}
+	for _, want := range []string{
+		"username: deploy",
+		"/target/etc/sudoers.d/deploy",
+		"Defaults:deploy !requiretty",
+		"/target/home/deploy/.ssh/authorized_keys",
+		"chown -R deploy:deploy /home/deploy/.ssh",
+		"passwd -l deploy",
+	} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("rendered ISO user-data is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(string(out), "ubuntu") {
+		t.Errorf("rendered ISO user-data still hardcodes the ubuntu account:\n%s", out)
+	}
+}
+
 func TestRenderCloudUserData(t *testing.T) {
 	data := autoinstallData{
 		Hostname:            "jumpstart",
+		DeployUser:          "deploy",
 		PasswordHash:        "$6$rounds=4096$salt$hash",
 		PubKey:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 		MACInternal:         "52:54:00:10:00:01",
@@ -139,12 +174,17 @@ func TestRenderCloudUserData(t *testing.T) {
 	for _, want := range []string{
 		"#cloud-config",
 		"hostname: jumpstart",
+		"name: deploy",
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 		"ALL=(ALL) NOPASSWD:ALL",
+		"Defaults:deploy !requiretty",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("rendered user-data is missing %q", want)
 		}
+	}
+	if strings.Contains(string(out), "name: ubuntu") {
+		t.Errorf("cloud user-data ignores ssh.user and still creates ubuntu:\n%s", out)
 	}
 	if strings.Contains(string(out), "autoinstall:") {
 		t.Error("cloud image user-data must not contain the Subiquity autoinstall block")
@@ -299,6 +339,7 @@ func TestCloudInterfaces(t *testing.T) {
 func TestRenderCloudNodeUserData(t *testing.T) {
 	data := cloudNodeData{
 		Hostname:     "internal-master1",
+		DeployUser:   "deploy",
 		PasswordHash: "$6$rounds=4096$salt$hash",
 		PubKey:       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 		Interfaces: []cloudInterface{
@@ -317,11 +358,16 @@ func TestRenderCloudNodeUserData(t *testing.T) {
 	for _, want := range []string{
 		"#cloud-config",
 		"hostname: internal-master1",
+		"name: deploy",
 		"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
+		"Defaults:deploy !requiretty",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("rendered user-data does not contain %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(string(out), "name: ubuntu") {
+		t.Errorf("cloud-node user-data ignores ssh.user and still creates ubuntu:\n%s", out)
 	}
 	if _, ok := doc["network"]; ok {
 		t.Errorf("cloud-node user-data must not contain a network block:\n%s", out)
@@ -381,6 +427,7 @@ func TestRenderCloudNodeUserDataShapes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data := cloudNodeData{
 				Hostname:     name,
+				DeployUser:   "deploy",
 				PasswordHash: "$6$rounds=4096$salt$hash",
 				PubKey:       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 				Interfaces:   ifaces,

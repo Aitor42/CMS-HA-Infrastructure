@@ -13,6 +13,7 @@ import (
 
 func cobblerConfig() *config.Config {
 	return &config.Config{
+		SSH: config.SSHConfig{User: "deploy"},
 		Network: config.NetworkConfig{
 			Internal: config.NetworkDetail{
 				CIDR: "10.10.0.0/24", Gateway: "10.10.0.1", Domain: "lab.internal",
@@ -231,10 +232,17 @@ func TestRenderedTemplatesUseTheConfiguredNetwork(t *testing.T) {
 		"http://10.10.0.10/cblr/pub/authorized_keys",
 		"http://10.20.0.10/cblr/pub/authorized_keys",
 		"http://10.10.0.10/cblr/svc/op/nopxe/system/$hostname",
+		"username: deploy",
+		"/target/home/deploy/.ssh/authorized_keys",
+		"chown -R deploy:deploy /home/deploy/.ssh",
+		"Defaults:deploy !requiretty",
 	} {
 		if !strings.Contains(autoinstall, want) {
 			t.Errorf("rendered autoinstall template is missing %q", want)
 		}
+	}
+	if strings.Contains(autoinstall, "/target/home/ubuntu") {
+		t.Errorf("rendered autoinstall template ignores ssh.user:\n%s", autoinstall)
 	}
 
 	named := string(rendered["/tmp/tpl_named.template"])

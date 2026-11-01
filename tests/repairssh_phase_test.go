@@ -79,9 +79,60 @@ func TestRepairSSHPhaseUsesExecutor(t *testing.T) {
 		if !hasCommand(fake.Commands, ip, "ssh-ed25519 AAAATEST jumpstart") {
 			t.Errorf("%s did not receive the jumpstart public key", ip)
 		}
+		// The deploy account's home must come from the passwd database, not
+		// from an assumed /home/<user> path.
+		if !hasCommand(fake.Commands, ip, "getent passwd 'ubuntu'") {
+			t.Errorf("%s did not resolve the deploy account's home", ip)
+		}
+		if !hasCommand(fake.Commands, ip, "chown 'ubuntu':'ubuntu'") {
+			t.Errorf("%s did not hand the key back to the deploy account", ip)
+		}
 	}
 	if hasCommand(fake.Commands, "192.168.10.10", "authorized_keys") {
 		t.Error("jumpstart should not add its own key to authorized_keys")
+	}
+}
+
+func TestRepairSSHPhaseUsesTheConfiguredDeployUser(t *testing.T) {
+	cfg := repairSSHConfig(t)
+	cfg.SSH.User = "deploy"
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			if host == cfg.Nodes.Jumpstart.IP && strings.Contains(cmd, "cat /root/.ssh/id_ed25519.pub") {
+				return "ssh-ed25519 AAAATEST jumpstart\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	if err := repairssh.NewPhase(cfg, fake).Run(t.Context()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if hasCommand(fake.Commands, "192.168.10.11", "/home/ubuntu") {
+		t.Error("key propagation still targets the hardcoded ubuntu home")
+	}
+	if !hasCommand(fake.Commands, "192.168.10.11", "getent passwd 'deploy'") {
+		t.Error("key propagation does not resolve the configured deploy user")
+	}
+}
+
+func TestRepairSSHPhaseFailsWhenChownFails(t *testing.T) {
+	cfg := repairSSHConfig(t)
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, cmd string) (string, string, int, error) {
+			if host == cfg.Nodes.Jumpstart.IP && strings.Contains(cmd, "cat /root/.ssh/id_ed25519.pub") {
+				return "ssh-ed25519 AAAATEST jumpstart\n", "", 0, nil
+			}
+			if strings.Contains(cmd, "chown") {
+				return "", "operation not permitted", 1, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	err := repairssh.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "failed to add pubkey") {
+		t.Fatalf("Run() = %v, want the chown failure to abort the phase", err)
 	}
 }
 

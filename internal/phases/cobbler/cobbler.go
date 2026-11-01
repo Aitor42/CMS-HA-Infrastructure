@@ -70,6 +70,7 @@ type cobblerTemplateData struct {
 	JumpstartIPMain      string
 	JumpstartMACInternal string
 	JumpstartMACMain     string
+	DeployUser           string
 	Internal             cobblerNetworkPlan
 	Main                 cobblerNetworkPlan
 }
@@ -139,6 +140,7 @@ func (p *Phase) cobblerTemplateReplacer() (*strings.Replacer, error) {
 		JumpstartIPMain:      p.cfg.Nodes.Jumpstart.IPMain,
 		JumpstartMACInternal: p.cfg.Nodes.Jumpstart.MACInternal,
 		JumpstartMACMain:     p.cfg.Nodes.Jumpstart.MACMain,
+		DeployUser:           p.cfg.SSHUser(),
 		Internal:             internal,
 		Main:                 main,
 	}
@@ -147,6 +149,7 @@ func (p *Phase) cobblerTemplateReplacer() (*strings.Replacer, error) {
 		"{{jumpstart_ip_main}}", data.JumpstartIPMain,
 		"{{jumpstart_mac_internal}}", data.JumpstartMACInternal,
 		"{{jumpstart_mac_main}}", data.JumpstartMACMain,
+		"{{deploy_user}}", data.DeployUser,
 		"{{internal_cidr}}", data.Internal.CIDR,
 		"{{internal_network}}", data.Internal.Network,
 		"{{internal_netmask}}", data.Internal.Netmask,

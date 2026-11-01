@@ -19,6 +19,7 @@ import (
 
 type autoinstallData struct {
 	Hostname        string
+	DeployUser      string
 	PasswordHash    string
 	PubKey          string
 	MACInternal     string
@@ -37,6 +38,7 @@ type autoinstallData struct {
 // node, so internal, main and router nodes all share one template.
 type cloudNodeData struct {
 	Hostname     string
+	DeployUser   string
 	PasswordHash string
 	PubKey       string
 	Interfaces   []cloudInterface
@@ -106,6 +108,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 
 	data := autoinstallData{
 		Hostname:            p.cfg.Nodes.Jumpstart.Name,
+		DeployUser:          p.cfg.SSHUser(),
 		PasswordHash:        passHash,
 		PubKey:              pubKey,
 		MACInternal:         p.cfg.Nodes.Jumpstart.MACInternal,

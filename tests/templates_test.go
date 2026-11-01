@@ -91,6 +91,7 @@ func TestTemplates_CobblerRendersTheConfiguredNetwork(t *testing.T) {
 		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": {
 			"{{jumpstart_ip}}",
 			"{{jumpstart_ip_main}}",
+			"{{deploy_user}}",
 		},
 	}
 	for file, wants := range files {
@@ -104,7 +105,7 @@ func TestTemplates_CobblerRendersTheConfiguredNetwork(t *testing.T) {
 				t.Errorf("%s is missing the %s placeholder", file, want)
 			}
 		}
-		for _, unwanted := range []string{"192.168.10.10", "192.168.20.10", "192.168.10.0/24", "192.168.20.0/24"} {
+		for _, unwanted := range []string{"192.168.10.10", "192.168.20.10", "192.168.10.0/24", "192.168.20.0/24", "/target/home/ubuntu"} {
 			if strings.Contains(content, unwanted) {
 				t.Errorf("%s hardcodes the default lab value %s", file, unwanted)
 			}

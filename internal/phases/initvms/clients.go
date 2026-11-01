@@ -84,6 +84,7 @@ func (p *Phase) deployCloudClientNodes(ctx context.Context) error {
 		}
 		data := cloudNodeData{
 			Hostname:     detail.Name,
+			DeployUser:   p.cfg.SSHUser(),
 			PasswordHash: passHash,
 			PubKey:       pubKey,
 			Interfaces:   cloudInterfaces(p.cfg, detail, nets),

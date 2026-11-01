@@ -8,13 +8,13 @@ autoinstall:
     layout: es
   identity:
     hostname: $hostname
-    username: ubuntu
+    username: {{deploy_user}}
     password: "$6$LOCKED$zQ8.e3KlMUuKr2VVoNm4c5UwkHb9XsGdpT1qFaEhWy6LjnrCDivPt0OIZmBx7QgAsk"
   # Live-session cloud-config: this file is also the installer's own user-data,
   # so this block shapes the live environment. The installed system is
   # configured through `identity` and the late-commands below, not from here.
   users:
-    - name: ubuntu
+    - name: {{deploy_user}}
       shell: /bin/bash
       sudo: ALL=(ALL) NOPASSWD:ALL
       lock_passwd: true
@@ -37,7 +37,7 @@ autoinstall:
     layout:
       name: direct
   late-commands:
-    - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
+    - mkdir -p /target/root/.ssh /target/home/{{deploy_user}}/.ssh
     # Fetch authorised public keys from the Jumpstart Cobbler pub endpoint
     - >-
       sh -c 'curl -fsS http://{{jumpstart_ip}}/cblr/pub/authorized_keys
@@ -46,16 +46,16 @@ autoinstall:
     - >-
       sh -c 'curl -fsS http://{{jumpstart_ip}}/cblr/pub/authorized_keys
       || curl -fsS http://{{jumpstart_ip_main}}/cblr/pub/authorized_keys'
-      >> /target/home/ubuntu/.ssh/authorized_keys
-    - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
-    - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
-    - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+      >> /target/home/{{deploy_user}}/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/{{deploy_user}}/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/{{deploy_user}}/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R {{deploy_user}}:{{deploy_user}} /home/{{deploy_user}}/.ssh
     # Deploy account: non-root, key-only, sudo logged, and passwordless —
     # the SSH layer runs every privileged command as `sudo -n -H bash -c ...`,
     # which fails without NOPASSWD. The `users:` block at the top of this file
     # is the *live* session's cloud-config and never reaches the target, so the
     # grant has to be written here.
-    - printf 'Defaults:ubuntu !requiretty\nDefaults log_output\nubuntu ALL=(ALL) NOPASSWD:ALL\n' > /target/etc/sudoers.d/90-cms-ha
+    - printf 'Defaults:{{deploy_user}} !requiretty\nDefaults log_output\n{{deploy_user}} ALL=(ALL) NOPASSWD:ALL\n' > /target/etc/sudoers.d/90-cms-ha
     - chmod 440 /target/etc/sudoers.d/90-cms-ha
     # Harden SSH daemon on provisioned node
     - sed -i 's/#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config

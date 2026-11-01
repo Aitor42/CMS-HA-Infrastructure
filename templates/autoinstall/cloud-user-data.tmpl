@@ -9,8 +9,8 @@ preserve_hostname: false
 manage_etc_hosts: true
 
 users:
-  - name: ubuntu
-    gecos: Ubuntu
+  - name: {{ .DeployUser }}
+    gecos: CMS deploy account
     groups: [adm, sudo]
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     shell: /bin/bash
@@ -36,7 +36,7 @@ write_files:
   - path: /etc/sudoers.d/90-cms-ha
     permissions: "0440"
     content: |
-      Defaults:ubuntu !requiretty
+      Defaults:{{ .DeployUser }} !requiretty
       Defaults log_output
 
 # Network configuration is not a user-data key: cloud-init ignores `network:`
@@ -46,6 +46,6 @@ write_files:
 runcmd:
   # Match the installer path: the random password and the root account are
   # locked; SSH key auth is the only way in.
-  - [passwd, -l, ubuntu]
+  - [passwd, -l, {{ .DeployUser }}]
   - [passwd, -l, root]
   - [systemctl, enable, --now, ssh]

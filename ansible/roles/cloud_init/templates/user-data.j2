@@ -4,6 +4,8 @@
   both provisioning engines converge on the same node configuration.
 -#}
 #cloud-config
+{% set deploy_user = cloud_init_jumpstart.ansible_user | default('ubuntu') %}
+{% set deploy_home = '/root' if deploy_user == 'root' else '/home/' ~ deploy_user %}
 autoinstall:
   version: 1
   shutdown: poweroff
@@ -12,7 +14,7 @@ autoinstall:
     layout: es
   identity:
     hostname: {{ cloud_init_jumpstart.vm_name }}
-    username: ubuntu
+    username: {{ deploy_user }}
     password: "{{ jumpstart_password_hash }}"
   ssh:
     install-server: true
@@ -52,18 +54,18 @@ autoinstall:
     layout:
       name: direct
   late-commands:
-    - echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ubuntu
-    - chmod 440 /target/etc/sudoers.d/ubuntu
-    - printf 'Defaults:ubuntu !requiretty\nDefaults log_output\n' > /target/etc/sudoers.d/90-cms-ha
+    - echo '{{ deploy_user }} ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/{{ deploy_user }}
+    - chmod 440 /target/etc/sudoers.d/{{ deploy_user }}
+    - printf 'Defaults:{{ deploy_user }} !requiretty\nDefaults log_output\n' > /target/etc/sudoers.d/90-cms-ha
     - chmod 440 /target/etc/sudoers.d/90-cms-ha
-    - curtin in-target --target=/target -- passwd -l ubuntu
+    - curtin in-target --target=/target -- passwd -l {{ deploy_user }}
     - curtin in-target --target=/target -- passwd -l root
-    - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
+    - mkdir -p /target/root/.ssh /target{{ deploy_home }}/.ssh
     - echo "{{ jumpstart_pubkey.stdout }}" >> /target/root/.ssh/authorized_keys
-    - echo "{{ jumpstart_pubkey.stdout }}" >> /target/home/ubuntu/.ssh/authorized_keys
-    - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
-    - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
-    - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+    - echo "{{ jumpstart_pubkey.stdout }}" >> /target{{ deploy_home }}/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target{{ deploy_home }}/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target{{ deploy_home }}/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R {{ deploy_user }}:{{ deploy_user }} {{ deploy_home }}/.ssh
     - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin no/' /target/etc/ssh/sshd_config
     - mkdir -p /target/etc/ssh/sshd_config.d
     - echo 'PermitRootLogin no' > /target/etc/ssh/sshd_config.d/01-permitrootlogin.conf
