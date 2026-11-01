@@ -84,6 +84,15 @@ func TestConfig_BackupDefaultsAndValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("validation rejects credentials that would break the env file", func(t *testing.T) {
+		cfg := base()
+		cfg.Backup.Engine = "garage"
+		cfg.Backup.SecretKey = "secret\nGARAGE_DEFAULT_BUCKET=evil"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a secret with an embedded newline")
+		}
+	})
+
 	t.Run("valid configuration passes", func(t *testing.T) {
 		cfg := base()
 		cfg.Backup.Engine = "garage"
@@ -116,10 +125,16 @@ func TestBackupManifests(t *testing.T) {
 			"rclone/rclone:",
 			"@sha256:",
 			"cms_backup_last_success_timestamp_seconds",
+			// The root password must travel through the environment, not the
+			// process list.
+			"MYSQL_PWD",
 		} {
 			if !strings.Contains(content, want) {
 				t.Errorf("mariadb-backup-cronjob.yaml is missing %q", want)
 			}
+		}
+		if strings.Contains(content, `--password=`) {
+			t.Error("mariadb-backup-cronjob.yaml must not pass the password on the command line")
 		}
 		if strings.Contains(content, ":latest") {
 			t.Error("mariadb-backup-cronjob.yaml must not use the floating :latest tag")

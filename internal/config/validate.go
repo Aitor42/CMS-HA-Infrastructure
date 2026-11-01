@@ -225,6 +225,18 @@ func (c *Config) validateBackup() error {
 			return fmt.Errorf("backup schedule %q contains unsupported characters", sched)
 		}
 	}
+	// These values are written to the container's --env-file, which is line
+	// based: an embedded newline would inject an extra variable or truncate
+	// the credential.
+	for field, value := range map[string]string{
+		"backup.access_key": c.Backup.AccessKey,
+		"backup.secret_key": c.Backup.SecretKey,
+		"backup.bucket":     c.Backup.Bucket,
+	} {
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("%s cannot contain line breaks", field)
+		}
+	}
 	return nil
 }
 

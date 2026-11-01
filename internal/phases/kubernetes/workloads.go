@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -29,7 +28,11 @@ func (p *Phase) deployWorkloads(ctx context.Context, master1 config.NodeDetail) 
 		return err
 	}
 	if backupsOn {
-		p.syncBackupSchedules(ctx, master1)
+		if err := p.syncBackupSchedules(ctx, master1); err != nil {
+			return err
+		}
+	} else if err := p.removeBackupStack(ctx, master1); err != nil {
+		return err
 	}
 	if err := p.waitForMariaDB(ctx, master1); err != nil {
 		return err
@@ -162,20 +165,37 @@ func (p *Phase) applyKustomizeRoots(ctx context.Context, master1 config.NodeDeta
 
 // syncBackupSchedules keeps the CronJob schedules in sync with config.yaml;
 // the schedules baked into the manifests are only fallbacks. Schedules are
-// validated in config.Validate() to be shell-safe.
-func (p *Phase) syncBackupSchedules(ctx context.Context, master1 config.NodeDetail) {
-	schedules := map[string]string{
-		"mariadb-backup":       p.cfg.BackupSchedule(),
-		"mariadb-restore-test": p.cfg.BackupRestoreTestSchedule(),
+// validated in config.Validate() to be shell-safe. A failed patch is fatal:
+// silently leaving the fallback schedule would run the backup at a time the
+// operator did not configure.
+func (p *Phase) syncBackupSchedules(ctx context.Context, master1 config.NodeDetail) error {
+	schedules := []struct {
+		name string
+		spec string
+	}{
+		{"mariadb-backup", p.cfg.BackupSchedule()},
+		{"mariadb-restore-test", p.cfg.BackupRestoreTestSchedule()},
 	}
-	for name, sched := range schedules {
-		patch := fmt.Sprintf(`{"spec":{"schedule":"%s"}}`, sched)
-		cmd := fmt.Sprintf("kubectl patch cronjob %s -n cms --type merge -p '%s'", name, patch)
-		if out, errOut, code, err := p.pool.RunCommand(ctx, master1.IP, cmd); err != nil || code != 0 {
-			logging.Warn("Could not sync the schedule of CronJob %s (exit %d): %v %s%s",
-				name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
+	for _, sched := range schedules {
+		patch := fmt.Sprintf(`{"spec":{"schedule":"%s"}}`, sched.spec)
+		cmd := fmt.Sprintf("kubectl patch cronjob %s -n cms --type merge -p '%s'", sched.name, patch)
+		if err := runCheckedRetry(ctx, p.pool, master1.IP, cmd, "sync the schedule of CronJob "+sched.name); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// removeBackupStack deletes the backup CronJobs and their credentials when
+// backup.engine is empty. Without it, disabling the feature in config.yaml
+// leaves the previously applied CronJobs running against a bucket the deploy
+// no longer provisions.
+func (p *Phase) removeBackupStack(ctx context.Context, master1 config.NodeDetail) error {
+	logging.Info("Backup disabled (backup.engine is empty); removing any previously deployed backup CronJobs and credentials...")
+	cmd := "kubectl delete cronjob mariadb-backup mariadb-restore-test -n cms --ignore-not-found=true && " +
+		"kubectl delete secret backup-secret -n cms --ignore-not-found=true && " +
+		"kubectl delete configmap backup-config -n cms --ignore-not-found=true"
+	return runCheckedRetry(ctx, p.pool, master1.IP, cmd, "remove the disabled backup stack")
 }
 
 func (p *Phase) waitForMariaDB(ctx context.Context, master1 config.NodeDetail) error {

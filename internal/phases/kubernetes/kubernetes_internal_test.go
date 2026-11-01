@@ -1,8 +1,12 @@
 package kubernetes
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 )
 
 func TestEtcdMemberNames(t *testing.T) {
@@ -134,5 +138,73 @@ func TestTokenFingerprintIsStableAndShort(t *testing.T) {
 	}
 	if got == tokenFingerprint("K10other::server:token") {
 		t.Error("different tokens produced the same fingerprint")
+	}
+}
+
+func TestSyncBackupSchedulesAppliesConfiguredCronSpecs(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Backup.Engine = "garage"
+	cfg.Backup.Schedule = "0 4 * * *"
+	cfg.Backup.RestoreTestSchedule = "15 5 * * *"
+	fake := &testutil.FakeExecutor{}
+	p := &Phase{cfg: cfg, pool: fake}
+
+	if err := p.syncBackupSchedules(context.Background(), config.NodeDetail{IP: "192.168.10.11"}); err != nil {
+		t.Fatalf("syncBackupSchedules() = %v", err)
+	}
+	var joined strings.Builder
+	for _, cmd := range fake.Commands {
+		joined.WriteString(cmd.Cmd)
+		joined.WriteString("\n")
+	}
+	for _, want := range []string{
+		`kubectl patch cronjob mariadb-backup -n cms --type merge -p '{"spec":{"schedule":"0 4 * * *"}}'`,
+		`kubectl patch cronjob mariadb-restore-test -n cms --type merge -p '{"spec":{"schedule":"15 5 * * *"}}'`,
+	} {
+		if !strings.Contains(joined.String(), want) {
+			t.Errorf("syncBackupSchedules did not apply %q:\n%s", want, joined.String())
+		}
+	}
+}
+
+func TestSyncBackupSchedulesFailsWhenThePatchIsRejected(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Backup.Engine = "garage"
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			if strings.Contains(cmd, "mariadb-backup") {
+				return "", "cronjob not found", 1, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	p := &Phase{cfg: cfg, pool: fake}
+
+	err := p.syncBackupSchedules(context.Background(), config.NodeDetail{IP: "192.168.10.11"})
+	if err == nil || !strings.Contains(err.Error(), "mariadb-backup") {
+		t.Fatalf("syncBackupSchedules() = %v, want the rejected patch", err)
+	}
+}
+
+func TestRemoveBackupStackDeletesCronJobsAndCredentials(t *testing.T) {
+	fake := &testutil.FakeExecutor{}
+	p := &Phase{cfg: &config.Config{}, pool: fake}
+
+	if err := p.removeBackupStack(context.Background(), config.NodeDetail{IP: "192.168.10.11"}); err != nil {
+		t.Fatalf("removeBackupStack() = %v", err)
+	}
+	var joined strings.Builder
+	for _, cmd := range fake.Commands {
+		joined.WriteString(cmd.Cmd)
+		joined.WriteString("\n")
+	}
+	for _, want := range []string{
+		"kubectl delete cronjob mariadb-backup mariadb-restore-test -n cms --ignore-not-found=true",
+		"kubectl delete secret backup-secret -n cms --ignore-not-found=true",
+		"kubectl delete configmap backup-config -n cms --ignore-not-found=true",
+	} {
+		if !strings.Contains(joined.String(), want) {
+			t.Errorf("removeBackupStack did not run %q:\n%s", want, joined.String())
+		}
 	}
 }

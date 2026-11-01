@@ -3,10 +3,12 @@ package backup
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -87,11 +89,15 @@ func (p *Phase) Run(ctx context.Context) error {
 	}
 
 	cfgPath := filepath.Join(dataDir, "garage.toml")
-	if err := p.ensureGarageConfig(cfgPath, hostIP, port); err != nil {
+	if _, err := p.ensureGarageConfig(cfgPath, hostIP, port); err != nil {
+		return err
+	}
+	envPath := filepath.Join(dataDir, "garage.env")
+	if err := p.writeGarageEnv(envPath); err != nil {
 		return err
 	}
 
-	if err := p.ensureContainer(ctx, runtime, dataDir, cfgPath); err != nil {
+	if err := p.ensureContainer(ctx, runtime, dataDir, cfgPath, envPath); err != nil {
 		return err
 	}
 	if err := p.waitForS3(ctx, hostIP, port); err != nil {
@@ -135,8 +141,8 @@ func ensureDataDir(path string) error {
 }
 
 // writeGarageConfig renders the Garage configuration with fresh secrets. It is
-// only called when no configuration exists yet, so the cluster's secrets stay
-// stable across re-deploys.
+// only called when the existing file does not match the current topology, so
+// the secrets stay stable across re-deploys that change nothing.
 func (p *Phase) writeGarageConfig(path string) error {
 	tmpl, err := cms.TemplatesFS.ReadFile("templates/backup/garage.toml.tmpl")
 	if err != nil {
@@ -172,48 +178,109 @@ func (p *Phase) writeGarageConfig(path string) error {
 	return nil
 }
 
-// ensureGarageConfig keeps the configuration in sync with the way the container
-// is run. A config written by an older deploy binds the S3 API on "[::]" inside
-// a bridge-networked container; such a store answers on the hypervisor but is
-// unreachable from the lab's guests, so the bind address is the marker that
-// tells us the config has to be regenerated.
-func (p *Phase) ensureGarageConfig(path, hostIP string, port int) error {
-	want := fmt.Sprintf("api_bind_addr = %q", net.JoinHostPort(hostIP, strconv.Itoa(port)))
+// ensureGarageConfig keeps the configuration in sync with the current topology.
+// It regenerates the file when the S3 bind address or region no longer match,
+// and reuses it otherwise so the secrets generated on the first deploy stay
+// stable. It reports whether the file changed: a running container keeps the
+// configuration it read at start-up, so the caller has to restart it.
+func (p *Phase) ensureGarageConfig(path, hostIP string, port int) (bool, error) {
+	wantBind := fmt.Sprintf("api_bind_addr = %q", net.JoinHostPort(hostIP, strconv.Itoa(port)))
+	wantRegion := fmt.Sprintf("s3_region = %q", p.cfg.BackupS3Region())
 	content, err := os.ReadFile(path)
 	switch {
 	case err == nil:
-		if strings.Contains(string(content), want) {
+		if strings.Contains(string(content), wantBind) && strings.Contains(string(content), wantRegion) {
 			logging.Info("Reusing existing Garage config at %s", path)
-			return nil
+			return false, nil
 		}
-		logging.Warn("Regenerating %s: the S3 API is not bound on %s", path, net.JoinHostPort(hostIP, strconv.Itoa(port)))
+		logging.Warn("Regenerating %s: the S3 API must bind %s with region %q", path, net.JoinHostPort(hostIP, strconv.Itoa(port)), p.cfg.BackupS3Region())
 	case errors.Is(err, fs.ErrNotExist):
 		// First deploy: write it below.
 	default:
-		return fmt.Errorf("failed to read %s: %w", path, err)
+		return false, fmt.Errorf("failed to read %s: %w", path, err)
 	}
-	return p.writeGarageConfig(path)
+	if err := p.writeGarageConfig(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// writeGarageEnv writes the S3 credentials to a 0600 file consumed with
+// `docker run --env-file`. Passing them as `-e KEY=value` puts the secret in
+// the process argv, where every local user can read it through
+// /proc/*/cmdline; the env file keeps it off the command line.
+func (p *Phase) writeGarageEnv(path string) error {
+	values := []struct {
+		key   string
+		value string
+	}{
+		{"GARAGE_DEFAULT_ACCESS_KEY", p.cfg.BackupAccessKey()},
+		{"GARAGE_DEFAULT_SECRET_KEY", p.cfg.Backup.SecretKey},
+		{"GARAGE_DEFAULT_BUCKET", p.cfg.BackupBucket()},
+	}
+	var content strings.Builder
+	for _, entry := range values {
+		// The env-file format is line based: an embedded newline would inject
+		// an extra variable or truncate the credential.
+		if strings.ContainsAny(entry.value, "\r\n") {
+			return fmt.Errorf("%s cannot contain line breaks", entry.key)
+		}
+		fmt.Fprintf(&content, "%s=%s\n", entry.key, entry.value)
+	}
+	if err := os.WriteFile(path, []byte(content.String()), 0600); err != nil {
+		return fmt.Errorf("failed to write Garage env file %s: %w", path, err)
+	}
+	return nil
+}
+
+// garageConfigHash fingerprints everything a running container cannot pick up
+// without a restart: the image, the mounted configuration and the credential
+// environment. The label written at creation time is compared on the next
+// deploy, so a changed bind address, region or secret recreates the container
+// instead of leaving it on the old configuration.
+func garageConfigHash(image, cfgPath, envPath string) (string, error) {
+	h := sha256.New()
+	_, _ = io.WriteString(h, image)
+	for _, path := range []string{cfgPath, envPath} {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to hash %s: %w", path, err)
+		}
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(content)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], nil
 }
 
 // ensureContainer creates the Garage container, or reuses it when it already
-// runs the pinned image on the host network.
-func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath string) error {
+// runs the pinned image on the host network with the current configuration.
+func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath, envPath string) error {
 	image := p.cfg.GarageImage()
+	wantHash, err := garageConfigHash(image, cfgPath, envPath)
+	if err != nil {
+		return err
+	}
 
 	// Single inspect call returns the fields we need, replacing three
 	// round-trips.
-	if out, err := p.output(ctx, runtime, "inspect", "-f", "{{.Config.Image}}|{{.State.Running}}|{{.HostConfig.NetworkMode}}", containerName); err == nil {
-		fields := strings.SplitN(strings.TrimSpace(out), "|", 3)
+	if out, err := p.output(ctx, runtime, "inspect", "-f",
+		`{{.Config.Image}}|{{.State.Running}}|{{.HostConfig.NetworkMode}}|{{index .Config.Labels "cms.ha.backup-config-hash"}}`,
+		containerName); err == nil {
+		fields := strings.SplitN(strings.TrimSpace(out), "|", 4)
 		current := strings.TrimSpace(fields[0])
 		running := ""
 		netMode := ""
+		configHash := ""
 		if len(fields) > 1 {
 			running = strings.TrimSpace(fields[1])
 		}
 		if len(fields) > 2 {
 			netMode = strings.TrimSpace(fields[2])
 		}
-		if current == image && netMode == "host" {
+		if len(fields) > 3 {
+			configHash = strings.TrimSpace(fields[3])
+		}
+		if current == image && netMode == "host" && configHash == wantHash {
 			if running == "true" {
 				logging.Info("Garage container %s is already running.", containerName)
 				return nil
@@ -224,10 +291,13 @@ func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath s
 			}
 			return nil
 		}
-		if current == image {
-			logging.Info("Garage container %s uses %q networking; recreating it on the host network so the cluster can reach the S3 API", containerName, netMode)
-		} else {
+		switch {
+		case current != image:
 			logging.Info("Garage image changed (%q -> %q); recreating container...", current, image)
+		case netMode != "host":
+			logging.Info("Garage container %s uses %q networking; recreating it on the host network so the cluster can reach the S3 API", containerName, netMode)
+		default:
+			logging.Info("Garage configuration or credentials changed; recreating container %s...", containerName)
 		}
 		if _, err := p.output(ctx, runtime, "rm", "-f", containerName); err != nil {
 			return fmt.Errorf("failed to remove old Garage container: %w", err)
@@ -235,7 +305,7 @@ func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath s
 	}
 
 	logging.Info("Creating Garage container from %s...", image)
-	if _, err := p.output(ctx, runtime, p.garageRunArgs(image, dataDir, cfgPath)...); err != nil {
+	if _, err := p.output(ctx, runtime, p.garageRunArgs(image, dataDir, cfgPath, envPath, wantHash)...); err != nil {
 		return fmt.Errorf("failed to create Garage container: %w", err)
 	}
 	return nil
@@ -246,17 +316,20 @@ func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath s
 // address directly (never the WAN), so the store is reachable from the lab's
 // guests without relying on Docker's port-publishing DNAT across the libvirt
 // bridge, which the first backup drill proved does not work.
-func (p *Phase) garageRunArgs(image, dataDir, cfgPath string) []string {
+//
+// The S3 credentials travel through --env-file instead of -e so the secret is
+// not exposed in the process argv, and the config hash label lets the next
+// deploy detect a container that is still running an old configuration.
+func (p *Phase) garageRunArgs(image, dataDir, cfgPath, envPath, configHash string) []string {
 	return []string{
 		"run", "-d",
 		"--name", containerName,
 		"--restart", "unless-stopped",
 		"--network", "host",
+		"--label", "cms.ha.backup-config-hash=" + configHash,
 		"-v", fmt.Sprintf("%s:%s", dataDir, garageDataDir),
 		"-v", fmt.Sprintf("%s:%s:ro", cfgPath, garageConfigPath),
-		"-e", "GARAGE_DEFAULT_ACCESS_KEY=" + p.cfg.BackupAccessKey(),
-		"-e", "GARAGE_DEFAULT_SECRET_KEY=" + p.cfg.Backup.SecretKey,
-		"-e", "GARAGE_DEFAULT_BUCKET=" + p.cfg.BackupBucket(),
+		"--env-file", envPath,
 		image,
 		"/garage", "server", "--single-node", "--default-bucket",
 	}
@@ -287,22 +360,24 @@ func (p *Phase) waitForS3(ctx context.Context, hostIP string, port int) error {
 	return nil
 }
 
-// ensureBucket creates the backup bucket and grants the default key access when
-// it is missing. With `--default-bucket` Garage usually creates it on first
-// start; this keeps a pre-existing volume convergent too.
+// ensureBucket creates the backup bucket when it is missing and always grants
+// the default key access. With `--default-bucket` Garage usually creates it on
+// first start; this keeps a pre-existing volume convergent too. The access
+// grant is fatal: a bucket the CronJobs cannot write to fails every backup
+// silently, which is exactly the failure the restore drill is meant to catch.
 func (p *Phase) ensureBucket(ctx context.Context, runtime string) error {
 	bucket := p.cfg.BackupBucket()
-	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "info", bucket); err == nil {
-		return nil
+	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "info", bucket); err != nil {
+		logging.Info("Creating Garage bucket %q...", bucket)
+		if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "create", bucket); err != nil {
+			return fmt.Errorf("failed to create Garage bucket %q: %w", bucket, err)
+		}
 	}
-
-	logging.Info("Creating Garage bucket %q...", bucket)
-	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "create", bucket); err != nil {
-		return fmt.Errorf("failed to create Garage bucket %q: %w", bucket, err)
-	}
+	// Run the grant on every deploy, not only after a create: a bucket left
+	// behind by an earlier failed run would otherwise stay inaccessible.
 	if _, err := p.output(ctx, runtime, "exec", containerName, "/garage", "bucket", "allow",
 		"--read", "--write", "--owner", bucket, "--key", "default"); err != nil {
-		logging.Warn("Could not grant the default key access to bucket %q; grant it manually: %v", bucket, err)
+		return fmt.Errorf("failed to grant the default key access to Garage bucket %q: %w", bucket, err)
 	}
 	return nil
 }

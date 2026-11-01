@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,13 +19,55 @@ func testConfig() *config.Config {
 	return cfg
 }
 
+// fakeRuntime writes an executable stand-in for docker/podman that records its
+// argv and exits according to FAKE_* environment variables. It lets the tests
+// exercise the container lifecycle without a real runtime.
+func fakeRuntime(t *testing.T) string {
+	t.Helper()
+	logPath := filepath.Join(t.TempDir(), "runtime.log")
+	t.Setenv("FAKE_RUNTIME_LOG", logPath)
+	script := filepath.Join(t.TempDir(), "fake-runtime")
+	body := `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_RUNTIME_LOG"
+case "$*" in
+  inspect*) printf '%s\n' "${FAKE_INSPECT_OUTPUT:-}"; exit "${FAKE_INSPECT_EXIT:-0}" ;;
+  "rm -f cms-garage") exit "${FAKE_RM_EXIT:-0}" ;;
+  run*) exit "${FAKE_RUN_EXIT:-0}" ;;
+  start*) exit 0 ;;
+  *"bucket info"*) exit "${FAKE_INFO_EXIT:-0}" ;;
+  *"bucket create"*) exit "${FAKE_CREATE_EXIT:-0}" ;;
+  *"bucket allow"*) exit "${FAKE_ALLOW_EXIT:-0}" ;;
+esac
+exit 0
+`
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("failed to write the fake runtime: %v", err)
+	}
+	return script
+}
+
+func runtimeLog(t *testing.T) string {
+	t.Helper()
+	content, err := os.ReadFile(os.Getenv("FAKE_RUNTIME_LOG"))
+	if err != nil {
+		t.Fatalf("failed to read the runtime log: %v", err)
+	}
+	return string(content)
+}
+
 // TestGarageRunArgsUseHostNetwork pins the design decision behind the backup
 // drill's first failure: Docker port publishing on a bridge network was not
 // reachable from the libvirt guests, so Garage runs on the host network and
 // binds the internal address from garage.toml instead.
 func TestGarageRunArgsUseHostNetwork(t *testing.T) {
 	p := &Phase{cfg: testConfig()}
-	joined := strings.Join(p.garageRunArgs("dxflrs/garage:v2.4.1", "/var/lib/cms-garage", "/var/lib/cms-garage/garage.toml"), " ")
+	joined := strings.Join(p.garageRunArgs(
+		"dxflrs/garage:v2.4.1",
+		"/var/lib/cms-garage",
+		"/var/lib/cms-garage/garage.toml",
+		"/var/lib/cms-garage/garage.env",
+		"abc123",
+	), " ")
 
 	if !strings.Contains(joined, "--network host") {
 		t.Errorf("Garage must run on the host network, got: %s", joined)
@@ -32,23 +75,30 @@ func TestGarageRunArgsUseHostNetwork(t *testing.T) {
 	if strings.Contains(joined, " -p ") || strings.Contains(joined, "--publish") {
 		t.Errorf("Garage must not rely on Docker port publishing, got: %s", joined)
 	}
-	if !strings.Contains(joined, "GARAGE_DEFAULT_ACCESS_KEY=access") {
-		t.Errorf("Garage must receive the configured access key, got: %s", joined)
+	if !strings.Contains(joined, "--env-file /var/lib/cms-garage/garage.env") {
+		t.Errorf("Garage credentials must travel through an env file, got: %s", joined)
+	}
+	if strings.Contains(joined, "GARAGE_DEFAULT_SECRET_KEY") || strings.Contains(joined, "GARAGE_DEFAULT_ACCESS_KEY") {
+		t.Errorf("the S3 credentials must not appear in the container argv, got: %s", joined)
+	}
+	if !strings.Contains(joined, "cms.ha.backup-config-hash=abc123") {
+		t.Errorf("the container must carry the config hash label, got: %s", joined)
 	}
 }
 
-// TestEnsureGarageConfigMigratesOldBind rewrites a config written before host
+// TestEnsureGarageConfigReportsChanges rewrites a config written before host
 // networking: leaving it in place would keep the S3 API on a wildcard address
 // inside a bridge network and every backup would still be refused.
-func TestEnsureGarageConfigMigratesOldBind(t *testing.T) {
+func TestEnsureGarageConfigReportsChanges(t *testing.T) {
 	p := &Phase{cfg: testConfig()}
 	path := filepath.Join(t.TempDir(), "garage.toml")
-	if err := os.WriteFile(path, []byte("metadata_dir = \"/var/lib/garage/meta\"\n\n[s3_api]\napi_bind_addr = \"[::]:3900\"\n"), 0o600); err != nil {
-		t.Fatalf("failed to write the old config: %v", err)
-	}
 
-	if err := p.ensureGarageConfig(path, "192.168.10.254", 3900); err != nil {
-		t.Fatalf("ensureGarageConfig failed: %v", err)
+	changed, err := p.ensureGarageConfig(path, "192.168.10.254", 3900)
+	if err != nil {
+		t.Fatalf("ensureGarageConfig failed on the first run: %v", err)
+	}
+	if !changed {
+		t.Error("ensureGarageConfig must report a change when it writes a new config")
 	}
 
 	content, err := os.ReadFile(path)
@@ -68,8 +118,12 @@ func TestEnsureGarageConfigMigratesOldBind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read the config: %v", err)
 	}
-	if err := p.ensureGarageConfig(path, "192.168.10.254", 3900); err != nil {
+	changed, err = p.ensureGarageConfig(path, "192.168.10.254", 3900)
+	if err != nil {
 		t.Fatalf("ensureGarageConfig failed on the second run: %v", err)
+	}
+	if changed {
+		t.Error("ensureGarageConfig rewrote a config that already matches the topology")
 	}
 	second, err := os.ReadFile(path)
 	if err != nil {
@@ -77,5 +131,126 @@ func TestEnsureGarageConfigMigratesOldBind(t *testing.T) {
 	}
 	if string(first) != string(second) {
 		t.Error("ensureGarageConfig rewrote a config that already binds the internal address")
+	}
+
+	// A changed region is a topology change too: the container must be told to
+	// restart instead of keeping the region it read at start-up.
+	p.cfg.Backup.S3Region = "other-region"
+	changed, err = p.ensureGarageConfig(path, "192.168.10.254", 3900)
+	if err != nil {
+		t.Fatalf("ensureGarageConfig failed on the region change: %v", err)
+	}
+	if !changed {
+		t.Error("ensureGarageConfig must report a change when the region changes")
+	}
+	content, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read the config: %v", err)
+	}
+	if !strings.Contains(string(content), `s3_region = "other-region"`) {
+		t.Errorf("the rewritten config does not carry the new region:\n%s", content)
+	}
+}
+
+func TestWriteGarageEnvIsPrivateAndLineSafe(t *testing.T) {
+	p := &Phase{cfg: testConfig()}
+	path := filepath.Join(t.TempDir(), "garage.env")
+	if err := p.writeGarageEnv(path); err != nil {
+		t.Fatalf("writeGarageEnv failed: %v", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read the env file: %v", err)
+	}
+	for _, want := range []string{
+		"GARAGE_DEFAULT_ACCESS_KEY=access",
+		"GARAGE_DEFAULT_SECRET_KEY=secret",
+		"GARAGE_DEFAULT_BUCKET=cms-backups",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("the env file is missing %q:\n%s", want, content)
+		}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("failed to stat the env file: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("the env file mode is %o, want 0600", info.Mode().Perm())
+	}
+
+	p.cfg.Backup.SecretKey = "line\nbreak"
+	if err := p.writeGarageEnv(path); err == nil || !strings.Contains(err.Error(), "line breaks") {
+		t.Fatalf("writeGarageEnv() = %v, want a line-break rejection", err)
+	}
+}
+
+func TestEnsureBucketGrantsAccessAndFailsWhenItCannot(t *testing.T) {
+	ctx := context.Background()
+	runtime := fakeRuntime(t)
+	p := &Phase{cfg: testConfig()}
+
+	// A bucket that already exists must still be granted to the default key:
+	// a previous failed run can leave it inaccessible.
+	t.Setenv("FAKE_INFO_EXIT", "0")
+	t.Setenv("FAKE_ALLOW_EXIT", "0")
+	if err := p.ensureBucket(ctx, runtime); err != nil {
+		t.Fatalf("ensureBucket failed on an existing bucket: %v", err)
+	}
+	if log := runtimeLog(t); !strings.Contains(log, "bucket allow") {
+		t.Errorf("ensureBucket skipped the access grant for an existing bucket:\n%s", log)
+	}
+
+	// A failed grant is fatal: the CronJobs would upload into a bucket they
+	// cannot write to and the failure would only surface in the restore drill.
+	os.Remove(os.Getenv("FAKE_RUNTIME_LOG"))
+	t.Setenv("FAKE_ALLOW_EXIT", "1")
+	err := p.ensureBucket(ctx, runtime)
+	if err == nil || !strings.Contains(err.Error(), "grant the default key access") {
+		t.Fatalf("ensureBucket() = %v, want the access-grant failure", err)
+	}
+}
+
+func TestEnsureContainerRecreatesWhenTheConfigChanges(t *testing.T) {
+	ctx := context.Background()
+	runtime := fakeRuntime(t)
+	p := &Phase{cfg: testConfig()}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "garage.toml")
+	envPath := filepath.Join(dir, "garage.env")
+	if err := os.WriteFile(cfgPath, []byte("config"), 0o600); err != nil {
+		t.Fatalf("failed to write the config: %v", err)
+	}
+	if err := p.writeGarageEnv(envPath); err != nil {
+		t.Fatalf("writeGarageEnv failed: %v", err)
+	}
+	hash, err := garageConfigHash(p.cfg.GarageImage(), cfgPath, envPath)
+	if err != nil {
+		t.Fatalf("garageConfigHash failed: %v", err)
+	}
+
+	// A running container whose label does not match the current config must
+	// be recreated, otherwise it keeps the bind address/credentials it read at
+	// start-up.
+	t.Setenv("FAKE_INSPECT_OUTPUT", p.cfg.GarageImage()+"|true|host|stale")
+	if err := p.ensureContainer(ctx, runtime, dir, cfgPath, envPath); err != nil {
+		t.Fatalf("ensureContainer failed: %v", err)
+	}
+	log := runtimeLog(t)
+	if !strings.Contains(log, "rm -f cms-garage") {
+		t.Errorf("ensureContainer did not remove the stale container:\n%s", log)
+	}
+	if !strings.Contains(log, "cms.ha.backup-config-hash="+hash) {
+		t.Errorf("ensureContainer did not create a container with the current hash:\n%s", log)
+	}
+
+	// A matching label means the container is already converged: no recreate.
+	os.Remove(os.Getenv("FAKE_RUNTIME_LOG"))
+	t.Setenv("FAKE_INSPECT_OUTPUT", p.cfg.GarageImage()+"|true|host|"+hash)
+	if err := p.ensureContainer(ctx, runtime, dir, cfgPath, envPath); err != nil {
+		t.Fatalf("ensureContainer failed on a converged container: %v", err)
+	}
+	if log := runtimeLog(t); strings.Contains(log, "rm -f") || strings.Contains(log, "run ") {
+		t.Errorf("ensureContainer recreated an already converged container:\n%s", log)
 	}
 }
