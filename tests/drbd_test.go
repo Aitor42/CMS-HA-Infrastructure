@@ -138,7 +138,7 @@ func TestDRBD_WatchdogScriptIntegrity(t *testing.T) {
 	}
 }
 
-func TestDRBD_FailoverScriptRefusesForcedPromotionAndClearsAllMasters(t *testing.T) {
+func TestDRBD_FailoverScriptRefusesForcedPromotionAndClearsStaleLabels(t *testing.T) {
 	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
 	if err != nil {
 		t.Fatalf("failed to read drbd-failover.sh: %v", err)
@@ -147,8 +147,50 @@ func TestDRBD_FailoverScriptRefusesForcedPromotionAndClearsAllMasters(t *testing
 	if strings.Contains(script, "drbdadm primary --force") {
 		t.Error("failover promotion must not force an Outdated/Inconsistent disk to Primary")
 	}
-	if !strings.Contains(script, `for node in $(kubectl get nodes`) || !strings.Contains(script, `grep -vx "$LOCAL_NODE"`) {
-		t.Error("failover promotion must clear the primary label from every other master")
+	// Clear every node that still advertises the primary label, not only
+	// nodes whose name happens to contain "master": a custom-named
+	// control-plane node would otherwise keep the label.
+	if !strings.Contains(script, `kubectl get nodes -l drbd-status=primary`) {
+		t.Error("failover promotion must select the stale primaries by their label")
+	}
+	if !strings.Contains(script, `grep -vx "$LOCAL_NODE"`) {
+		t.Error("failover promotion must clear the primary label from every other node")
+	}
+	if strings.Contains(script, `grep "master"`) {
+		t.Error("failover promotion must not identify control-plane nodes by a hardcoded name fragment")
+	}
+	// The local node lookup must compare whole hostname labels, not substrings:
+	// "internal-master1" must never match "internal-master10".
+	if !strings.Contains(script, "local_k8s_node()") || !strings.Contains(script, `sub(/\..*/, "", n)`) {
+		t.Error("failover promotion must resolve the local Kubernetes node by exact first label")
+	}
+	if strings.Contains(script, `grep "$(hostname)"`) {
+		t.Error("failover promotion still matches the local node with a substring grep")
+	}
+}
+
+func TestDRBD_WatchdogHasNoDefaultLabFallbacks(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-watchdog.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-watchdog.sh: %v", err)
+	}
+	script := string(content)
+	for _, hardcoded := range []string{
+		`echo "192.168.10.1"`,
+		`peer="192.168.10.12"`,
+		`peer="192.168.10.11"`,
+		`grep "$(hostname)"`,
+	} {
+		if strings.Contains(script, hardcoded) {
+			t.Errorf("watchdog still falls back to the default lab with %q", hardcoded)
+		}
+	}
+	// An unknown peer must suppress failover, not promote blindly.
+	if !strings.Contains(script, "cannot determine the peer IP") {
+		t.Error("watchdog must fail closed when the peer address cannot be read")
+	}
+	if !strings.Contains(script, "local_k8s_node()") || !strings.Contains(script, `sub(/\..*/, "", n)`) {
+		t.Error("watchdog must resolve the local Kubernetes node by exact first label")
 	}
 }
 

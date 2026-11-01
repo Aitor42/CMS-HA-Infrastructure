@@ -276,6 +276,9 @@ func TestDRBDPhaseReportsPromotionFailure(t *testing.T) {
 			if strings.Contains(cmd, "drbdadm primary cms_data --force") {
 				return "", "no valid meta data", 1, nil
 			}
+			if strings.Contains(cmd, "drbdadm dstate cms_data") {
+				return "Inconsistent/Inconsistent\n", "", 0, nil
+			}
 			if strings.Contains(cmd, "drbdadm status cms_data") {
 				return "replication:Established\npeer-disk:UpToDate\n", "", 0, nil
 			}
@@ -286,5 +289,51 @@ func TestDRBDPhaseReportsPromotionFailure(t *testing.T) {
 	err := drbd.NewPhase(cfg, fake).Run(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "failed to promote") {
 		t.Fatalf("Run() = %v, want the promotion failure", err)
+	}
+}
+
+func TestDRBDPhaseFailsClosedWhenDiskStateIsUnreadable(t *testing.T) {
+	cfg := drbdConfig()
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				return "Secondary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				return "", "no such resource", 1, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	err := drbd.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "read DRBD disk state") {
+		t.Fatalf("Run() = %v, want the unreadable-disk-state refusal", err)
+	}
+	if hasCommand(fake.Commands, cfg.Nodes.Masters[0].IP, "drbdadm primary cms_data") {
+		t.Error("an unreadable disk state must never lead to a promotion")
+	}
+}
+
+func TestDRBDPhaseRefusesToForceAnOutdatedDisk(t *testing.T) {
+	cfg := drbdConfig()
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			switch {
+			case strings.Contains(cmd, "drbdadm role cms_data"):
+				return "Secondary/Unknown\n", "", 0, nil
+			case strings.Contains(cmd, "drbdadm dstate cms_data"):
+				return "Outdated/UpToDate\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	err := drbd.NewPhase(cfg, fake).Run(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "local disk state is Outdated") {
+		t.Fatalf("Run() = %v, want the outdated-disk refusal", err)
+	}
+	if hasCommand(fake.Commands, cfg.Nodes.Masters[0].IP, "drbdadm primary cms_data") {
+		t.Error("an Outdated disk must not be promoted, not even with --force")
 	}
 }

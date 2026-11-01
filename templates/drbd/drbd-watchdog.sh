@@ -40,11 +40,23 @@ FENCE_REQUIRED="${FENCE_REQUIRED:-1}"
 [ -r "$FENCE_CONF" ] && . "$FENCE_CONF"
 export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 
-GATEWAY="${GATEWAY:-$(ip route show default 2>/dev/null | awk '{print $3}' | head -n1 || echo "192.168.10.1")}"
+GATEWAY="${GATEWAY:-$(ip route show default 2>/dev/null | awk '{print $3}' | head -n1)}"
 STRIKE_COUNT=0
 
 log() {
   echo "[DRBD-WATCHDOG $(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# Resolve this host's Kubernetes node object. Node names are usually the VM's
+# short hostname but may be the FQDN; compare the first label so that
+# "internal-master1" never matches "internal-master10". Prints nothing when the
+# host is not (yet) registered, and the callers skip label/pod maintenance
+# instead of operating on a guessed node name.
+local_k8s_node() {
+  local short="${HOSTNAME%%.*}"
+  kubectl get nodes --request-timeout=3s -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+    | tr ' ' '\n' \
+    | awk -v h="$short" 'NF { n=$0; sub(/\..*/, "", n); if (n == h) { print $0; exit } }'
 }
 
 get_peer_ip() {
@@ -55,13 +67,9 @@ get_peer_ip() {
       break
     fi
   done
-  if [ -z "$peer" ]; then
-    if [[ "$(hostname)" == *"master1"* ]]; then
-      peer="192.168.10.12"
-    else
-      peer="192.168.10.11"
-    fi
-  fi
+  # No fallback address: a hardcoded peer would point at the default lab after
+  # a topology change, and a wrong peer is worse than no peer. The caller
+  # suppresses failover when this returns empty.
   echo "$peer"
 }
 
@@ -74,7 +82,11 @@ get_peer_domain() {
     return
   fi
   dom=$(awk -v ip="$peer_ip" '
-    $1 == "on"      { dom = $3 }
+    $1 == "on" {
+      # `on <fqdn> <short> {` (the deploy template) or `on <name> {`: the
+      # libvirt domain is the last token before the opening brace.
+      dom = $NF == "{" ? $(NF - 1) : $NF
+    }
     $1 == "address" && index($0, ip ":") { print dom; exit }
   ' /etc/drbd.d/cms_data.res 2>/dev/null)
   echo "$dom"
@@ -106,28 +118,32 @@ while true; do
 
     # Ensure Kubernetes label and pod placement are consistent
     if command -v kubectl &>/dev/null && [ -f "$KUBECONFIG" ] && kubectl get nodes --request-timeout=3s &>/dev/null; then
-      LOCAL_NODE=$(kubectl get nodes --request-timeout=3s -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
-      CURRENT_LABEL=$(kubectl get node "$LOCAL_NODE" --request-timeout=3s -o jsonpath='{.metadata.labels.drbd-status}' 2>/dev/null || true)
-      if [ "$CURRENT_LABEL" != "primary" ]; then
-        log "Applying missing drbd-status=primary label to $LOCAL_NODE in Kubernetes..."
-        kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite --request-timeout=3s 2>/dev/null || true
-      fi
+      LOCAL_NODE=$(local_k8s_node)
+      if [ -z "$LOCAL_NODE" ]; then
+        log "WARNING: $(hostname) is not registered as a Kubernetes node yet; skipping label and pod maintenance."
+      else
+        CURRENT_LABEL=$(kubectl get node "$LOCAL_NODE" --request-timeout=3s -o jsonpath='{.metadata.labels.drbd-status}' 2>/dev/null || true)
+        if [ "$CURRENT_LABEL" != "primary" ]; then
+          log "Applying missing drbd-status=primary label to $LOCAL_NODE in Kubernetes..."
+          kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite --request-timeout=3s 2>/dev/null || true
+        fi
 
-      # A demote scales the StatefulSet to zero; make sure a node that is
-      # Primary again (boot, manual promotion, or a previous failed failover)
-      # brings the database back instead of leaving it scaled down.
-      kubectl scale statefulset mariadb -n cms --replicas=1 --request-timeout=3s 2>/dev/null || true
+        # A demote scales the StatefulSet to zero; make sure a node that is
+        # Primary again (boot, manual promotion, or a previous failed failover)
+        # brings the database back instead of leaving it scaled down.
+        kubectl scale statefulset mariadb -n cms --replicas=1 --request-timeout=3s 2>/dev/null || true
 
-      # Verify MariaDB pod is scheduled on this node
-      CURRENT_POD_NODE=$(kubectl get pod mariadb-0 -n cms --request-timeout=3s -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
-      if [ -n "$CURRENT_POD_NODE" ] && [ "$CURRENT_POD_NODE" != "$LOCAL_NODE" ]; then
-        # A graceful delete is not enough: the pod object stays in Terminating
-        # while its old node is unreachable, and the StatefulSet cannot create
-        # the replacement until the object is gone. The peer was fenced off
-        # before this node was promoted, so a forced delete cannot split the
-        # volume and is what actually moves the database here.
-        log "MariaDB pod scheduled on non-primary node ($CURRENT_POD_NODE). Force-deleting it so it can reschedule to $LOCAL_NODE..."
-        kubectl delete pod mariadb-0 -n cms --force --grace-period=0 --request-timeout=3s 2>/dev/null || true
+        # Verify MariaDB pod is scheduled on this node
+        CURRENT_POD_NODE=$(kubectl get pod mariadb-0 -n cms --request-timeout=3s -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+        if [ -n "$CURRENT_POD_NODE" ] && [ "$CURRENT_POD_NODE" != "$LOCAL_NODE" ]; then
+          # A graceful delete is not enough: the pod object stays in Terminating
+          # while its old node is unreachable, and the StatefulSet cannot create
+          # the replacement until the object is gone. The peer was fenced off
+          # before this node was promoted, so a forced delete cannot split the
+          # volume and is what actually moves the database here.
+          log "MariaDB pod scheduled on non-primary node ($CURRENT_POD_NODE). Force-deleting it so it can reschedule to $LOCAL_NODE..."
+          kubectl delete pod mariadb-0 -n cms --force --grace-period=0 --request-timeout=3s 2>/dev/null || true
+        fi
       fi
     fi
 
@@ -147,11 +163,13 @@ while true; do
 
     # Secondary cleanup: Ensure primary label is removed in Kubernetes
     if command -v kubectl &>/dev/null && [ -f "$KUBECONFIG" ] && kubectl get nodes --request-timeout=3s &>/dev/null; then
-      LOCAL_NODE=$(kubectl get nodes --request-timeout=3s -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
-      CURRENT_LABEL=$(kubectl get node "$LOCAL_NODE" --request-timeout=3s -o jsonpath='{.metadata.labels.drbd-status}' 2>/dev/null || true)
-      if [ "$CURRENT_LABEL" = "primary" ]; then
-        log "Local node is Secondary but has primary label in Kubernetes. Removing label..."
-        kubectl label node "$LOCAL_NODE" drbd-status- --request-timeout=3s 2>/dev/null || true
+      LOCAL_NODE=$(local_k8s_node)
+      if [ -n "$LOCAL_NODE" ]; then
+        CURRENT_LABEL=$(kubectl get node "$LOCAL_NODE" --request-timeout=3s -o jsonpath='{.metadata.labels.drbd-status}' 2>/dev/null || true)
+        if [ "$CURRENT_LABEL" = "primary" ]; then
+          log "Local node is Secondary but has primary label in Kubernetes. Removing label..."
+          kubectl label node "$LOCAL_NODE" drbd-status- --request-timeout=3s 2>/dev/null || true
+        fi
       fi
     fi
 
@@ -183,7 +201,17 @@ while true; do
       PEER_IP=$(get_peer_ip)
     fi
 
-    if [ -n "$PEER_IP" ] && ping -c 1 -W 2 "$PEER_IP" &>/dev/null; then
+    # Without a peer address we can neither distinguish a dead peer from a
+    # network problem nor name the domain to fence. Suppress failover rather
+    # than promote blindly.
+    if [ -z "$PEER_IP" ]; then
+      log "ERROR: cannot determine the peer IP from /etc/drbd.d/cms_data.res; suppressing failover."
+      STRIKE_COUNT=0
+      sleep "$CHECK_INTERVAL"
+      continue
+    fi
+
+    if ping -c 1 -W 2 "$PEER_IP" &>/dev/null; then
       # Peer host is responsive to ICMP.
       # The peer machine is not dead; DRBD might be restarting or syncing.
       if [ $STRIKE_COUNT -gt 0 ]; then

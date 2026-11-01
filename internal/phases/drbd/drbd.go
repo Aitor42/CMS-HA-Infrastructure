@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 	"time"
@@ -23,6 +24,36 @@ import (
 // replicationWait is a variable so tests can exercise the failure path without
 // waiting five minutes. Production keeps the bounded retry budget.
 var replicationWait = retry.Config{MaxAttempts: 30, Interval: 5 * time.Second, Timeout: 5 * time.Minute}
+
+var (
+	// The local role is the resource line ("cms_data role:Primary"); the peer
+	// role appears on an indented "peer role:..." line and must not satisfy a
+	// check that the local node is Primary.
+	drbdLocalRolePattern = regexp.MustCompile(`(?m)^\S+\s+role:(Primary|Secondary|Unknown)\s*$`)
+	// The local disk state is the "  disk:UpToDate" line. The peer's state is
+	// reported as "peer-disk:..." and must not be mistaken for the local one:
+	// a Primary with a stale local disk would otherwise pass this gate because
+	// its healthy peer reports UpToDate.
+	drbdLocalDiskPattern = regexp.MustCompile(`(?m)^[ \t]+disk:(\S+)\s*$`)
+)
+
+// drbdLocalRole returns the local role from `drbdadm status` output, or "" when
+// the output does not contain a recognisable resource line.
+func drbdLocalRole(status string) string {
+	if m := drbdLocalRolePattern.FindStringSubmatch(status); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
+
+// drbdLocalDisk returns the local disk state from `drbdadm status` output, or
+// "" when it cannot be read.
+func drbdLocalDisk(status string) string {
+	if m := drbdLocalDiskPattern.FindStringSubmatch(status); len(m) == 2 {
+		return m[1]
+	}
+	return ""
+}
 
 // Phase implements the DRBD setup phase.
 type Phase struct {
@@ -216,10 +247,15 @@ func (p *Phase) resolvePrimary(ctx context.Context, pair []config.NodeDetail) (c
 		}
 		role := strings.TrimSpace(strings.SplitN(roleOut, "/", 2)[0])
 
-		diskOut, _, diskCode, diskErr := p.pool.RunCommand(ctx, node.IP, "drbdadm dstate cms_data")
-		disk := ""
-		if diskErr == nil && diskCode == 0 {
-			disk = strings.TrimSpace(strings.SplitN(diskOut, "/", 2)[0])
+		diskOut, diskErrOut, diskCode, diskErr := p.pool.RunCommand(ctx, node.IP, "drbdadm dstate cms_data")
+		if diskErr != nil || diskCode != 0 {
+			return config.NodeDetail{}, fmt.Errorf("read DRBD disk state on %s (exit %d): %v %s", node.Name, diskCode, diskErr, strings.TrimSpace(diskErrOut))
+		}
+		disk := strings.TrimSpace(strings.SplitN(diskOut, "/", 2)[0])
+		if disk == "" {
+			// Fail closed: promoting an unreadable disk could publish a stale
+			// copy as the authoritative one.
+			return config.NodeDetail{}, fmt.Errorf("DRBD disk state on %s is empty; refusing to promote without a known local disk state", node.Name)
 		}
 
 		state := peerState{node: node, role: role, disk: disk}
@@ -234,7 +270,7 @@ func (p *Phase) resolvePrimary(ctx context.Context, pair []config.NodeDetail) (c
 		// An existing Primary is authoritative, but only if its local disk is
 		// healthy. A Primary with an Inconsistent/Outdated disk would be
 		// mounted below and served as if it were the latest copy.
-		if primaries[0].disk != "" && primaries[0].disk != "UpToDate" {
+		if primaries[0].disk != "UpToDate" {
 			return config.NodeDetail{}, fmt.Errorf("refusing to use existing DRBD Primary %s: local disk state is %s, not UpToDate", primaries[0].node.Name, primaries[0].disk)
 		}
 		logging.Info("%s already holds the DRBD Primary role; leaving the role untouched.", primaries[0].node.Name)
@@ -260,8 +296,17 @@ func (p *Phase) resolvePrimary(ctx context.Context, pair []config.NodeDetail) (c
 
 	promoteCmd := "drbdadm primary cms_data"
 	if chosen.disk != "UpToDate" {
-		logging.Warn("No DRBD peer reports an UpToDate disk; forcing the initial promotion on %s.", chosen.node.Name)
-		promoteCmd += " --force"
+		// --force is only safe for a disk that has never held authoritative
+		// data (a brand-new pair is Inconsistent/Consistent). Forcing an
+		// Outdated, Failed or DUnknown disk would publish stale or unreadable
+		// data as the new authority.
+		switch chosen.disk {
+		case "Inconsistent", "Consistent":
+			logging.Warn("No DRBD peer reports an UpToDate disk; forcing the initial promotion on %s (local disk %s).", chosen.node.Name, chosen.disk)
+			promoteCmd += " --force"
+		default:
+			return config.NodeDetail{}, fmt.Errorf("refusing to promote %s: local disk state is %s, not UpToDate; resolve the disk before deploying", chosen.node.Name, chosen.disk)
+		}
 	}
 
 	logging.Info("Promoting %s to DRBD Primary...", chosen.node.Name)
@@ -290,11 +335,17 @@ func (p *Phase) waitForReplication(ctx context.Context, primary config.NodeDetai
 		// "Established"/"Connected" is only the connection state: the peer
 		// disk must also be UpToDate (or at least syncing) before the
 		// replica can be considered ready. A connection alone is not.
+		//
+		// Parse the local role and disk from their own lines: a substring
+		// match on "role:Primary"/"disk:UpToDate" would also match the peer's
+		// "peer role:Primary" or "peer-disk:UpToDate" line and accept a
+		// Primary whose local disk is stale.
+		role := drbdLocalRole(out)
+		localDisk := drbdLocalDisk(out)
 		connected := strings.Contains(out, "Established") || strings.Contains(out, "Connected")
-		localReady := strings.Contains(out, "disk:UpToDate")
 		diskReady := strings.Contains(out, "peer-disk:UpToDate") || strings.Contains(out, "ds:UpToDate") || strings.Contains(out, "SyncTarget")
-		if !strings.Contains(out, "role:Primary") || !localReady || !connected || !diskReady {
-			return fmt.Errorf("replication not ready: %s", strings.TrimSpace(out))
+		if role != "Primary" || localDisk != "UpToDate" || !connected || !diskReady {
+			return fmt.Errorf("replication not ready (local role %q, local disk %q): %s", role, localDisk, strings.TrimSpace(out))
 		}
 		return nil
 	})
@@ -330,8 +381,8 @@ func (p *Phase) updateFstab(ctx context.Context, pair []config.NodeDetail) {
 	logging.Info("Updating fstab and mount directory on masters...")
 	fstabCmd := "mkdir -p /mnt/data/mariadb && (grep -q '/dev/drbd0' /etc/fstab || echo '/dev/drbd0 /mnt/data/mariadb ext4 defaults,noauto 0 0' >> /etc/fstab)"
 	for _, ip := range []string{pair[0].IP, pair[1].IP} {
-		if _, _, _, err := p.pool.RunCommand(ctx, ip, fstabCmd); err != nil {
-			logging.Warn("failed to update fstab on %s: %v", ip, err)
+		if _, stderr, code, err := p.pool.RunCommand(ctx, ip, fstabCmd); err != nil || code != 0 {
+			logging.Warn("failed to update fstab on %s (exit %d): %v %s", ip, code, err, strings.TrimSpace(stderr))
 		}
 	}
 }
@@ -363,8 +414,8 @@ func (p *Phase) deployFailoverScripts(ctx context.Context, pair []config.NodeDet
 		if err := p.pool.CopyContent(ctx, ip, []byte(watchdogServiceContent), "/etc/systemd/system/drbd-failover-watchdog.service", 0644); err != nil {
 			return fmt.Errorf("failed to deploy watchdog service to %s: %w", ip, err)
 		}
-		if _, _, _, err := p.pool.RunCommand(ctx, ip, "systemctl daemon-reload && systemctl enable --now drbd-failover-watchdog.service && systemctl enable drbd.service"); err != nil {
-			return fmt.Errorf("failed to enable DRBD services on %s: %w", ip, err)
+		if _, stderr, code, err := p.pool.RunCommand(ctx, ip, "systemctl daemon-reload && systemctl enable --now drbd-failover-watchdog.service && systemctl enable drbd.service"); err != nil || code != 0 {
+			return fmt.Errorf("failed to enable DRBD services on %s (exit %d): %v %s", ip, code, err, strings.TrimSpace(stderr))
 		}
 	}
 	return nil
@@ -412,8 +463,8 @@ WantedBy=multi-user.target
 		cmd := "systemctl disable --now drbd-cms-primary.service 2>/dev/null; " +
 			"rm -f /etc/systemd/system/drbd-cms-primary.service; " +
 			"systemctl daemon-reload && systemctl enable drbd-cms-boot.service"
-		if _, _, _, err := p.pool.RunCommand(ctx, m.node.IP, cmd); err != nil {
-			return fmt.Errorf("failed to enable drbd-cms-boot.service on %s: %w", m.node.IP, err)
+		if _, stderr, code, err := p.pool.RunCommand(ctx, m.node.IP, cmd); err != nil || code != 0 {
+			return fmt.Errorf("failed to enable drbd-cms-boot.service on %s (exit %d): %v %s", m.node.IP, code, err, strings.TrimSpace(stderr))
 		}
 	}
 	return nil
@@ -496,8 +547,8 @@ func (p *Phase) deployFenceArtifacts(ctx context.Context, pair []config.NodeDeta
 	for i, node := range pair {
 		peer := pair[(i+1)%len(pair)] // DRBD cms_data is a 2-node resource
 
-		if _, _, _, err := p.pool.RunCommand(ctx, node.IP, "mkdir -p /etc/drbd-fence && chmod 700 /etc/drbd-fence"); err != nil {
-			return fmt.Errorf("failed to prepare /etc/drbd-fence on %s: %w", node.Name, err)
+		if _, stderr, code, err := p.pool.RunCommand(ctx, node.IP, "mkdir -p /etc/drbd-fence && chmod 700 /etc/drbd-fence"); err != nil || code != 0 {
+			return fmt.Errorf("failed to prepare /etc/drbd-fence on %s (exit %d): %v %s", node.Name, code, err, strings.TrimSpace(stderr))
 		}
 
 		if err := p.pool.CopyContent(ctx, node.IP, fenceScript, "/usr/local/bin/fence-peer.sh", 0755); err != nil {

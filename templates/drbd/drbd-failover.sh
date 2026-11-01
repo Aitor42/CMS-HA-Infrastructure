@@ -13,6 +13,17 @@ RESOURCE="cms_data"
 MOUNT_POINT="/mnt/data/mariadb"
 DRBD_DEVICE="/dev/drbd0"
 
+# Resolve this host's Kubernetes node object. Node names are usually the VM's
+# short hostname but may be the FQDN; compare the first label so that
+# "internal-master1" never matches "internal-master10". Prints nothing when the
+# host is not registered, and the callers skip label/pod maintenance.
+local_k8s_node() {
+  local short="${HOSTNAME%%.*}"
+  kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+    | tr ' ' '\n' \
+    | awk -v h="$short" 'NF { n=$0; sub(/\..*/, "", n); if (n == h) { print $0; exit } }'
+}
+
 case "${1:-status}" in
   promote)
     echo "[FAILOVER] Promoting local node to Primary..."
@@ -44,32 +55,35 @@ case "${1:-status}" in
     export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
     if command -v kubectl &>/dev/null && [ -f "$KUBECONFIG" ]; then
       echo "  [+] Updating availability labels in Kubernetes..."
-      LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
-      if [ -n "$LOCAL_NODE" ]; then
+      LOCAL_NODE=$(local_k8s_node)
+      if [ -z "$LOCAL_NODE" ]; then
+        echo "  ! $(hostname) is not registered as a Kubernetes node yet; skipping label and pod reschedule."
+      else
         kubectl label node "$LOCAL_NODE" drbd-status=primary --overwrite || true
-        # Clear the stale label from every other master, not just one peer:
-        # with three control-plane nodes a singular "peer" can miss the old
-        # primary and leave a secondary matching the MariaDB node affinity.
-        for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "master" | grep -vx "$LOCAL_NODE" || true); do
+        # Clear the stale label from every node that still advertises itself
+        # as the primary, not just from nodes whose name contains "master":
+        # a custom-named control-plane node would otherwise keep the label and
+        # match the MariaDB node affinity alongside the new Primary.
+        for node in $(kubectl get nodes -l drbd-status=primary -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep -vx "$LOCAL_NODE" || true); do
           kubectl label node "$node" drbd-status- 2>/dev/null || true
         done
-      fi
 
-      # Trigger pod reschedule to the new Primary node.
-      #
-      # A pod that lived on the failed node stays in Terminating until that
-      # node's kubelet confirms the deletion, and a dead kubelet never does.
-      # A StatefulSet must see its old pod object disappear before it creates
-      # the replacement, so a graceful delete here leaves the database down
-      # until the failed node comes back. The peer was fenced off before this
-      # script ran, so nothing is writing the volume and a forced delete is
-      # safe: it lets the StatefulSet recreate the pod on the new Primary.
-      echo "  [+] Ensuring MariaDB runs on new Primary..."
-      POD_NODE=$(kubectl get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
-      if [ -n "$POD_NODE" ] && [ "$POD_NODE" != "$LOCAL_NODE" ]; then
-        kubectl delete pod mariadb-0 -n cms --force --grace-period=0 --request-timeout=10s 2>/dev/null || true
+        # Trigger pod reschedule to the new Primary node.
+        #
+        # A pod that lived on the failed node stays in Terminating until that
+        # node's kubelet confirms the deletion, and a dead kubelet never does.
+        # A StatefulSet must see its old pod object disappear before it creates
+        # the replacement, so a graceful delete here leaves the database down
+        # until the failed node comes back. The peer was fenced off before this
+        # script ran, so nothing is writing the volume and a forced delete is
+        # safe: it lets the StatefulSet recreate the pod on the new Primary.
+        echo "  [+] Ensuring MariaDB runs on new Primary..."
+        POD_NODE=$(kubectl get pod mariadb-0 -n cms -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+        if [ -n "$POD_NODE" ] && [ "$POD_NODE" != "$LOCAL_NODE" ]; then
+          kubectl delete pod mariadb-0 -n cms --force --grace-period=0 --request-timeout=10s 2>/dev/null || true
+        fi
+        kubectl scale statefulset mariadb -n cms --replicas=1 2>/dev/null || true
       fi
-      kubectl scale statefulset mariadb -n cms --replicas=1 2>/dev/null || true
     fi
 
     echo "  ✔ Failover complete. This node is now the Primary."
@@ -106,8 +120,10 @@ case "${1:-status}" in
         sleep 2
       done
       echo "  [+] Removing Kubernetes labels..."
-      LOCAL_NODE=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null | tr ' ' '\n' | grep "$(hostname)" | head -n 1 || hostname)
-      kubectl label node "$LOCAL_NODE" drbd-status- 2>/dev/null || true
+      LOCAL_NODE=$(local_k8s_node)
+      if [ -n "$LOCAL_NODE" ]; then
+        kubectl label node "$LOCAL_NODE" drbd-status- 2>/dev/null || true
+      fi
     fi
 
     if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
