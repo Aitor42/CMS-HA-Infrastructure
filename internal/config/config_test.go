@@ -55,11 +55,11 @@ func TestModeDefaultsAndNormalisation(t *testing.T) {
 
 func TestSSHAccessors(t *testing.T) {
 	c := &Config{}
-	if got := c.SSHUser(); got != "root" {
-		t.Fatalf("default SSH user = %q, want root", got)
+	if got := c.SSHUser(); got != "ubuntu" {
+		t.Fatalf("default SSH user = %q, want ubuntu", got)
 	}
-	if got := c.SSHUser(); got != "root" {
-		t.Fatalf("default SSH user = %q, want root", got)
+	if got := c.SSHUser(); got != "ubuntu" {
+		t.Fatalf("default SSH user = %q, want ubuntu", got)
 	}
 
 	c.SSH.User = "ubuntu"

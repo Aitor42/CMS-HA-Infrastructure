@@ -26,13 +26,15 @@ func (c *Config) ClientProvisioningMode() string {
 }
 
 // SSHUser returns the account used for every SSH connection. It defaults to
-// "root" so configurations predating the non-root deploy account keep working;
-// config.yaml sets "ubuntu" (the account created by the installers).
+// "ubuntu", the non-root deploy account both installers create. Returning
+// "root" here (the old fallback) contradicted the installers: they disable
+// root logins and create only the deploy account, so a configuration without
+// ssh.user could never log in.
 func (c *Config) SSHUser() string {
 	if u := strings.TrimSpace(c.SSH.User); u != "" {
 		return u
 	}
-	return "root"
+	return "ubuntu"
 }
 
 // SSHKnownHostsFile returns the TOFU known_hosts path, defaulting to

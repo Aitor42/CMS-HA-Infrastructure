@@ -43,8 +43,8 @@ type VMConfig struct {
 // SSHConfig controls the deploy account, key and host-key verification.
 type SSHConfig struct {
 	// User is the non-root account the orchestrator logs in as. Privileged
-	// commands are elevated with `sudo -n`; empty falls back to "root" for
-	// backwards compatibility.
+	// commands are elevated with `sudo -n`; empty falls back to "ubuntu", the
+	// account the installers create.
 	User string `yaml:"user"`
 	// KnownHostsFile is the TOFU database used to pin VM host keys.
 	KnownHostsFile string        `yaml:"known_hosts_file"`

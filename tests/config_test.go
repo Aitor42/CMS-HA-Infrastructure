@@ -883,10 +883,10 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 		}
 	})
 
-	t.Run("empty ssh.user falls back to root for backwards compatibility", func(t *testing.T) {
+	t.Run("empty ssh.user falls back to the installer deploy account", func(t *testing.T) {
 		cfg := &config.Config{}
-		if got := cfg.SSHUser(); got != "root" {
-			t.Errorf("SSHUser() = %q, want root", got)
+		if got := cfg.SSHUser(); got != "ubuntu" {
+			t.Errorf("SSHUser() = %q, want ubuntu", got)
 		}
 	})
 
@@ -895,6 +895,14 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 		cfg.SSH.User = "bad user; rm -rf /"
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for an invalid ssh.user")
+		}
+	})
+
+	t.Run("validation rejects root as the deploy account", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.SSH.User = "root"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "non-root") {
+			t.Fatalf("Validate() = %v, want the non-root ssh.user error", err)
 		}
 	})
 

@@ -51,6 +51,9 @@ func (c *Config) validateDeploy() error {
 	if c.SSH.User != "" && !validUnixUser.MatchString(c.SSH.User) {
 		return fmt.Errorf("ssh.user is not a valid Unix user name: %q", c.SSH.User)
 	}
+	if c.SSH.User == "root" {
+		return fmt.Errorf("ssh.user must be a non-root deploy account; every installer disables direct root logins")
+	}
 	if c.Deploy.InstallBatchSize < 0 {
 		return fmt.Errorf("deploy.install_batch_size must not be negative (got %d)", c.Deploy.InstallBatchSize)
 	}
