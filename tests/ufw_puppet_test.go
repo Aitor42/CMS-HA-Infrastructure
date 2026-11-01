@@ -65,8 +65,12 @@ func TestJumpstartUFWScopesProvisioningServices(t *testing.T) {
 	for _, want := range []string{
 		"$provisioning_sources = [$internal_cidr, $main_cidr]",
 		"ufw-remove-public-provisioning-rules",
-		"ufw allow in on enp1s0 to any port 67 proto udp",
-		"ufw allow in on enp2s0 to any port 67 proto udp",
+		// The interface is resolved from the configured address instead of
+		// assuming the libvirt NIC order.
+		"lookup('cms_ha::internal_cidr'",
+		"lookup('cms_ha::main_cidr'",
+		"ufw allow in on ${internal_iface} to any port 67 proto udp",
+		"ufw allow in on ${main_iface} to any port 67 proto udp",
 	} {
 		if !strings.Contains(jumpstart, want) {
 			t.Errorf("jumpstart.pp is missing %q", want)

@@ -11,6 +11,9 @@ class role::k3s_master {
 
   include role::base
 
+  $internal_cidr = lookup('cms_ha::internal_cidr', String, undef, '192.168.10.0/24')
+  $monitor_ip = lookup('cms_ha::monitor_ip', String, undef, '192.168.10.20')
+
   # ---------------------------------------------------------------------------
   # PACKAGES — Prerequisites for K3s
   # ---------------------------------------------------------------------------
@@ -154,7 +157,7 @@ class role::k3s_master {
 
   # etcd peer communication (HA cluster)
   exec { 'ufw-etcd-peers':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 2379:2380 proto tcp comment "etcd"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 2379:2380 proto tcp comment \"etcd\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2379:2380/tcp"',
     require => Exec['ufw-enable'],
   }
@@ -162,21 +165,21 @@ class role::k3s_master {
   # etcd metrics (k3s supervisor, exposed with --etcd-expose-metrics).
   # Prometheus on internal-monitor scrapes them for the EtcdNoQuorum alert.
   exec { 'ufw-etcd-metrics':
-    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 2381 proto tcp comment "etcd metrics"',
+    command => "/usr/sbin/ufw allow from ${monitor_ip} to any port 2381 proto tcp comment \"etcd metrics\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2381"',
     require => Exec['ufw-enable'],
   }
 
   # Kubelet API (required for kubectl exec, logs, metrics)
   exec { 'ufw-kubelet':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 10250 proto tcp comment "Kubelet API"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 10250 proto tcp comment \"Kubelet API\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "10250/tcp"',
     require => Exec['ufw-enable'],
   }
 
   # Flannel VXLAN overlay network
   exec { 'ufw-flannel-vxlan':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 8472 proto udp comment "Flannel VXLAN"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 8472 proto udp comment \"Flannel VXLAN\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "8472/udp"',
     require => Exec['ufw-enable'],
   }
@@ -190,14 +193,14 @@ class role::k3s_master {
 
   # mysqld_exporter metrics
   exec { 'ufw-mysqld-exporter':
-    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 9104 proto tcp comment "mysqld_exporter"',
+    command => "/usr/sbin/ufw allow from ${monitor_ip} to any port 9104 proto tcp comment \"mysqld_exporter\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9104"',
     require => Exec['ufw-enable'],
   }
 
   # DRBD replication port (master1 ↔ master2)
   exec { 'ufw-drbd':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 7788 proto tcp comment "DRBD replication"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 7788 proto tcp comment \"DRBD replication\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "7788/tcp"',
     require => Exec['ufw-enable'],
   }

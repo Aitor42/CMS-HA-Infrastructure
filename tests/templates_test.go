@@ -325,6 +325,114 @@ func puppetStringParam(t *testing.T, manifest, name string) string {
 	return ""
 }
 
+// TestTemplates_PuppetRolesReadTopologyFromHiera keeps the manifests free of
+// the default lab's addresses and account. The phase generates site.pp and
+// data/common.yaml from config.yaml; a role that hardcodes a CIDR, the deploy
+// user or a node address would silently keep the default topology on a custom
+// deployment (and, for the deploy user, undo the ssh.user fix).
+func TestTemplates_PuppetRolesReadTopologyFromHiera(t *testing.T) {
+	hiera, err := os.ReadFile(repoFile(t, "puppet/hiera.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read puppet/hiera.yaml: %v", err)
+	}
+	for _, want := range []string{"version: 5", "datadir: data", "path: \"common.yaml\""} {
+		if !strings.Contains(string(hiera), want) {
+			t.Errorf("puppet/hiera.yaml is missing %q", want)
+		}
+	}
+
+	raw, err := os.ReadFile(repoFile(t, "puppet/data/common.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read puppet/data/common.yaml: %v", err)
+	}
+	var data map[string]string
+	if err := yaml.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("puppet/data/common.yaml is not valid YAML: %v", err)
+	}
+	for _, key := range []string{
+		"cms_ha::deploy_user",
+		"cms_ha::jumpstart_ip",
+		"cms_ha::jumpstart_ip_main",
+		"cms_ha::internal_cidr",
+		"cms_ha::main_cidr",
+		"cms_ha::main_vip",
+		"cms_ha::monitor_ip",
+		"cms_ha::storage_ip",
+		"cms_ha::hosts_content",
+	} {
+		if data[key] == "" {
+			t.Errorf("puppet/data/common.yaml is missing %s", key)
+		}
+	}
+
+	lookups := map[string][]string{
+		"base.pp":         {"cms_ha::deploy_user", "cms_ha::jumpstart_ip", "cms_ha::monitor_ip", "cms_ha::hosts_content"},
+		"jumpstart.pp":    {"cms_ha::internal_cidr", "cms_ha::main_cidr", "cms_ha::jumpstart_ip", "cms_ha::jumpstart_ip_main"},
+		"router.pp":       {"cms_ha::internal_cidr", "cms_ha::main_cidr", "cms_ha::main_vip", "cms_ha::monitor_ip"},
+		"storage.pp":      {"cms_ha::main_cidr"},
+		"cms_frontend.pp": {"cms_ha::storage_ip", "cms_ha::monitor_ip"},
+		"monitor.pp":      {"cms_ha::internal_cidr"},
+		"k3s_master.pp":   {"cms_ha::internal_cidr", "cms_ha::monitor_ip"},
+		"k3s_worker.pp":   {"cms_ha::internal_cidr"},
+		"loadbalancer.pp": {"cms_ha::main_cidr", "cms_ha::monitor_ip"},
+	}
+	for file, keys := range lookups {
+		content := string(mustRead(t, "puppet/modules/role/manifests/"+file))
+		for _, key := range keys {
+			if !strings.Contains(content, "lookup('"+key+"'") {
+				t.Errorf("%s does not read %s from Hiera", file, key)
+			}
+		}
+	}
+
+	forbidden := map[string][]string{
+		"base.pp": {
+			"Defaults:ubuntu",
+			"server 192.168.10.10",
+			"192.168.10.20   internal-monitor",
+		},
+		"jumpstart.pp":    {"allow in on enp1s0", "allow in on enp2s0", "allow from 192.168.10.0/24"},
+		"router.pp":       {"from 192.168.20.0/24 to any", "to 192.168.20.100 port", "from 192.168.10.20"},
+		"storage.pp":      {"/srv/nfs/wp-uploads 192.168.20.0/24", "from 192.168.20.0/24 to any"},
+		"cms_frontend.pp": {"device  => '192.168.10.15:", "from 192.168.10.20 to any port 9117"},
+		"monitor.pp":      {"from 192.168.10.0/24"},
+		"k3s_master.pp":   {"from 192.168.10.0/24", "from 192.168.10.20"},
+		"k3s_worker.pp":   {"from 192.168.10.0/24"},
+		"loadbalancer.pp": {
+			"$lb_is_master = $facts['networking']['hostname']",
+			"${vip}/24",
+			"from 192.168.10.20 to any port 9113",
+			"from 192.168.20.0/24 proto vrrp",
+		},
+	}
+	for file, needles := range forbidden {
+		content := string(mustRead(t, "puppet/modules/role/manifests/"+file))
+		for _, needle := range needles {
+			if strings.Contains(content, needle) {
+				t.Errorf("%s still hardcodes %q instead of reading the generated topology", file, needle)
+			}
+		}
+	}
+
+	// The keepalived MASTER must follow the configured LB order, not the
+	// default "main-lb1" hostname.
+	lb := string(mustRead(t, "puppet/modules/role/manifests/loadbalancer.pp"))
+	for _, want := range []string{"Boolean $is_master", "$lb_is_master = $is_master"} {
+		if !strings.Contains(lb, want) {
+			t.Errorf("loadbalancer.pp is missing %q", want)
+		}
+	}
+}
+
+func mustRead(t *testing.T, rel string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(repoFile(t, rel))
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", rel, err)
+	}
+	return data
+}
+
 func TestTemplates_NginxConfigMatchesLabConfig(t *testing.T) {
 	// The vhost, upstream pool and keepalived addresses are duplicated in
 	// Puppet because it has no access to config.yaml. Pin the copies to both

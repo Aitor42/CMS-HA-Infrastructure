@@ -79,9 +79,14 @@ func (c *Config) MainNodes() []NodeSpec {
 // HotdeskSpecs synthesises the hotdesk nodes from Nodes.Hotdesks.Count and
 // BaseIPOctet.
 func (c *Config) HotdeskSpecs() []NodeSpec {
-	// Hotdesks live on the main network, so derive their address range from the
-	// configured CIDR instead of hardcoding 192.168.20.0/24.
+	// Hotdesks live on the main network, so derive their address range and DNS
+	// domain from the configured network instead of hardcoding 192.168.20.0/24
+	// and main.local.
 	prefix := PrefixFromCIDR(c.Network.Main.CIDR, "192.168.20.")
+	domain := strings.TrimSpace(c.Network.Main.Domain)
+	if domain == "" {
+		domain = "main.local"
+	}
 	var nodes []NodeSpec
 	for i := 1; i <= c.Nodes.Hotdesks.Count; i++ {
 		lastOctet := 200 + i
@@ -91,7 +96,7 @@ func (c *Config) HotdeskSpecs() []NodeSpec {
 		nodes = append(nodes, NodeSpec{
 			Name:         fmt.Sprintf("main-hotdesk%d", i),
 			IP:           fmt.Sprintf("%s%d", prefix, lastOctet),
-			FQDN:         fmt.Sprintf("main-hotdesk%d.main.local", i),
+			FQDN:         fmt.Sprintf("main-hotdesk%d.%s", i, domain),
 			MAC:          fmt.Sprintf("52:54:00:10:02:%02x", lastOctet),
 			RAMInstallMB: c.Nodes.Hotdesks.RAMInstallMB,
 			RAMFinalMB:   c.Nodes.Hotdesks.RAMFinalMB,

@@ -9,6 +9,11 @@ class role::loadbalancer (
   # certificate, the keepalived instance and the VIP metrics publisher. The
   # values must match network.main.vip and nodes.lb* in config.yaml;
   # tests/templates_test.go asserts that drift stays visible.
+  #
+  # `is_master` comes from the generated classifier, which knows the configured
+  # LB order. The default only keeps the committed site.pp (manual runs) working
+  # and must not be used to decide roles when the generated site.pp is present.
+  Boolean $is_master     = $facts['networking']['hostname'] == 'main-lb1',
   String $cms_vhost      = 'cms.fake-enterprise.com',
   String $vip            = '192.168.20.100',
   String $master_ip      = '192.168.20.103',
@@ -17,6 +22,12 @@ class role::loadbalancer (
 ) {
 
   include role::base
+
+  $main_cidr = lookup('cms_ha::main_cidr', String, undef, '192.168.20.0/24')
+  $monitor_ip = lookup('cms_ha::monitor_ip', String, undef, '192.168.10.20')
+  # The VIP must be advertised with the main network's prefix, not a hardcoded
+  # /24: a non-/24 deployment would otherwise publish a VIP outside its subnet.
+  $vip_prefix = $main_cidr.split('/')[1]
 
   # ---------------------------------------------------------------------------
   # PACKAGES
@@ -164,12 +175,13 @@ class role::loadbalancer (
   }
 
   # ---------------------------------------------------------------------------
-  # KEEPALIVED — Floating VIP (192.168.20.100) shared by both LBs
+  # KEEPALIVED — Floating VIP shared by both LBs
   # ---------------------------------------------------------------------------
-  # main-lb1 is the preferred MASTER, main-lb2 the BACKUP. VRRP runs unicast
-  # between the two nodes over the main network; a track_script demotes a node
-  # whose nginx is unhealthy so the VIP follows a working balancer.
-  $lb_is_master = $facts['networking']['hostname'] == 'main-lb1'
+  # The first configured LB is the preferred MASTER, the second the BACKUP
+  # (the generated classifier passes `is_master`). VRRP runs unicast between the
+  # two nodes over the main network; a track_script demotes a node whose nginx
+  # is unhealthy so the VIP follows a working balancer.
+  $lb_is_master = $is_master
   $lb_peer  = $lb_is_master ? { true => $backup_ip, default => $master_ip }
   $lb_prio  = $lb_is_master ? { true => '101',       default => '100' }
   $lb_state = $lb_is_master ? { true => 'MASTER',    default => 'BACKUP' }
@@ -220,7 +232,7 @@ class role::loadbalancer (
               auth_pass ${vrrp_auth_pass}
           }
           virtual_ipaddress {
-              ${vip}/24
+              ${vip}/${vip_prefix}
           }
           track_script {
               chk_nginx
@@ -323,7 +335,7 @@ class role::loadbalancer (
   }
 
   exec { 'ufw-lb-nginx-exporter':
-    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 9113 proto tcp comment "nginx_exporter"',
+    command => "/usr/sbin/ufw allow from ${monitor_ip} to any port 9113 proto tcp comment \"nginx_exporter\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9113"',
     require => Exec['ufw-enable'],
   }
@@ -331,9 +343,9 @@ class role::loadbalancer (
   # Keepalived speaks VRRP (IP protocol 112) between the two balancers. ufw
   # only accepts protocol *names* from its supported list, so "proto 112" is
   # rejected ("ERROR: Unsupported protocol '112'") and the catalog fails; the
-  # supported spelling renders in `ufw status` as "192.168.20.0/24/vrrp".
+  # supported spelling renders in `ufw status` as "<cidr>/vrrp".
   exec { 'ufw-lb-vrrp':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 proto vrrp comment "keepalived VRRP"',
+    command => "/usr/sbin/ufw allow from ${main_cidr} proto vrrp comment \"keepalived VRRP\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "vrrp"',
     require => Exec['ufw-enable'],
   }

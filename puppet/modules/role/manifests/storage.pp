@@ -7,6 +7,8 @@ class role::storage {
 
   include role::base
 
+  $main_cidr = lookup('cms_ha::main_cidr', String, undef, '192.168.20.0/24')
+
   # ---------------------------------------------------------------------------
   # PACKAGES
   # ---------------------------------------------------------------------------
@@ -43,7 +45,7 @@ class role::storage {
     # Map every client identity to www-data instead of trusting root over NFS.
     # The CMS only needs to write uploads, and anonuid/anongid 33 keeps the
     # files usable by Apache without granting root on the storage server.
-    content => "/srv/nfs/wp-uploads 192.168.20.0/24(rw,sync,no_subtree_check,all_squash,anonuid=33,anongid=33)\n",
+    content => "/srv/nfs/wp-uploads ${main_cidr}(rw,sync,no_subtree_check,all_squash,anonuid=33,anongid=33)\n",
     require => [
       Package['nfs-kernel-server'],
       File['/srv/nfs/wp-uploads'],
@@ -70,14 +72,14 @@ class role::storage {
   # UFW — Firewall rules for NFS
   # ---------------------------------------------------------------------------
   exec { 'ufw-storage-nfs':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 2049 comment "NFS from Main subnet"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "2049.*192.168.20.0/24"',
+    command => "/usr/sbin/ufw allow from ${main_cidr} to any port 2049 comment \"NFS from Main subnet\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"2049.*${main_cidr}\"",
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-storage-rpcbind':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 to any port 111 comment "RPCbind from Main subnet"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "111.*192.168.20.0/24"',
+    command => "/usr/sbin/ufw allow from ${main_cidr} to any port 111 comment \"RPCbind from Main subnet\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"111.*${main_cidr}\"",
     require => Exec['ufw-enable'],
   }
 }

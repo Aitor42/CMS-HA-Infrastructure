@@ -244,7 +244,10 @@ func TestPhases_NFSStorageManifests(t *testing.T) {
 	for _, expected := range []string{
 		"'nfs-common'",
 		"/var/www/html/wp-content/uploads",
-		"192.168.10.15:/srv/nfs/wp-uploads",
+		// The storage address comes from Hiera (generated from config.yaml),
+		// not from a hardcoded default-lab address.
+		"lookup('cms_ha::storage_ip'",
+		"${storage_ip}:/srv/nfs/wp-uploads",
 		"fstype  => 'nfs'",
 		"nfsvers=4",
 		"Mount['/var/www/html/wp-content/uploads']",

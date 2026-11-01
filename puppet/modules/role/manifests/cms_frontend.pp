@@ -7,6 +7,9 @@ class role::cms_frontend {
 
   include role::base
 
+  $storage_ip = lookup('cms_ha::storage_ip', String, undef, '192.168.10.15')
+  $monitor_ip = lookup('cms_ha::monitor_ip', String, undef, '192.168.10.20')
+
   # The Ubuntu Noble revision of the PHP 8.3 branch that carries the fix for
   # CVE-2026-109618 and CVE-2026-109619 ("php2shell", published 2026-10-21).
   # Ubuntu backports the upstream patch instead of bumping the upstream
@@ -322,7 +325,7 @@ class role::cms_frontend {
 
   mount { '/var/www/html/wp-content/uploads':
     ensure  => present,
-    device  => '192.168.10.15:/srv/nfs/wp-uploads',
+    device  => "${storage_ip}:/srv/nfs/wp-uploads",
     fstype  => 'nfs',
     options => '_netdev,auto,nofail,rw,soft,timeo=50,retrans=3,nfsvers=4',
     require => [
@@ -333,7 +336,7 @@ class role::cms_frontend {
 
   exec { 'mount-wp-uploads':
     command => '/bin/mount /var/www/html/wp-content/uploads',
-    onlyif  => '/bin/bash -c "timeout 2 bash -c \": </dev/tcp/192.168.10.15/2049\" 2>/dev/null"',
+    onlyif  => "/bin/bash -c \"timeout 2 bash -c \\\": </dev/tcp/${storage_ip}/2049\\\" 2>/dev/null\"",
     unless  => '/bin/mountpoint -q /var/www/html/wp-content/uploads',
     require => Mount['/var/www/html/wp-content/uploads'],
   }
@@ -397,7 +400,7 @@ class role::cms_frontend {
   }
 
   exec { 'ufw-cms-apache-exporter':
-    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 9117 proto tcp comment "apache_exporter"',
+    command => "/usr/sbin/ufw allow from ${monitor_ip} to any port 9117 proto tcp comment \"apache_exporter\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9117"',
     require => Exec['ufw-enable'],
   }

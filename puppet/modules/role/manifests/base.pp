@@ -6,6 +6,20 @@
 
 class role::base {
 
+  # Topology values come from Hiera. `cms-ha phase setup-puppet` regenerates
+  # data/common.yaml from config.yaml, so a renamed node, a custom domain, a
+  # different subnet or a non-default deploy account never leaves a manifest
+  # pointing at the default lab. The defaults keep a manual Puppet run working
+  # against the committed data file.
+  $deploy_user = lookup('cms_ha::deploy_user', String, undef, 'ubuntu')
+  $jumpstart_ip = lookup('cms_ha::jumpstart_ip', String, undef, '192.168.10.10')
+  $monitor_ip = lookup('cms_ha::monitor_ip', String, undef, '192.168.10.20')
+  $hosts_content = lookup('cms_ha::hosts_content', String, undef, '')
+
+  if $hosts_content == '' {
+    fail('cms_ha::hosts_content is empty: generate puppet/data/common.yaml with `cms-ha phase setup-puppet`')
+  }
+
   # ---------------------------------------------------------------------------
   # PACKAGES
   # ---------------------------------------------------------------------------
@@ -23,7 +37,7 @@ class role::base {
     mode    => '0644',
     content => @("CHRONY"),
       # Internal NTP server (jumpstart)
-      server 192.168.10.10 iburst prefer
+      server ${jumpstart_ip} iburst prefer
       # Public fallback (only used when jumpstart is unreachable)
       pool ntp.ubuntu.com iburst
       # Force immediate step correction after resume from pause
@@ -88,9 +102,9 @@ class role::base {
     validate_cmd => '/usr/sbin/visudo -cf %',
     content      => @("SUDOERS"),
       # Managed by CMS-HA — non-root deploy account for the orchestrator.
-      Defaults:ubuntu !requiretty
+      Defaults:${deploy_user} !requiretty
       Defaults log_output
-      ubuntu ALL=(ALL) NOPASSWD:ALL
+      ${deploy_user} ALL=(ALL) NOPASSWD:ALL
       | SUDOERS
   }
 
@@ -129,37 +143,8 @@ class role::base {
       127.0.0.1       localhost
       127.0.1.1       ${facts['networking']['fqdn']} ${facts['networking']['hostname']}
 
-      # Perimeter router and firewall
-      192.168.10.1    ufw-router.internal.local ufw-router
-
-      # Jumpstart / Puppet Server / Internal CA (step-ca)
-      192.168.10.10   jumpstart.internal.local jumpstart puppet ca.internal.local ca
-
-      # Internal network (192.168.10.0/24)
-      192.168.10.20   internal-monitor.internal.local internal-monitor
-      192.168.10.11   internal-master1.internal.local internal-master1
-      192.168.10.12   internal-master2.internal.local internal-master2
-      192.168.10.16   internal-master3.internal.local internal-master3
-      192.168.10.13   internal-worker1.internal.local internal-worker1
-      192.168.10.14   internal-worker2.internal.local internal-worker2
-      192.168.10.15   internal-storage.internal.local internal-storage
-
-      # Main network (192.168.20.0/24)
-      192.168.20.100  main-lb.main.local main-lb   # keepalived VIP
-      192.168.20.103  main-lb1.main.local main-lb1
-      192.168.20.104  main-lb2.main.local main-lb2
-      192.168.20.101  main-cms1.main.local main-cms1
-      192.168.20.102  main-cms2.main.local main-cms2
-
-      # Hot-desk workstations
-      192.168.20.201  main-hotdesk1.main.local main-hotdesk1
-      192.168.20.202  main-hotdesk2.main.local main-hotdesk2
-      192.168.20.203  main-hotdesk3.main.local main-hotdesk3
-      192.168.20.204  main-hotdesk4.main.local main-hotdesk4
-      192.168.20.205  main-hotdesk5.main.local main-hotdesk5
-      192.168.20.206  main-hotdesk6.main.local main-hotdesk6
-      192.168.20.207  main-hotdesk7.main.local main-hotdesk7
-      192.168.20.208  main-hotdesk8.main.local main-hotdesk8
+      # Topology entries generated from config.yaml by the Puppet phase.
+      ${hosts_content}
       | HOSTS
   }
 
@@ -217,8 +202,8 @@ class role::base {
 
   # Allow node_exporter scraping from internal-monitor only
   exec { 'ufw-allow-node-exporter':
-    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 9100 proto tcp comment "node_exporter"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9100/tcp.*192.168.10.20"',
+    command => "/usr/sbin/ufw allow from ${monitor_ip} to any port 9100 proto tcp comment \"node_exporter\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"9100/tcp.*${monitor_ip}\"",
     require => Package['ufw'],
   }
 

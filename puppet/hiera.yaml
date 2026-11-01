@@ -1,0 +1,13 @@
+# Hiera 5 configuration for the production environment.
+#
+# `cms-ha phase setup-puppet` overwrites data/common.yaml with the values from
+# config.yaml before the agents run, so the manifests never have to embed a
+# topology. The committed data file keeps the default lab working for a manual
+# Puppet deployment.
+version: 5
+defaults:
+  datadir: data
+  data_hash: yaml_data
+hierarchy:
+  - name: "Common data"
+    path: "common.yaml"

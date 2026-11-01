@@ -9,6 +9,8 @@ class role::monitor {
 
   include role::base
 
+  $internal_cidr = lookup('cms_ha::internal_cidr', String, undef, '192.168.10.0/24')
+
   # ---------------------------------------------------------------------------
   # PROMETHEUS
   # ---------------------------------------------------------------------------
@@ -292,25 +294,25 @@ class role::monitor {
   # UFW — Firewall rules for the monitor node
   # ---------------------------------------------------------------------------
   exec { 'ufw-prometheus':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 9090 proto tcp comment "Prometheus"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 9090 proto tcp comment \"Prometheus\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9090"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-grafana':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 3000 proto tcp comment "Grafana"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 3000 proto tcp comment \"Grafana\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "3000"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-blackbox':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 9115 proto tcp comment "Blackbox exporter"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 9115 proto tcp comment \"Blackbox exporter\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9115"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-alertmanager':
-    command => '/usr/sbin/ufw allow from 192.168.10.0/24 to any port 9093 proto tcp comment "Alertmanager"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 9093 proto tcp comment \"Alertmanager\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9093"',
     require => Exec['ufw-enable'],
   }

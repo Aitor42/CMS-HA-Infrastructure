@@ -6,9 +6,25 @@
 class role::jumpstart {
   include role::base
 
-  $internal_cidr = '192.168.10.0/24'
-  $main_cidr = '192.168.20.0/24'
+  $internal_cidr = lookup('cms_ha::internal_cidr', String, undef, '192.168.10.0/24')
+  $main_cidr = lookup('cms_ha::main_cidr', String, undef, '192.168.20.0/24')
+  $jumpstart_ip = lookup('cms_ha::jumpstart_ip', String, undef, '192.168.10.10')
+  $jumpstart_ip_main = lookup('cms_ha::jumpstart_ip_main', String, undef, '192.168.20.10')
   $provisioning_sources = [$internal_cidr, $main_cidr]
+
+  # DHCP clients send from 0.0.0.0, so a source-CIDR rule cannot match them.
+  # Scope 67/udp to the interface that owns each lab address instead of
+  # hardcoding the libvirt NIC order (enp1s0/enp2s0): a domain with extra or
+  # reordered NICs would otherwise open DHCP on the wrong link.
+  $internal_iface = $facts['networking']['interfaces'].filter |$name, $data| {
+    $data['ip'] == $jumpstart_ip
+  }.keys[0]
+  $main_iface = $facts['networking']['interfaces'].filter |$name, $data| {
+    $data['ip'] == $jumpstart_ip_main
+  }.keys[0]
+  if $internal_iface == undef or $main_iface == undef {
+    fail("cannot find the interfaces that own ${jumpstart_ip} and ${jumpstart_ip_main}")
+  }
 
   # Older releases opened the provisioning services to any source. Remove
   # those broad rules before adding the scoped ones; otherwise an upgraded
@@ -81,18 +97,17 @@ class role::jumpstart {
     }
   }
 
-  # DHCP clients send from 0.0.0.0, so a source-CIDR rule cannot match them.
-  # Scope DHCP to the two provisioning interfaces instead of opening 67/udp
-  # on the WAN interface (enp3s0).
+  # Scope DHCP to the two provisioning interfaces instead of opening 67/udp on
+  # the WAN uplink.
   exec { 'ufw-allow-dhcp-internal':
-    command => '/usr/sbin/ufw allow in on enp1s0 to any port 67 proto udp comment "DHCP internal"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "67/udp on enp1s0.*ALLOW"',
+    command => "/usr/sbin/ufw allow in on ${internal_iface} to any port 67 proto udp comment \"DHCP internal\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"67/udp on ${internal_iface}.*ALLOW\"",
     require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
   }
 
   exec { 'ufw-allow-dhcp-main':
-    command => '/usr/sbin/ufw allow in on enp2s0 to any port 67 proto udp comment "DHCP main"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "67/udp on enp2s0.*ALLOW"',
+    command => "/usr/sbin/ufw allow in on ${main_iface} to any port 67 proto udp comment \"DHCP main\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -q \"67/udp on ${main_iface}.*ALLOW\"",
     require => [Exec['ufw-enable'], Exec['ufw-remove-public-provisioning-rules']],
   }
 

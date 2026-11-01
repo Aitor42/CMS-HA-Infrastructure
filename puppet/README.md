@@ -8,7 +8,9 @@ it re-applies its catalogue every 30 minutes.
 
 ```
 puppet/
-├── manifests/site.pp              # maps hostnames to role classes
+├── hiera.yaml                     # Hiera 5 configuration (data/common.yaml)
+├── data/common.yaml               # topology defaults; regenerated from config.yaml
+├── manifests/site.pp              # maps certnames to role classes
 └── modules/role/
     ├── manifests/                 # one class per node type
     │   ├── base.pp                # all nodes: node_exporter, chrony, UFW, swap, /etc/hosts, sudoers, sshd
@@ -41,6 +43,17 @@ puppet/
 
 Every role includes `role::base` first, so the base configuration is applied
 regardless of the node type.
+
+## Configuration data
+
+`config.yaml` is the single source of truth. Before the first catalog run,
+`cms-ha phase setup-puppet` overwrites `manifests/site.pp` with an exact
+certname classifier (so renamed nodes still get their role, and the first
+configured balancer is the keepalived MASTER) and `data/common.yaml` with the
+deploy account, jumpstart addresses, CIDRs, VIP, monitor/storage addresses and
+the generated `/etc/hosts` content. The committed files describe the default
+lab and let a manual Puppet run work; do not edit them expecting the change to
+survive a deployment.
 
 ## What Puppet manages
 

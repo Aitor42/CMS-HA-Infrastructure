@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -932,9 +933,9 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 	})
 }
 
-func TestConfig_HotdeskSpecsFollowMainCIDR(t *testing.T) {
+func TestConfig_HotdeskSpecsFollowMainCIDRAndDomain(t *testing.T) {
 	cfg := &config.Config{
-		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/24"}},
+		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/24", Domain: "lab.example"}},
 		Nodes:   config.NodesConfig{Hotdesks: config.HotdesksConf{Count: 2, BaseIPOctet: 201}},
 	}
 	specs := cfg.HotdeskSpecs()
@@ -946,6 +947,19 @@ func TestConfig_HotdeskSpecsFollowMainCIDR(t *testing.T) {
 	}
 	if got, want := specs[1].IP, "10.0.30.202"; got != want {
 		t.Errorf("hotdesk IP = %q, want %q (derived from network.main.cidr)", got, want)
+	}
+	for i, spec := range specs {
+		want := fmt.Sprintf("main-hotdesk%d.lab.example", i+1)
+		if spec.FQDN != want {
+			t.Errorf("hotdesk FQDN = %q, want %q (derived from network.main.domain)", spec.FQDN, want)
+		}
+	}
+
+	// An unset domain keeps the historical default instead of producing
+	// "main-hotdesk1." with an empty label.
+	cfg.Network.Main.Domain = ""
+	if got, want := cfg.HotdeskSpecs()[0].FQDN, "main-hotdesk1.main.local"; got != want {
+		t.Errorf("hotdesk FQDN without a domain = %q, want %q", got, want)
 	}
 }
 
