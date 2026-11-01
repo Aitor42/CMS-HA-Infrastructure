@@ -31,6 +31,7 @@ package routerbootstrap
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -62,6 +63,10 @@ const (
 	// probeAttempts absorbs a transient DNS/HTTP hiccup.
 	probeAttempts = 3
 )
+
+// ifaceNamePattern accepts the names Linux allows for a network interface
+// (IFNAMSIZ is 16 bytes, including the terminator).
+var ifaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.:@-]{1,15}$`)
 
 // Phase implements the router bootstrap.
 type Phase struct {
@@ -132,10 +137,14 @@ func (p *Phase) ensureAddresses(ctx context.Context, router config.NodeDetail) e
 	}
 	logging.Info("Router interfaces: internal=%s main=%s wan=%s", intName, mainName, wanName)
 
-	intAddr := withPrefix(router.IP, p.cfg.Network.Internal.CIDR, "24")
-	mainAddr := withPrefix(p.cfg.Network.Main.Gateway, p.cfg.Network.Main.CIDR, "24")
-	if mainAddr == "" {
-		return fmt.Errorf("cannot determine the router's main-network address (network.main.gateway)")
+	// The router carries the gateway address of each network, not whichever
+	// address nodes.router.ip happens to have: the DHCP option routers and
+	// every client default route point at network.*.gateway. Validation keeps
+	// router.ip equal to the internal gateway when it is set, but deriving the
+	// address here as well makes the invariant local and testable.
+	intAddr, mainAddr, err := routerGatewayAddresses(p.cfg)
+	if err != nil {
+		return err
 	}
 
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/ufw/netplan-router.yaml")
@@ -358,8 +367,11 @@ func (p *Phase) probeFrom(ctx context.Context, host, label string) error {
 	logging.Info("Downloading %s from %s...", probeURL, label)
 	// wget is what the Puppet phase itself uses; curl is only a fallback so a
 	// minimal image still gives a meaningful probe result.
+	// --tries=1 matters: wget defaults to 20 tries, so a blackholed route
+	// would turn one 20s timeout into ~400s before the phase reports the
+	// failure it already knows about.
 	cmd := fmt.Sprintf(`if command -v wget >/dev/null 2>&1; then
-  wget -q -T %[1]d -O /dev/null %[2]s
+  wget -q --tries=1 -T %[1]d -O /dev/null %[2]s
 else
   curl -fsS -m %[1]d -o /dev/null %[2]s
 fi
@@ -413,7 +425,7 @@ func (p *Phase) waitForAddresses(ctx context.Context, host string, addrs []strin
 	for attempt := 0; attempt < 12; attempt++ {
 		missing = nil
 		for _, addr := range addrs {
-			cmd := fmt.Sprintf("ip -4 -o addr show | awk '{print $4}' | grep -qx %s", addr)
+			cmd := fmt.Sprintf("ip -4 -o addr show | awk '{print $4}' | grep -Fqx %s", addr)
 			if _, _, code, err := p.pool.RunCommand(ctx, host, cmd); err != nil || code != 0 {
 				missing = append(missing, addr)
 			}
@@ -453,6 +465,12 @@ func (p *Phase) ifaceByMAC(ctx context.Context, host, mac string) (string, error
 	if mac == "" {
 		return "", fmt.Errorf("no MAC configured")
 	}
+	// The MAC is interpolated into an awk filter. The config validator checks
+	// router MACs, but this function is also reachable with a partial config;
+	// an unvalidated value would break the expression or match the wrong link.
+	if !config.ValidMAC(mac) {
+		return "", fmt.Errorf("invalid MAC address %q", mac)
+	}
 	cmd := fmt.Sprintf("ip -o link | awk '/%s/ {print $2}' | sed 's/://'", mac)
 	out, _, _, err := p.pool.RunCommand(ctx, host, cmd)
 	if err != nil {
@@ -462,7 +480,31 @@ func (p *Phase) ifaceByMAC(ctx context.Context, host, mac string) (string, error
 	if name == "" {
 		return "", fmt.Errorf("no interface with MAC %s on %s", mac, host)
 	}
+	// A MAC shared by two links returns two names; rendering that into the
+	// netplan would produce an interface key with whitespace and a config
+	// netplan cannot parse, after the point where the old one is backed up.
+	if strings.ContainsAny(name, " \t\r\n") {
+		return "", fmt.Errorf("MAC %s matches multiple interfaces on %s: %q", mac, host, name)
+	}
+	if !ifaceNamePattern.MatchString(name) {
+		return "", fmt.Errorf("MAC %s resolved to an invalid interface name %q", mac, name)
+	}
 	return name, nil
+}
+
+// routerGatewayAddresses returns the internal and main addresses the router
+// must own. Both come from the network definitions because the clients' DHCP
+// gateway and default routes point there, not at nodes.router.ip.
+func routerGatewayAddresses(cfg *config.Config) (string, string, error) {
+	intAddr := withPrefix(cfg.Network.Internal.Gateway, cfg.Network.Internal.CIDR, "24")
+	if intAddr == "" {
+		return "", "", fmt.Errorf("cannot determine the router's internal address (network.internal.gateway)")
+	}
+	mainAddr := withPrefix(cfg.Network.Main.Gateway, cfg.Network.Main.CIDR, "24")
+	if mainAddr == "" {
+		return "", "", fmt.Errorf("cannot determine the router's main-network address (network.main.gateway)")
+	}
+	return intAddr, mainAddr, nil
 }
 
 // withPrefix turns a bare IPv4 address into an address/prefix pair, taking the

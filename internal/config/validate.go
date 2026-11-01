@@ -66,12 +66,6 @@ func (c *Config) validateDeploy() error {
 // validateNetworks checks the CIDRs both subnets are built from, and the
 // interface and DNS domain names that go into the libvirt network XML.
 func (c *Config) validateNetworks() error {
-	if _, _, err := net.ParseCIDR(c.Network.Internal.CIDR); err != nil {
-		return fmt.Errorf("network.internal.cidr is not a valid CIDR: %w", err)
-	}
-	if _, _, err := net.ParseCIDR(c.Network.Main.CIDR); err != nil {
-		return fmt.Errorf("network.main.cidr is not a valid CIDR: %w", err)
-	}
 	for _, n := range []struct {
 		name string
 		net  NetworkDetail
@@ -79,6 +73,21 @@ func (c *Config) validateNetworks() error {
 		{"internal", c.Network.Internal},
 		{"main", c.Network.Main},
 	} {
+		_, ipnet, err := net.ParseCIDR(n.net.CIDR)
+		if err != nil {
+			return fmt.Errorf("network.%s.cidr is not a valid CIDR: %w", n.name, err)
+		}
+		// A gateway outside its own subnet silently produces a router that
+		// cannot reach the clients it is supposed to route for.
+		if gw := strings.TrimSpace(n.net.Gateway); gw != "" {
+			ip := net.ParseIP(gw)
+			if ip == nil || ip.To4() == nil {
+				return fmt.Errorf("network.%s.gateway is not a valid IPv4 address: %q", n.name, gw)
+			}
+			if !ipnet.Contains(ip) {
+				return fmt.Errorf("network.%s.gateway %s is outside network.%s.cidr %s", n.name, gw, n.name, n.net.CIDR)
+			}
+		}
 		if n.net.Bridge != "" && !bridgePattern.MatchString(n.net.Bridge) {
 			return fmt.Errorf("network.%s.bridge is not a valid Linux bridge name (1-15 letters, digits, '.', '_' or '-', starting with a letter or digit): %q",
 				n.name, n.net.Bridge)
@@ -86,6 +95,12 @@ func (c *Config) validateNetworks() error {
 		if n.net.Domain != "" && !fqdnPattern.MatchString(n.net.Domain) {
 			return fmt.Errorf("network.%s.domain is not a valid DNS domain: %q", n.name, n.net.Domain)
 		}
+	}
+	// The router *is* the internal gateway: router-bootstrap installs
+	// network.internal.gateway on it, so a different nodes.router.ip would
+	// leave the orchestrator connecting to an address the router does not own.
+	if gw := strings.TrimSpace(c.Network.Internal.Gateway); gw != "" && c.Nodes.Router.IP != "" && c.Nodes.Router.IP != gw {
+		return fmt.Errorf("nodes.router.ip (%s) must equal network.internal.gateway (%s): the router is the internal gateway", c.Nodes.Router.IP, gw)
 	}
 	return nil
 }

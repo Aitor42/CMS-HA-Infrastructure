@@ -371,6 +371,23 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	})
 
+	t.Run("gateway outside its subnet", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Gateway = "192.168.99.1"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "outside") {
+			t.Fatalf("Validate() = %v, want the gateway-outside-subnet error", err)
+		}
+	})
+
+	t.Run("router must be the internal gateway", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Gateway = "192.168.10.254"
+		cfg.Nodes.Router.IP = "192.168.10.1"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "internal gateway") {
+			t.Fatalf("Validate() = %v, want the router/gateway mismatch error", err)
+		}
+	})
+
 	t.Run("duplicate node IP", func(t *testing.T) {
 		cfg := validCfg()
 		cfg.Nodes.Masters[1].IP = cfg.Nodes.Masters[0].IP

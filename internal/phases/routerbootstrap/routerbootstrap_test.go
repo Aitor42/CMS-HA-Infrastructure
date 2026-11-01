@@ -1,10 +1,13 @@
 package routerbootstrap
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -136,6 +139,75 @@ func TestNetplanScriptsRender(t *testing.T) {
 		if !strings.Contains(restore, want) {
 			t.Errorf("restore script is missing %q:\n%s", want, restore)
 		}
+	}
+}
+
+func TestRouterGatewayAddressesComeFromTheNetworkConfig(t *testing.T) {
+	cfg := &config.Config{
+		Network: config.NetworkConfig{
+			Internal: config.NetworkDetail{CIDR: "10.10.0.0/24", Gateway: "10.10.0.1"},
+			Main:     config.NetworkDetail{CIDR: "10.20.0.0/16", Gateway: "10.20.0.1"},
+		},
+		// Even a mismatched node address must not leak into the netplan: the
+		// clients route through the gateway, not through nodes.router.ip.
+		Nodes: config.NodesConfig{Router: config.NodeDetail{IP: "10.10.0.99"}},
+	}
+	intAddr, mainAddr, err := routerGatewayAddresses(cfg)
+	if err != nil {
+		t.Fatalf("routerGatewayAddresses: %v", err)
+	}
+	if intAddr != "10.10.0.1/24" || mainAddr != "10.20.0.1/16" {
+		t.Fatalf("addresses = %s / %s, want the configured gateways", intAddr, mainAddr)
+	}
+
+	cfg.Network.Main.Gateway = ""
+	if _, _, err := routerGatewayAddresses(cfg); err == nil || !strings.Contains(err.Error(), "main-network") {
+		t.Fatalf("routerGatewayAddresses() = %v, want the missing main gateway error", err)
+	}
+}
+
+func TestIfaceByMACRejectsAmbiguousOrInvalidResults(t *testing.T) {
+	cases := []struct {
+		name    string
+		mac     string
+		output  string
+		wantErr string
+	}{
+		{"invalid MAC", "not-a-mac", "eth0", "invalid MAC"},
+		{"no match", "52:54:00:10:00:02", "", "no interface"},
+		{"two matches", "52:54:00:10:00:02", "eth0\neth1\n", "multiple interfaces"},
+		{"invalid name", "52:54:00:10:00:02", "eth0!", "invalid interface name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &testutil.FakeExecutor{
+				RunFunc: func(_ context.Context, _, _ string) (string, string, int, error) {
+					return tc.output, "", 0, nil
+				},
+			}
+			p := &Phase{pool: fake}
+			if _, err := p.ifaceByMAC(t.Context(), "192.168.10.1", tc.mac); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("ifaceByMAC() = %v, want an error mentioning %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestProbeFromDoesNotLetWgetRetryABlackholedRoute(t *testing.T) {
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _, _ string) (string, string, int, error) {
+			return "CMS_PROBE_OK\n", "", 0, nil
+		},
+	}
+	p := &Phase{pool: fake}
+	if err := p.probeFrom(t.Context(), "192.168.10.11", "master1"); err != nil {
+		t.Fatalf("probeFrom: %v", err)
+	}
+	if len(fake.Commands) != 1 {
+		t.Fatalf("ran %d commands, want 1", len(fake.Commands))
+	}
+	if !strings.Contains(fake.Commands[0].Cmd, "--tries=1") {
+		t.Errorf("probe command lets wget retry a blackholed route:\n%s", fake.Commands[0].Cmd)
 	}
 }
 
