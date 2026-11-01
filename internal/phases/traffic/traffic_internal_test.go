@@ -1,6 +1,7 @@
 package traffic
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,19 @@ func TestResolveBaseURL_InternalFallback(t *testing.T) {
 	cfg.Nodes.CMSFrontends = nil
 	if got := resolveBaseURL(cfg, Options{Mode: "internal"}); got != "http://192.168.20.101" {
 		t.Fatalf("internal fallback = %q, want http://192.168.20.101", got)
+	}
+}
+
+func TestRunDBCheckRequiresAMaster(t *testing.T) {
+	cfg := testConfig()
+	cfg.Database.Password = "secret"
+	traffic := New(cfg, Options{WithDB: true})
+
+	// Without a master the NodePort is not on the jumpstart address; guessing
+	// one would report a misleading "database unreachable" error.
+	err := traffic.runDBCheck(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires a master node") {
+		t.Fatalf("runDBCheck() = %v, want the missing-master error", err)
 	}
 }
 

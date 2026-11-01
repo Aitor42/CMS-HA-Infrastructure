@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 )
 
@@ -79,5 +80,24 @@ func TestDeleteJobIgnoresMissingJobs(t *testing.T) {
 	}
 	if !strings.Contains(fake.Commands[0].Cmd, "--ignore-not-found") {
 		t.Errorf("delete command = %q, want --ignore-not-found", fake.Commands[0].Cmd)
+	}
+}
+
+func TestRunDrillsSkipsTheBackupDrillWhenBackupsAreDisabled(t *testing.T) {
+	// With backup.engine empty the CronJobs do not exist. The drill must not
+	// fail trying to create a Job from them; it should fall through to the
+	// next drill, which here is the missing-monitor check.
+	cfg := &config.Config{}
+	cfg.Backup.Engine = ""
+	fake := &testutil.FakeExecutor{}
+
+	err := RunDrills(t.Context(), cfg, fake, DrillsOptions{SkipTLS: true})
+	if err == nil || !strings.Contains(err.Error(), "no monitor node") {
+		t.Fatalf("RunDrills() = %v, want the monitor check (the backup drill must be skipped)", err)
+	}
+	for _, cmd := range fake.Commands {
+		if strings.Contains(cmd.Cmd, "mariadb-backup") || strings.Contains(cmd.Cmd, "mariadb-restore-test") {
+			t.Errorf("RunDrills triggered a backup CronJob while backups are disabled: %q", cmd.Cmd)
+		}
 	}
 }

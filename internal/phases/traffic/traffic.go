@@ -269,12 +269,15 @@ func (t *Traffic) runK6(ctx context.Context, baseURL string, script []byte) erro
 // driver is embedded in the binary.
 func (t *Traffic) runDBCheck(ctx context.Context) error {
 	logging.Info("Direct MariaDB SQL check")
-	dbHost := config.PrefixFromCIDR(t.cfg.Network.Internal.CIDR, "192.168.10.") + "10"
-	masterHost := dbHost
-	if len(t.cfg.Nodes.Masters) > 0 && t.cfg.Nodes.Masters[0].IP != "" {
-		dbHost = t.cfg.Nodes.Masters[0].IP
-		masterHost = t.cfg.Nodes.Masters[0].IP
+	// The NodePort lives on the control-plane nodes. Dialling the jumpstart
+	// address when no master is configured would test the wrong host and report
+	// a misleading "database unreachable" error.
+	master, ok := t.cfg.FirstMaster()
+	if !ok {
+		return fmt.Errorf("DB direct check requires a master node with an address")
 	}
+	dbHost := master.IP
+	masterHost := master.IP
 	dbPort := t.cfg.Database.Port
 	if dbPort == 0 {
 		dbPort = 30306

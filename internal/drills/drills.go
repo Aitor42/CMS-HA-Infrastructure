@@ -36,7 +36,9 @@ func RunDrills(ctx context.Context, cfg *config.Config, pool ssh.Executor, opts 
 	defer timer.End()
 
 	if !opts.SkipBackup {
-		if err := runBackupDrill(ctx, cfg, pool); err != nil {
+		if !cfg.BackupEnabled() {
+			logging.Info("Backup disabled (backup.engine is empty); skipping the backup/restore drill.")
+		} else if err := runBackupDrill(ctx, cfg, pool); err != nil {
 			return err
 		}
 	}
