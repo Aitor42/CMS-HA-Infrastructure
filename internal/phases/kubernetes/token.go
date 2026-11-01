@@ -23,11 +23,14 @@ func tokenFingerprint(token string) string {
 func (p *Phase) readJoinToken(ctx context.Context, master1 config.NodeDetail) (string, error) {
 	var token string
 	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
-		tok, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
-		if err != nil || strings.TrimSpace(tok) == "" {
-			return fmt.Errorf("node-token not ready yet")
+		tok, errOut, code, err := p.pool.RunCommand(attemptCtx, master1.IP, "cat /var/lib/rancher/k3s/server/node-token")
+		if err != nil || code != 0 {
+			return fmt.Errorf("node-token not ready yet (exit %d): %v %s", code, err, strings.TrimSpace(errOut))
 		}
 		token = strings.TrimSpace(tok)
+		if token == "" {
+			return fmt.Errorf("node-token not ready yet: the file is empty")
+		}
 		if strings.ContainsAny(token, " \t\r\n") {
 			return fmt.Errorf("node-token contains whitespace; refusing to distribute a corrupt token")
 		}

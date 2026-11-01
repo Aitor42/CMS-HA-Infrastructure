@@ -208,3 +208,80 @@ func TestRemoveBackupStackDeletesCronJobsAndCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestFindDRBDPrimaryRequiresBothReplicationPeers(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Nodes.Masters = []config.NodeDetail{
+		{Name: "m1", IP: "192.168.10.11", DRBDDiskGB: 3},
+		{Name: "m2", IP: "192.168.10.12"},
+	}
+	p := &Phase{cfg: cfg, pool: &testutil.FakeExecutor{}}
+
+	_, err := p.findDRBDPrimary(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "both replication peers") {
+		t.Fatalf("findDRBDPrimary() = %v, want the single-peer configuration error", err)
+	}
+}
+
+func TestFindDRBDPrimaryQueriesOnlyTheReplicationPair(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Nodes.Masters = []config.NodeDetail{
+		{Name: "m1", IP: "192.168.10.11", DRBDDiskGB: 3},
+		{Name: "m2", IP: "192.168.10.12", DRBDDiskGB: 3},
+		{Name: "m3", IP: "192.168.10.16", DRBDDiskGB: 3},
+	}
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, _ string) (string, string, int, error) {
+			if host == "192.168.10.11" {
+				return "Primary/Unknown\n", "", 0, nil
+			}
+			return "Secondary/Unknown\n", "", 0, nil
+		},
+	}
+	p := &Phase{cfg: cfg, pool: fake}
+
+	primary, err := p.findDRBDPrimary(context.Background())
+	if err != nil {
+		t.Fatalf("findDRBDPrimary() = %v", err)
+	}
+	if primary.Name != "m1" {
+		t.Errorf("findDRBDPrimary() = %q, want m1", primary.Name)
+	}
+	for _, cmd := range fake.Commands {
+		if cmd.Host == "192.168.10.16" {
+			t.Errorf("findDRBDPrimary queried the third control-plane node, which has no DRBD resource: %q", cmd.Cmd)
+		}
+	}
+}
+
+func TestLabelPrimaryClearsEveryStaleLabel(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Nodes.Masters = []config.NodeDetail{
+		{Name: "m1", IP: "192.168.10.11", FQDN: "m1.internal.local", DRBDDiskGB: 3},
+		{Name: "m2", IP: "192.168.10.12", FQDN: "m2.internal.local", DRBDDiskGB: 3},
+	}
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, host, _ string) (string, string, int, error) {
+			if host == "192.168.10.11" {
+				return "Primary/Unknown\n", "", 0, nil
+			}
+			return "Secondary/Unknown\n", "", 0, nil
+		},
+	}
+	p := &Phase{cfg: cfg, pool: fake}
+
+	if err := p.labelPrimary(context.Background(), cfg.Nodes.Masters[0]); err != nil {
+		t.Fatalf("labelPrimary() = %v", err)
+	}
+	var joined strings.Builder
+	for _, cmd := range fake.Commands {
+		joined.WriteString(cmd.Cmd)
+		joined.WriteString("\n")
+	}
+	if !strings.Contains(joined.String(), "kubectl get nodes -l drbd-status=primary") {
+		t.Errorf("labelPrimary did not select stale primaries by label:\n%s", joined.String())
+	}
+	if !strings.Contains(joined.String(), `case "$node" in m1.internal.local|m1)`) {
+		t.Errorf("labelPrimary did not keep the current primary:\n%s", joined.String())
+	}
+}

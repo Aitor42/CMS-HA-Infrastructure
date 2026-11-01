@@ -148,8 +148,14 @@ func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDe
 
 	logging.Info("Waiting for API server on Master 1...")
 	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 150, Interval: 2 * time.Second, Timeout: 5 * time.Minute}, func(attemptCtx context.Context) error {
-		_, _, _, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes")
-		return err
+		// Check the exit status, not only the transport error: kubectl reports
+		// a not-yet-ready API server as a non-zero exit with err == nil, which
+		// would otherwise be treated as success on the first attempt.
+		_, errOut, code, err := p.pool.RunCommand(attemptCtx, master1.IP, "kubectl get nodes")
+		if err != nil || code != 0 {
+			return fmt.Errorf("kubectl get nodes failed (exit %d): %v %s", code, err, strings.TrimSpace(errOut))
+		}
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("k3s API server on master1 not ready: %w", err)
@@ -347,26 +353,30 @@ func (p *Phase) labelPrimary(ctx context.Context, master1 config.NodeDetail) err
 	}
 	logging.Info("Labeling %s with DRBD primary status...", primary.Name)
 
-	// A node object can retain the label after its DRBD role changed. Clear it
-	// from the other masters before setting the current owner, otherwise the
-	// MariaDB node affinity matches both a secondary and the primary.
-	for _, m := range p.cfg.Nodes.Masters {
-		if m.IP == "" || m.IP == primary.IP {
-			continue
-		}
-		cmd := fmt.Sprintf("kubectl label node %s drbd-status- 2>/dev/null || kubectl label node %s drbd-status- 2>/dev/null || true", m.FQDN, m.Name)
-		_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, cmd)
-	}
-
+	// Set the current owner first, then clear the label from every other node
+	// that still carries it. Selecting by label (instead of iterating the
+	// configured masters) also removes a stale label from a node object that
+	// was dropped from config.yaml; otherwise the MariaDB affinity would match
+	// both a secondary and the primary.
 	cmd := fmt.Sprintf("kubectl label node %s drbd-status=primary --overwrite 2>/dev/null || kubectl label node %s drbd-status=primary --overwrite", primary.FQDN, primary.Name)
 	if err := runCheckedRetry(ctx, p.pool, master1.IP, cmd, "label the DRBD primary node"); err != nil {
 		return fmt.Errorf("could not label %s as drbd-status=primary (MariaDB and backup scheduling depend on it): %w", primary.Name, err)
 	}
+
+	keep := primary.Name
+	if primary.FQDN != "" {
+		keep = primary.FQDN + "|" + primary.Name
+	}
+	clearCmd := fmt.Sprintf(`for node in $(kubectl get nodes -l drbd-status=primary -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n'); do case "$node" in %s) ;; *) kubectl label node "$node" drbd-status- 2>/dev/null || true ;; esac; done`, keep)
+	_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, clearCmd)
 	return nil
 }
 
 // findDRBDPrimary asks every DRBD-enabled master for the role of cms_data and
-// requires exactly one Primary. Configurations without drbd_disk_gb keep the
+// requires exactly one Primary. The DRBD phase replicates the first two
+// masters, so those are the peers whose role is authoritative; a single
+// drbd_disk_gb entry is a configuration error, not a reason to label a node
+// that may not even run DRBD. Configurations without any drbd_disk_gb keep the
 // historical master1 behaviour.
 func (p *Phase) findDRBDPrimary(ctx context.Context) (config.NodeDetail, error) {
 	var candidates []config.NodeDetail
@@ -380,6 +390,14 @@ func (p *Phase) findDRBDPrimary(ctx context.Context) (config.NodeDetail, error) 
 			return config.NodeDetail{}, fmt.Errorf("no master nodes configured")
 		}
 		return p.cfg.Nodes.Masters[0], nil
+	}
+	if len(candidates) < 2 {
+		return config.NodeDetail{}, fmt.Errorf("DRBD requires drbd_disk_gb on both replication peers; only %s has it", candidates[0].Name)
+	}
+	// The DRBD phase uses the first two masters; querying a third one that has
+	// no cms_data resource would fail with a misleading role error.
+	if len(candidates) > 2 {
+		candidates = candidates[:2]
 	}
 
 	var primaries []config.NodeDetail
