@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,7 +15,6 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
-	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -186,6 +186,15 @@ func (p *Phase) Run(ctx context.Context) error {
 	return nil
 }
 
+// grafanaAdminAttempts bounds how many times a transient SQLite lock is retried
+// before the phase fails. Grafana initialises the CLI against the same database
+// the server holds, so a concurrent write can fail without the password being
+// wrong.
+const grafanaAdminAttempts = 3
+
+// grafanaAdminRetryDelay is a variable so tests can avoid the real wait.
+var grafanaAdminRetryDelay = 2 * time.Second
+
 // configureGrafanaAdmin installs a per-deployment Grafana admin password in a
 // root:grafana 0640 EnvironmentFile and restarts the service. The Puppet
 // drop-in loads that file, and the CLI reset makes the change effective even
@@ -209,22 +218,68 @@ func (p *Phase) configureGrafanaAdmin(ctx context.Context, monitorIP string) err
 	// admin user; reset it explicitly so a re-run on an existing database does
 	// not silently keep admin/admin. The env file is still written so a fresh
 	// database starts with the same value before the CLI runs.
-	cmd := fmt.Sprintf(
-		"chown root:grafana %s && chmod 0640 %s && "+
-			"for i in $(seq 1 30); do systemctl is-active --quiet grafana-server && break; sleep 1; done; "+
-			"GRAFANA_CLI=$(command -v grafana 2>/dev/null || true); "+
-			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/sbin/grafana; "+
-			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/share/grafana/bin/grafana; "+
-			"\"$GRAFANA_CLI\" cli --homepath /usr/share/grafana --config /etc/grafana/grafana.ini "+
-			"admin reset-admin-password %s && systemctl restart grafana-server",
-		grafanaAdminEnvPath, grafanaAdminEnvPath, shell.Quote(password))
-	if _, stderr, code, err := p.pool.RunCommand(ctx, monitorIP, cmd); err != nil || code != 0 {
-		return fmt.Errorf("install Grafana admin credential (exit %d): %v %s", code, err, strings.TrimSpace(stderr))
+	cmd := grafanaAdminResetCommand(grafanaAdminEnvPath)
+	for attempt := 1; ; attempt++ {
+		stdout, stderr, code, runErr := p.pool.RunCommand(ctx, monitorIP, cmd)
+		if runErr == nil && code == 0 {
+			break
+		}
+		detail := strings.TrimSpace(stdout)
+		if s := strings.TrimSpace(stderr); s != "" {
+			if detail != "" {
+				detail += "\n"
+			}
+			detail += s
+		}
+		// Grafana prints its errors to stdout and exits 1 with an empty
+		// stderr, so without this the failure would be invisible.
+		if attempt < grafanaAdminAttempts && grafanaAdminTransientLock(detail) {
+			logging.Warn("Grafana credential reset hit a transient database lock (attempt %d/%d); retrying", attempt, grafanaAdminAttempts)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(grafanaAdminRetryDelay):
+			}
+			continue
+		}
+		msg := fmt.Sprintf("install Grafana admin credential (exit %d)", code)
+		if runErr != nil {
+			msg += ": " + runErr.Error()
+		}
+		if detail != "" {
+			msg += ": " + detail
+		}
+		return errors.New(msg)
 	}
 	if generated {
 		logging.Info("Grafana admin password generated; read it with: sudo cat %s", grafanaAdminEnvPath)
 	}
 	return nil
+}
+
+// grafanaAdminResetCommand builds the command that resets the admin password.
+// The value is streamed from the EnvironmentFile on stdin because the Grafana
+// CLI parses an argv password as a flag: a generated password starting with
+// "-" made the reset fail with "flag provided but not defined".
+func grafanaAdminResetCommand(envPath string) string {
+	return fmt.Sprintf(
+		"chown root:grafana %s && chmod 0640 %s && "+
+			"for i in $(seq 1 30); do systemctl is-active --quiet grafana-server && break; sleep 1; done; "+
+			"GRAFANA_CLI=$(command -v grafana 2>/dev/null || true); "+
+			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/sbin/grafana; "+
+			"[ -x \"$GRAFANA_CLI\" ] || GRAFANA_CLI=/usr/share/grafana/bin/grafana; "+
+			"sed -n 's/^GF_SECURITY_ADMIN_PASSWORD=//p' %s | "+
+			"\"$GRAFANA_CLI\" cli --homepath /usr/share/grafana --config /etc/grafana/grafana.ini "+
+			"admin reset-admin-password --password-from-stdin && systemctl restart grafana-server",
+		envPath, envPath, envPath)
+}
+
+// grafanaAdminTransientLock reports whether the CLI failed because SQLite was
+// momentarily locked by the running server.
+func grafanaAdminTransientLock(detail string) bool {
+	lowered := strings.ToLower(detail)
+	return strings.Contains(lowered, "database is locked") ||
+		strings.Contains(lowered, "database table is locked")
 }
 
 // grafanaAdminPassword returns the password to install and whether it was

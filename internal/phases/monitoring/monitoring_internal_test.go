@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 )
 
@@ -62,6 +63,124 @@ func TestParseGrafanaAdminPassword(t *testing.T) {
 	}
 	if got := parseGrafanaAdminPassword("OTHER=1\n"); got != "" {
 		t.Errorf("parseGrafanaAdminPassword() = %q, want an empty value", got)
+	}
+}
+
+func TestGrafanaAdminResetCommandStreamsThePasswordOnStdin(t *testing.T) {
+	cmd := grafanaAdminResetCommand(grafanaAdminEnvPath)
+	// The password must come from the EnvironmentFile on stdin. Passing it as
+	// an argv word made the CLI parse a leading "-" as a flag.
+	const tail = "admin reset-admin-password --password-from-stdin && systemctl restart grafana-server"
+	if !strings.HasSuffix(cmd, tail) {
+		t.Fatalf("grafanaAdminResetCommand() does not end with %q: %q", tail, cmd)
+	}
+	read := "sed -n 's/^GF_SECURITY_ADMIN_PASSWORD=//p' " + grafanaAdminEnvPath + " | "
+	if !strings.Contains(cmd, read) {
+		t.Fatalf("grafanaAdminResetCommand() does not stream the password from %s: %q", grafanaAdminEnvPath, cmd)
+	}
+	if strings.Contains(cmd, "reset-admin-password '") {
+		t.Fatalf("grafanaAdminResetCommand() still passes the password as an argument: %q", cmd)
+	}
+}
+
+func TestConfigureGrafanaAdminKeepsThePasswordOutOfArgv(t *testing.T) {
+	const password = "-leading-dash-secret-0123456789"
+	var commands []string
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			commands = append(commands, cmd)
+			return "", "", 0, nil
+		},
+	}
+	phase := &Phase{
+		cfg:  &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: password}},
+		pool: fake,
+	}
+	if err := phase.configureGrafanaAdmin(t.Context(), "192.168.10.20"); err != nil {
+		t.Fatalf("configureGrafanaAdmin: %v", err)
+	}
+	if len(commands) != 1 {
+		t.Fatalf("configureGrafanaAdmin ran %d commands, want 1", len(commands))
+	}
+	if strings.Contains(commands[0], password) {
+		t.Fatalf("the admin password leaked into argv: %q", commands[0])
+	}
+	want := "GF_SECURITY_ADMIN_PASSWORD=" + password + "\n"
+	if got := string(fake.Files["192.168.10.20"][grafanaAdminEnvPath]); got != want {
+		t.Fatalf("EnvironmentFile = %q, want %q", got, want)
+	}
+}
+
+func TestConfigureGrafanaAdminSurfacesCLIStdout(t *testing.T) {
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, _ string) (string, string, int, error) {
+			// Grafana prints CLI errors to stdout and exits 1 with an empty
+			// stderr, which hid the original failure.
+			return "Error: ✗ flag provided but not defined: -secret", "", 1, nil
+		},
+	}
+	phase := &Phase{
+		cfg:  &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: "operator-value"}},
+		pool: fake,
+	}
+	err := phase.configureGrafanaAdmin(t.Context(), "192.168.10.20")
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("configureGrafanaAdmin() = %v, want the CLI stdout in the error", err)
+	}
+	if !strings.Contains(err.Error(), "exit 1") {
+		t.Fatalf("configureGrafanaAdmin() = %v, want the exit code in the error", err)
+	}
+}
+
+func TestConfigureGrafanaAdminRetriesATransientDatabaseLock(t *testing.T) {
+	oldDelay := grafanaAdminRetryDelay
+	grafanaAdminRetryDelay = 0
+	t.Cleanup(func() { grafanaAdminRetryDelay = oldDelay })
+
+	calls := 0
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, _ string) (string, string, int, error) {
+			calls++
+			if calls == 1 {
+				return "database is locked", "", 1, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	phase := &Phase{
+		cfg:  &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: "operator-value"}},
+		pool: fake,
+	}
+	if err := phase.configureGrafanaAdmin(t.Context(), "192.168.10.20"); err != nil {
+		t.Fatalf("configureGrafanaAdmin: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("configureGrafanaAdmin ran the reset %d times, want a single retry", calls)
+	}
+}
+
+func TestConfigureGrafanaAdminStopsRetryingAfterTheLimit(t *testing.T) {
+	oldDelay := grafanaAdminRetryDelay
+	grafanaAdminRetryDelay = 0
+	t.Cleanup(func() { grafanaAdminRetryDelay = oldDelay })
+
+	calls := 0
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, _ string) (string, string, int, error) {
+			calls++
+			return "database is locked", "", 1, nil
+		},
+	}
+	phase := &Phase{
+		cfg:  &config.Config{Monitoring: config.MonitoringConfig{GrafanaAdminPassword: "operator-value"}},
+		pool: fake,
+	}
+	err := phase.configureGrafanaAdmin(t.Context(), "192.168.10.20")
+	if err == nil || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("configureGrafanaAdmin() = %v, want the last failure surfaced", err)
+	}
+	if calls != grafanaAdminAttempts {
+		t.Fatalf("configureGrafanaAdmin ran the reset %d times, want %d", calls, grafanaAdminAttempts)
 	}
 }
 
