@@ -121,18 +121,7 @@ func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error
 // configuration (it adds 127.0.1.1 and the hot-desk entries); keep the two in
 // sync by hand when adding nodes.
 func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) error {
-	var sb strings.Builder
-	sb.WriteString("127.0.0.1 localhost\n")
-	for _, n := range nodes {
-		if n.IP != "" && n.FQDN != "" {
-			if n.Name == "jumpstart" {
-				sb.WriteString(fmt.Sprintf("%s %s %s puppet\n", n.IP, n.FQDN, n.Name))
-			} else {
-				sb.WriteString(fmt.Sprintf("%s %s %s\n", n.IP, n.FQDN, n.Name))
-			}
-		}
-	}
-	hostsContent := sb.String()
+	hostsContent := bootstrapHostsContent(nodes, p.cfg.Nodes.Jumpstart.IP, p.cfg.Nodes.Jumpstart.Name)
 
 	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, n := range nodes {
@@ -152,6 +141,27 @@ func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) erro
 		}
 	}
 	return nil
+}
+
+// bootstrapHostsContent renders the pre-Puppet /etc/hosts. The jumpstart entry
+// is identified by its configured IP or name, not the literal "jumpstart":
+// renamed deployments still need the `puppet` alias that agents use.
+func bootstrapHostsContent(nodes []config.NodeSpec, jumpstartIP, jumpstartName string) string {
+	var sb strings.Builder
+	sb.WriteString("127.0.0.1 localhost\n")
+	for _, n := range nodes {
+		if n.IP == "" || n.FQDN == "" {
+			continue
+		}
+		isJumpstart := (jumpstartIP != "" && n.IP == jumpstartIP) ||
+			(jumpstartName != "" && n.Name == jumpstartName)
+		if isJumpstart {
+			sb.WriteString(fmt.Sprintf("%s %s %s puppet\n", n.IP, n.FQDN, n.Name))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s %s %s\n", n.IP, n.FQDN, n.Name))
+		}
+	}
+	return sb.String()
 }
 
 func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) error {
@@ -189,18 +199,7 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		}
 		nodeIP := n.IP
 		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
-			cmd := fmt.Sprintf(`
-				set -eu
-				deploy_home=$(getent passwd %[1]s | cut -d: -f6)
-				if [ -z "$deploy_home" ]; then
-					echo "deploy account %[1]s does not exist on $(hostname)" >&2
-					exit 1
-				fi
-				install -d -m 700 -o %[1]s -g %[1]s "$deploy_home/.ssh"
-				grep -qxF %[2]s "$deploy_home/.ssh/authorized_keys" 2>/dev/null || printf '%%s\n' %[2]s >> "$deploy_home/.ssh/authorized_keys"
-				chmod 600 "$deploy_home/.ssh/authorized_keys"
-				chown %[1]s:%[1]s "$deploy_home/.ssh/authorized_keys"
-			`, shell.Quote(deployUser), shell.Quote(pubKeyStr))
+			cmd := authorizedKeyScript(deployUser, pubKeyStr)
 			_, _, code, err := pool.RunCommand(c, nodeIP, cmd)
 			if err != nil || code != 0 {
 				return fmt.Errorf("failed to add pubkey on %s (exit %d): %v", nodeIP, code, err)
@@ -216,4 +215,29 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		}
 	}
 	return nil
+}
+
+// authorizedKeyScript installs the deploy key without assuming that the
+// account's primary group has the same name. Custom accounts often use a
+// different primary group, and `chown user:user` then fails even though the
+// account and its home are valid.
+func authorizedKeyScript(deployUser, pubKey string) string {
+	return fmt.Sprintf(`
+				set -eu
+				deploy_entry=$(getent passwd %[1]s | head -n 1)
+				if [ -z "$deploy_entry" ]; then
+					echo "deploy account %[1]s does not exist on $(hostname)" >&2
+					exit 1
+				fi
+				deploy_home=$(printf '%%s\n' "$deploy_entry" | cut -d: -f6)
+				deploy_group=$(printf '%%s\n' "$deploy_entry" | cut -d: -f4)
+				if [ -z "$deploy_home" ] || [ -z "$deploy_group" ]; then
+					echo "deploy account %[1]s has no usable home or primary group on $(hostname)" >&2
+					exit 1
+				fi
+				install -d -m 700 -o %[1]s -g "$deploy_group" "$deploy_home/.ssh"
+				grep -qxF %[2]s "$deploy_home/.ssh/authorized_keys" 2>/dev/null || printf '%%s\n' %[2]s >> "$deploy_home/.ssh/authorized_keys"
+				chmod 600 "$deploy_home/.ssh/authorized_keys"
+				chown %[1]s:"$deploy_group" "$deploy_home/.ssh/authorized_keys"
+			`, shell.Quote(deployUser), shell.Quote(pubKey))
 }

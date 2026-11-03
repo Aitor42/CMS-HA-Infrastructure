@@ -79,12 +79,16 @@ func TestRepairSSHPhaseUsesExecutor(t *testing.T) {
 		if !hasCommand(fake.Commands, ip, "ssh-ed25519 AAAATEST jumpstart") {
 			t.Errorf("%s did not receive the jumpstart public key", ip)
 		}
-		// The deploy account's home must come from the passwd database, not
-		// from an assumed /home/<user> path.
+		// The deploy account's home and primary group must come from the
+		// passwd database, not from an assumed /home/<user> or a same-named
+		// group.
 		if !hasCommand(fake.Commands, ip, "getent passwd 'ubuntu'") {
 			t.Errorf("%s did not resolve the deploy account's home", ip)
 		}
-		if !hasCommand(fake.Commands, ip, "chown 'ubuntu':'ubuntu'") {
+		if !hasCommand(fake.Commands, ip, "cut -d: -f4") {
+			t.Errorf("%s did not resolve the deploy account's primary group", ip)
+		}
+		if !hasCommand(fake.Commands, ip, `chown 'ubuntu':"$deploy_group"`) {
 			t.Errorf("%s did not hand the key back to the deploy account", ip)
 		}
 	}
