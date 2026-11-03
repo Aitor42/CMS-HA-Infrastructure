@@ -110,16 +110,18 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 		if state, err = LoadState(statePath); err != nil {
 			return err
 		}
+		identity, err := deploymentIdentity(o.Cfg, opts)
+		if err != nil {
+			return err
+		}
+		if err := state.bindIdentity(identity, opts); err != nil {
+			return err
+		}
 		state.RunID = runID
 	}
 
-	if !opts.DryRun {
-		if err := o.preflightChecks(ctx); err != nil {
-			return fmt.Errorf("preflight checks failed: %w", err)
-		}
-	}
-
 	phaseList := o.BuildPhaseList(opts)
+	keys := PhaseKeys(phaseList)
 	total := len(phaseList)
 
 	skip, reset, err := planRun(phaseList, opts, state)
@@ -127,8 +129,17 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 		return err
 	}
 	if !opts.DryRun && state != nil {
+		if err := o.preflightChecks(ctx); err != nil {
+			return fmt.Errorf("preflight checks failed: %w", err)
+		}
 		if reset {
 			state.CompletedPhases = nil
+			state.AssumedPhases = nil
+			for _, key := range keys {
+				if skip[key] {
+					state.AssumedPhases = append(state.AssumedPhases, key)
+				}
+			}
 			state.Status = "running"
 			state.LastError = ""
 			state.StartedAt = time.Now().UTC()
@@ -147,10 +158,10 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 			continue
 		}
 
-		key := phaseKey(phase.Name())
+		key := keys[i]
 		if skip[key] {
 			timings.phase(phase.Name(), "skipped", time.Time{}, 0, nil)
-			logging.Info("Phase %s already completed (checkpoint); skipping.", phase.Name())
+			logging.Info("Phase %s recorded as completed or explicitly assumed (checkpoint); skipping.", key)
 			continue
 		}
 
@@ -176,7 +187,7 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 
 		if state != nil {
 			if err := state.MarkCompleted(statePath, key); err != nil {
-				logging.Warn("could not update checkpoint %s: %v", statePath, err)
+				return fmt.Errorf("phase %q completed but checkpoint could not be saved: %w", phase.Name(), err)
 			}
 		}
 
@@ -197,7 +208,7 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr erro
 		state.Status = "completed"
 		state.LastError = ""
 		if err := state.Save(statePath); err != nil {
-			logging.Warn("could not persist checkpoint %s: %v", statePath, err)
+			return fmt.Errorf("deployment finished but final checkpoint could not be saved: %w", err)
 		}
 	}
 
