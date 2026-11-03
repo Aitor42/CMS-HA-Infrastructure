@@ -210,7 +210,12 @@ class role::cms_frontend {
   service { 'apache2':
     ensure  => running,
     enable  => true,
-    require => Package['apache2'],
+    require => [
+      Package['apache2'],
+      Exec['mount-wp-uploads'],
+      Exec['apache-storage-daemon-reload'],
+      File['/etc/systemd/system/apache2.service.d/uploads.conf'],
+    ],
   }
 
   file { '/etc/apache2/conf-available/server-status.conf':
@@ -334,30 +339,168 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
   # SHARED STORAGE — NFS mount for WordPress uploads (centralised persistence)
   # ---------------------------------------------------------------------------
+  # Do not chmod/chown the mounted export on subsequent Puppet runs.
   file { '/var/www/html/wp-content/uploads':
     ensure  => directory,
-    owner   => 'www-data',
-    group   => 'www-data',
-    mode    => '0775',
     require => Exec['wordpress-deploy'],
+  }
+
+  # If the mount disappears, www-data must not write into the underlying
+  # local directory while systemd is stopping Apache. Run only when unmounted.
+  exec { 'protect-local-uploads':
+    command => '/bin/chown root:root /var/www/html/wp-content/uploads && /bin/chmod 0555 /var/www/html/wp-content/uploads',
+    onlyif  => '/bin/bash -c "! /bin/mountpoint -q /var/www/html/wp-content/uploads"',
+    require => File['/var/www/html/wp-content/uploads'],
+    before  => Mount['/var/www/html/wp-content/uploads'],
+  }
+
+  file { '/usr/local/sbin/cms-ha-check-uploads':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    content => @(UPLOADSCHECK)
+      #!/bin/sh
+      set -eu
+      # -M requires the exact mountpoint, not an ancestor filesystem. Check
+      # the export, filesystem, write mode and root (reject subdirectory binds).
+      # legacy-soft is only a migration gate; service startup defaults to hard.
+      record=$(/usr/bin/findmnt -rn -M /var/www/html/wp-content/uploads -o SOURCE,FSTYPE,OPTIONS,FSROOT) || exit 1
+      printf '%s\n' "$record" | /usr/bin/awk -v expected="$1" -v mode="${2:-hard}" '
+          NF == 4 && $1 == expected && ($2 == "nfs" || $2 == "nfs4") &&
+          $3 ~ /(^|,)rw(,|$)/ && $3 !~ /(^|,)ro(,|$)/ && $4 == "/" {
+            if (mode == "hard")
+              ok = ($3 ~ /(^|,)hard(,|$)/ && $3 !~ /(^|,)(soft|softerr|softreval)(,|$)/)
+            else if (mode == "legacy-soft")
+              ok = ($3 ~ /(^|,)soft(,|$)/ && $3 !~ /(^|,)(hard|softerr|softreval)(,|$)/)
+          }
+          END { exit !(ok && NR == 1) }'
+      | UPLOADSCHECK
+  }
+
+  file { '/usr/local/sbin/cms-ha-mount-uploads':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    require => File['/usr/local/sbin/cms-ha-check-uploads'],
+    content => @(UPLOADSMOUNT)
+      #!/bin/sh
+      set -eu
+      target=/var/www/html/wp-content/uploads
+      expected="${1:?expected NFS export required}"
+      check() { /usr/local/sbin/cms-ha-check-uploads "$expected" "${1:-hard}"; }
+      fail() { echo "ERROR: $*" >&2; exit 1; }
+
+      check && exit 0
+      /bin/systemctl stop apache2
+      state=$(/bin/systemctl show --property=ActiveState --value apache2) || fail "Cannot query Apache state"
+      [ "$state" = inactive ] || fail "Apache is not fully stopped"
+
+      if /bin/mountpoint -q "$target"; then
+        # Only the known writable legacy export may be changed. In particular,
+        # do not repair an arbitrary mount, a read-only export or a bind root.
+        check legacy-soft || fail "Refusing to migrate an unexpected uploads mount"
+        if ! /bin/mount -o remount,rw,hard,timeo=600,retrans=2,nfsvers=4 "$expected" "$target"; then
+          echo "NFS remount failed; checking whether a normal unmount/mount is safe" >&2
+        fi
+        check && exit 0
+        # Remount can fail or silently retain soft. Recheck before unmounting:
+        # a changed identity or mode must never trigger destructive recovery.
+        check legacy-soft || fail "Uploads mount changed during migration"
+        /bin/umount "$target"
+        if /bin/mountpoint -q "$target"; then
+          fail "Another mount remains at the uploads path"
+        fi
+      fi
+
+      # A legacy mount hid this local directory from protect-local-uploads.
+      # Protect it now while exposed, without chmod/chown on the NFS export.
+      /bin/chown root:root "$target"
+      /bin/chmod 0555 "$target"
+      /bin/mount -t nfs -o rw,hard,timeo=600,retrans=2,nfsvers=4 "$expected" "$target"
+      check || fail "Uploads mount failed final verification"
+      # Puppet, not this helper, starts Apache only after successful return.
+      | UPLOADSMOUNT
+  }
+
+  $uploads_mount_unit = 'var-www-html-wp\x2dcontent-uploads.mount'
+
+  file { '/etc/systemd/system/apache2.service.d':
+    ensure  => directory,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0755',
+    require => Package['apache2'],
+  }
+
+  file { '/etc/systemd/system/apache2.service.d/uploads.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => @("UPLOADSUNIT"),
+      [Unit]
+      RequiresMountsFor=/var/www/html/wp-content/uploads
+      BindsTo=${uploads_mount_unit}
+      After=${uploads_mount_unit}
+
+      [Service]
+      ExecStartPre=/usr/local/sbin/cms-ha-check-uploads ${storage_ip}:/srv/nfs/wp-uploads
+      | UPLOADSUNIT
+    require => [
+      File['/etc/systemd/system/apache2.service.d'],
+      File['/usr/local/sbin/cms-ha-check-uploads'],
+    ],
+    notify  => [Exec['apache-storage-daemon-reload'], Service['apache2']],
+  }
+
+  exec { 'apache-storage-daemon-reload':
+    command     => '/bin/systemctl daemon-reload',
+    refreshonly => true,
+    subscribe   => Mount['/var/www/html/wp-content/uploads'],
+    before      => Service['apache2'],
   }
 
   mount { '/var/www/html/wp-content/uploads':
     ensure  => present,
     device  => "${storage_ip}:/srv/nfs/wp-uploads",
     fstype  => 'nfs',
-    options => '_netdev,auto,nofail,rw,soft,timeo=50,retrans=3,nfsvers=4',
+    options => '_netdev,auto,rw,hard,timeo=600,retrans=2,nfsvers=4',
     require => [
       Package['nfs-common'],
       File['/var/www/html/wp-content/uploads'],
+      # Verify/migrate the live mount before the provider updates fstab. An
+      # unexpected live export must block this resource too.
+      Exec['mount-wp-uploads'],
     ],
   }
 
+  # Dependencies protect future starts; also stop an already-running Apache
+  # during an upgrade if the current mount is absent or unsafe. A failed
+  # recovery must leave the existing service stopped, not merely skip restart.
+  exec { 'apache-stop-unsafe-uploads':
+    command => '/bin/systemctl stop apache2',
+    unless  => "/usr/local/sbin/cms-ha-check-uploads ${storage_ip}:/srv/nfs/wp-uploads",
+    require => [
+      Package['apache2'],
+      File['/usr/local/sbin/cms-ha-check-uploads'],
+    ],
+    before  => Exec['mount-wp-uploads'],
+  }
+
   exec { 'mount-wp-uploads':
-    command => '/bin/mount /var/www/html/wp-content/uploads',
-    onlyif  => "/bin/bash -c \"timeout 2 bash -c \\\": </dev/tcp/${storage_ip}/2049\\\" 2>/dev/null\"",
-    unless  => '/bin/mountpoint -q /var/www/html/wp-content/uploads',
-    require => Mount['/var/www/html/wp-content/uploads'],
+    # Migrate only the verified legacy export while Apache is stopped. Any
+    # failed recovery blocks Apache and the shared bootstrap lock.
+    command => "/usr/local/sbin/cms-ha-mount-uploads ${storage_ip}:/srv/nfs/wp-uploads",
+    unless  => "/usr/local/sbin/cms-ha-check-uploads ${storage_ip}:/srv/nfs/wp-uploads",
+    require => [
+      Package['nfs-common'],
+      File['/var/www/html/wp-content/uploads'],
+      File['/usr/local/sbin/cms-ha-check-uploads'],
+      File['/usr/local/sbin/cms-ha-mount-uploads'],
+      Exec['apache-stop-unsafe-uploads'],
+    ],
   }
 
   # ---------------------------------------------------------------------------
