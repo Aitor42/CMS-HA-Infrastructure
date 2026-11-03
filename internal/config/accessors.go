@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
-	"os"
+	"os/user"
 	"strings"
 )
 
@@ -134,7 +134,7 @@ func (c *Config) HypervisorIP() string {
 
 // FenceCommands returns the (power-off, state-query) fencing commands. When the
 // config leaves them empty it derives an SSH+virsh command against the
-// hypervisor as the current $USER; the literal "{domain}" placeholder is kept
+// hypervisor as the current OS account; the literal "{domain}" placeholder is kept
 // for the caller to substitute.
 func (c *Config) FenceCommands() (off, state string) {
 	if c.DRBD.FenceCommand != "" && c.DRBD.FenceStateCommand != "" {
@@ -142,18 +142,16 @@ func (c *Config) FenceCommands() (off, state string) {
 	}
 
 	host := c.HypervisorIP()
-	user := os.Getenv("USER")
-	if user == "" {
-		user = os.Getenv("LOGNAME")
-	}
-	if user == "" {
-		user = "root"
+	account, _ := user.Current()
+	username := ""
+	if account != nil {
+		username = account.Username
 	}
 	base := fmt.Sprintf(
-		"ssh -i /etc/drbd-fence/fence_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 %s@%s",
-		user, host,
+		"ssh -T -a -x -i /etc/drbd-fence/fence_key -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ClearAllForwardings=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/drbd-fence/known_hosts -o GlobalKnownHostsFile=/etc/drbd-fence/known_hosts -o UpdateHostKeys=no -o HostKeyAlias=%s -o LogLevel=ERROR -o ConnectTimeout=5 %s@%s",
+		host, username, host,
 	)
-	return base + " sudo virsh destroy {domain}", base + " sudo virsh domstate {domain}"
+	return base + " virsh destroy {domain}", base + " virsh domstate {domain}"
 }
 
 // K6Image returns the pinned k6 container image.

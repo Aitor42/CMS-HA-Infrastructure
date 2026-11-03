@@ -304,14 +304,23 @@ func TestPrefixFromCIDRAndMACValidation(t *testing.T) {
 }
 
 func TestFenceCommands(t *testing.T) {
-	t.Setenv("USER", "tester")
+	t.Setenv("USER", "untrusted-environment-user")
 	c := &Config{Network: NetworkConfig{Internal: NetworkDetail{CIDR: "192.168.10.0/24"}}}
 	off, state := c.FenceCommands()
-	if off != "ssh -i /etc/drbd-fence/fence_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 tester@192.168.10.254 sudo virsh destroy {domain}" {
-		t.Fatalf("default fence command = %q", off)
+	for _, command := range []string{off, state} {
+		for _, required := range []string{"StrictHostKeyChecking=yes", "UserKnownHostsFile=/etc/drbd-fence/known_hosts", "BatchMode=yes", "IdentitiesOnly=yes", "@192.168.10.254"} {
+			if !strings.Contains(command, required) {
+				t.Errorf("fencing command %q missing %q", command, required)
+			}
+		}
+		for _, forbidden := range []string{"accept-new", "/dev/null", "untrusted-environment-user", "sudo virsh"} {
+			if strings.Contains(command, forbidden) {
+				t.Errorf("fencing command %q contains %q", command, forbidden)
+			}
+		}
 	}
-	if state != "ssh -i /etc/drbd-fence/fence_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 tester@192.168.10.254 sudo virsh domstate {domain}" {
-		t.Fatalf("default fence state command = %q", state)
+	if !strings.HasSuffix(off, " virsh destroy {domain}") || !strings.HasSuffix(state, " virsh domstate {domain}") {
+		t.Fatalf("unexpected forced-command protocol: %q, %q", off, state)
 	}
 
 	c.DRBD.FenceCommand = "poweroff {domain}"

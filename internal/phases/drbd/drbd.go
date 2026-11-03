@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
+	cryptossh "golang.org/x/crypto/ssh"
+	"golang.org/x/sys/unix"
 )
 
 // replicationWait is a variable so tests can exercise the failure path without
@@ -487,9 +490,8 @@ func (p *Phase) deployTmpfiles(ctx context.Context, pair []config.NodeDetail) {
 // setupFencing provisions STONITH fencing for the 2-node DRBD resource: it
 // deploys fence-peer.sh and a per-node /etc/drbd-fence.conf to the pair, and
 // (when no custom command is configured) creates an SSH key on the hypervisor,
-// authorises it for the user running the orchestrator (the same $USER the fence
-// command SSHes as) and copies the private key to the masters so they can drive
-// libvirt on the hypervisor.
+// authorises only the restricted local helper and pins the local sshd host keys.
+// No sudoers or general operator SSH permissions are added.
 func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) error {
 	fenceRequired := "0"
 	if p.cfg.DRBD.Fencing {
@@ -497,6 +499,14 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 	}
 	logging.Info("Configuring DRBD STONITH fencing (required=%s)...", fenceRequired)
 
+	if (p.cfg.DRBD.FenceCommand == "") != (p.cfg.DRBD.FenceStateCommand == "") {
+		return fmt.Errorf("both fencing commands must be configured together")
+	}
+	for _, node := range pair {
+		if !fenceDomainPattern.MatchString(node.Name) {
+			return fmt.Errorf("invalid fencing domain %q", node.Name)
+		}
+	}
 	offCmd, stateCmd := p.cfg.FenceCommands()
 	custom := p.cfg.DRBD.FenceCommand != ""
 
@@ -510,16 +520,16 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 	// refuses to promote a node that cannot fence its peer, so a "successful"
 	// deploy with no key would silently ship a cluster without automatic
 	// failover — and only reveal it at the end of the chaos test.
-	var fenceKey []byte
+	var fenceKey, knownHosts []byte
 	if p.cfg.DRBD.Fencing && !custom {
-		fenceKey, err = p.ensureFenceKey()
+		fenceKey, knownHosts, err = p.ensureFenceKey()
 		if err != nil {
 			return fmt.Errorf("could not provision the hypervisor fence SSH key, so automatic promotion would never fence: %w "+
 				"(set drbd.fencing: false to accept that, or configure a custom drbd.fence_command)", err)
 		}
 	}
 
-	if err := p.deployFenceArtifacts(ctx, pair, fenceScript, confTmpl, fenceKey, fenceRequired, offCmd, stateCmd); err != nil {
+	if err := p.deployFenceArtifacts(ctx, pair, fenceScript, confTmpl, fenceKey, knownHosts, fenceRequired, offCmd, stateCmd); err != nil {
 		return err
 	}
 
@@ -543,7 +553,10 @@ func (p *Phase) loadFenceTemplates() ([]byte, *template.Template, error) {
 	return fenceScript, confTmpl, nil
 }
 
-func (p *Phase) deployFenceArtifacts(ctx context.Context, pair []config.NodeDetail, fenceScript []byte, confTmpl *template.Template, fenceKey []byte, fenceRequired, offCmd, stateCmd string) error {
+func (p *Phase) deployFenceArtifacts(ctx context.Context, pair []config.NodeDetail, fenceScript []byte, confTmpl *template.Template, fenceKey, knownHosts []byte, fenceRequired, offCmd, stateCmd string) error {
+	if len(fenceKey) > 0 && len(knownHosts) == 0 {
+		return fmt.Errorf("refusing to deploy fencing key without pinned host keys")
+	}
 	for i, node := range pair {
 		peer := pair[(i+1)%len(pair)] // DRBD cms_data is a 2-node resource
 
@@ -568,6 +581,10 @@ func (p *Phase) deployFenceArtifacts(ctx context.Context, pair []config.NodeDeta
 		}
 
 		if len(fenceKey) > 0 {
+
+			if err := p.pool.CopyContent(ctx, node.IP, knownHosts, "/etc/drbd-fence/known_hosts", 0600); err != nil {
+				return fmt.Errorf("failed to copy pinned hypervisor host keys to %s: %w", node.Name, err)
+			}
 			if err := p.pool.CopyContent(ctx, node.IP, fenceKey, "/etc/drbd-fence/fence_key", 0600); err != nil {
 				return fmt.Errorf("failed to copy fence key to %s: %w", node.Name, err)
 			}
@@ -579,45 +596,227 @@ func (p *Phase) deployFenceArtifacts(ctx context.Context, pair []config.NodeDeta
 	return nil
 }
 
-// ensureFenceKey creates (if needed) a dedicated ed25519 key on the hypervisor,
-// authorises it for the current user and returns the private key material.
-func (p *Phase) ensureFenceKey() ([]byte, error) {
-	home, err := os.UserHomeDir()
+var fenceDomainPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// Use the OS account, not HOME/USER from a potentially sudo-inherited environment:
+// sshd looks up this account's actual home for authorized_keys.
+func (p *Phase) ensureFenceKey() ([]byte, []byte, error) {
+	account, err := user.Current()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if !regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$`).MatchString(account.Username) || p.cfg.HypervisorIP() == "" {
+		return nil, nil, fmt.Errorf("invalid local fencing account or hypervisor address")
+	}
+	return p.provisionFenceKey(account.HomeDir, "/etc/ssh")
+}
+
+// Parameters make all provisioning regressions testable without touching ~/.ssh.
+func (p *Phase) provisionFenceKey(home, hostKeyDir string) ([]byte, []byte, error) {
+	if !filepath.IsAbs(home) || strings.ContainsAny(home, "\r\n\x00") {
+		return nil, nil, fmt.Errorf("unsafe fencing home path")
+	}
+	// The OS account's home is the trust boundary. Refuse unsafe ownership or
+	// permissions rather than chmod the operator's general home.
+	if err := fenceSafePath(home, true, true); err != nil {
+		return nil, nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(home)
+	if err != nil || resolved != filepath.Clean(home) {
+		return nil, nil, fmt.Errorf("fencing home must not contain symlinks: %s", home)
 	}
 	sshDir := filepath.Join(home, ".ssh")
-	keyPath := filepath.Join(sshDir, "id_ed25519_fence")
+	privateDir := filepath.Join(sshDir, "cms-ha-fence")
+	for _, dir := range []string{sshDir, privateDir} {
+		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+			return nil, nil, err
+		}
+		if err := fenceSafePath(dir, true, true); err != nil {
+			return nil, nil, err
+		}
+	}
+	if len(p.cfg.Nodes.Masters) < 2 {
+		return nil, nil, fmt.Errorf("fencing requires configured masters")
+	}
+	var domains []string
+	// Only the DRBD pair may be fenced, never the third etcd quorum member.
+	for _, master := range p.cfg.Nodes.Masters[:2] {
+		if !fenceDomainPattern.MatchString(master.Name) {
+			return nil, nil, fmt.Errorf("invalid fencing domain %q", master.Name)
+		}
+		domains = append(domains, master.Name)
+	}
+	helperTemplate, err := cms.TemplatesFS.ReadFile("templates/drbd/fence-virsh.sh")
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl, err := template.New("fence-virsh").Parse(string(helperTemplate))
+	if err != nil {
+		return nil, nil, err
+	}
+	var helper bytes.Buffer
+	if err := tmpl.Execute(&helper, domains); err != nil {
+		return nil, nil, err
+	}
+	helperPath := filepath.Join(privateDir, "command")
+	if err := fenceWriteFile(helperPath, helper.Bytes(), 0700); err != nil {
+		return nil, nil, err
+	}
 
-	if _, err := os.Stat(keyPath); err != nil {
-		if err := os.MkdirAll(sshDir, 0700); err != nil {
-			return nil, err
+	// Read trusted local public keys; never bootstrap trust with ssh-keyscan.
+	knownHosts, err := fenceHostKeys(p.cfg.HypervisorIP(), hostKeyDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	pinPath := filepath.Join(privateDir, "known_hosts")
+	if err := fenceSafePath(pinPath, false, true); err != nil {
+		return nil, nil, err
+	}
+	if pinned, err := os.ReadFile(pinPath); err == nil {
+		if !bytes.Equal(pinned, knownHosts) {
+			return nil, nil, fmt.Errorf("hypervisor host keys differ from persistent fencing pin %s; review host-key rotation explicitly", pinPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, nil, err
+	} else if err := fenceWriteFile(pinPath, knownHosts, 0600); err != nil {
+		return nil, nil, err
+	}
+
+	keyPath := filepath.Join(sshDir, "id_ed25519_fence")
+	if err := fenceSafePath(keyPath, false, true); err != nil {
+		return nil, nil, err
+	}
+	if _, err := os.Lstat(keyPath); os.IsNotExist(err) {
+		if err := fenceSafePath(keyPath+".pub", false, false); err != nil {
+			return nil, nil, err
 		}
 		out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-C", "cms-ha-fence", "-f", keyPath).CombinedOutput() // #nosec G204
 		if err != nil {
-			return nil, fmt.Errorf("ssh-keygen: %w: %s", err, strings.TrimSpace(string(out)))
+			return nil, nil, fmt.Errorf("ssh-keygen: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	} else if err != nil {
+		return nil, nil, err
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	signer, err := cryptossh.ParsePrivateKey(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid fencing private key: %w", err)
+	}
+	// Derive identity from the private key, not a stale or substituted .pub file.
+	authPath := filepath.Join(sshDir, "authorized_keys")
+	if err := fenceSafePath(authPath, false, true); err != nil {
+		return nil, nil, err
+	}
+	existing, err := os.ReadFile(authPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, nil, err
+	}
+	updated := fenceAuthorizedKeys(existing, signer.PublicKey(), helperPath)
+	if err := fenceWriteFile(authPath, updated, 0600); err != nil {
+		return nil, nil, err
+	}
+	return key, knownHosts, nil
+}
+
+// Validate each managed path before reading/replacing it. Host public keys may
+// be root-owned; the local account must own its home and private artifacts.
+func fenceSafePath(path string, directory, private bool) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) && !directory {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	stat := &unix.Stat_t{}
+	if err := unix.Lstat(path, stat); err != nil {
+		return err
+	}
+	uid := uint32(os.Getuid())
+	unsafeMode := info.Mode().Perm()&0022 != 0
+
+	if info.Mode()&os.ModeSymlink != 0 || info.IsDir() != directory || (!directory && !info.Mode().IsRegular()) || unsafeMode || (private && stat.Uid != uid) || (!private && stat.Uid != uid && stat.Uid != 0) {
+		return fmt.Errorf("unsafe fencing path (ownership, type or permissions): %s", path)
+	}
+	if private && !directory && info.Mode().Perm()&0077 != 0 {
+		// Existing authorized_keys may be public-readable; atomic replacement
+		// tightens it without altering any other key entries.
+		if filepath.Base(path) != "authorized_keys" {
+			return fmt.Errorf("fencing file must be private: %s", path)
 		}
 	}
+	return nil
+}
 
-	pub, err := os.ReadFile(keyPath + ".pub")
+func fenceWriteFile(path string, content []byte, mode os.FileMode) error {
+	if err := fenceSafePath(path, false, true); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".fence-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(content); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+func fenceHostKeys(host, dir string) ([]byte, error) {
+	if host == "" {
+		return nil, fmt.Errorf("missing hypervisor address")
+	}
+	paths, err := filepath.Glob(filepath.Join(dir, "ssh_host_*_key.pub"))
 	if err != nil {
 		return nil, err
 	}
-	authPath := filepath.Join(sshDir, "authorized_keys")
-	existing, _ := os.ReadFile(authPath)
-	if !strings.Contains(string(existing), strings.TrimSpace(string(pub))) {
-		f, err := os.OpenFile(authPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304
+	var pins bytes.Buffer
+	for _, path := range paths {
+		if err := fenceSafePath(path, false, false); err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
 		}
-		_, werr := f.Write(append(pub, '\n'))
-		if cerr := f.Close(); werr == nil {
-			werr = cerr
+		key, _, _, rest, err := cryptossh.ParseAuthorizedKey(data)
+		if err != nil || len(bytes.TrimSpace(rest)) != 0 {
+			return nil, fmt.Errorf("invalid local sshd public host key: %s", path)
 		}
-		if werr != nil {
-			return nil, werr
-		}
+		fmt.Fprintf(&pins, "%s %s", host, cryptossh.MarshalAuthorizedKey(key))
 	}
+	if pins.Len() == 0 {
+		return nil, fmt.Errorf("no local sshd public host keys in %s", dir)
+	}
+	return pins.Bytes(), nil
+}
 
-	return os.ReadFile(keyPath)
+func fenceAuthorizedKeys(existing []byte, key cryptossh.PublicKey, helper string) []byte {
+	var result bytes.Buffer
+	for _, line := range bytes.SplitAfter(existing, []byte("\n")) {
+		parsed, _, _, _, err := cryptossh.ParseAuthorizedKey(line)
+		if err == nil && bytes.Equal(parsed.Marshal(), key.Marshal()) {
+			continue // Remove all bare, optioned and duplicate entries of this identity.
+		}
+		result.Write(line)
+	}
+	if result.Len() > 0 && result.Bytes()[result.Len()-1] != '\n' {
+		result.WriteByte('\n')
+	}
+	command := "exec '" + strings.ReplaceAll(helper, "'", "'\\''") + "'"
+	command = strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(command)
+	fmt.Fprintf(&result, "restrict,no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty,no-user-rc,command=\"%s\" %s", command, cryptossh.MarshalAuthorizedKey(key))
+	return result.Bytes()
 }
