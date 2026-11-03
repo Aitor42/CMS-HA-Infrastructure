@@ -219,7 +219,11 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			}
 		}
 
-		if !p.lv.NetExists(ctx, nd.name) {
+		exists, err := p.lv.NetExistsChecked(ctx, nd.name)
+		if err != nil {
+			return fmt.Errorf("failed to check network %s: %w", nd.name, err)
+		}
+		if !exists {
 			content, err := cms.TemplatesFS.ReadFile(nd.tmplPath)
 			if err != nil {
 				return fmt.Errorf("failed to read network template %s: %w", nd.tmplPath, err)
@@ -253,6 +257,13 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 			}
 			logging.Success("Network %q created and started", nd.name)
 		} else {
+			definition, err := p.lv.NetDefinition(ctx, nd.name)
+			if err != nil {
+				return fmt.Errorf("failed to read network %s definition: %w", nd.name, err)
+			}
+			if err := verifyNetworkDefinition(nd.name, definition, bridge, domain); err != nil {
+				return err
+			}
 			if !p.lv.NetIsActive(ctx, nd.name) {
 				if err := p.lv.NetStart(ctx, nd.name); err != nil {
 					return fmt.Errorf("failed to start network %s: %w", nd.name, err)
@@ -285,6 +296,39 @@ func renderNetworkXML(content []byte, bridge, domain string) ([]byte, error) {
 	}
 	replacer := strings.NewReplacer("{{BRIDGE}}", bridgeXML.String(), "{{DOMAIN}}", domainXML.String())
 	return []byte(replacer.Replace(string(content))), nil
+}
+
+// verifyNetworkDefinition fails closed when an existing libvirt network uses a
+// different bridge or DNS domain than config.yaml. The phase used to keep any
+// existing network, then configure the host IP on the *configured* bridge:
+// libvirt kept forwarding through the old one and the host addressed an
+// interface the VMs did not use. Recreating automatically would tear down a
+// live network, so require an explicit operator action instead.
+func verifyNetworkDefinition(name string, content []byte, wantBridge, wantDomain string) error {
+	var def struct {
+		Bridge *struct {
+			Name string `xml:"name,attr"`
+		} `xml:"bridge"`
+		Domain *struct {
+			Name string `xml:"name,attr"`
+		} `xml:"domain"`
+	}
+	if err := xml.Unmarshal(content, &def); err != nil {
+		return fmt.Errorf("parse existing libvirt network %s definition: %w", name, err)
+	}
+	if def.Bridge == nil || def.Bridge.Name == "" {
+		return fmt.Errorf("existing libvirt network %s has no bridge name; recreate it to match config.yaml", name)
+	}
+	if def.Bridge.Name != wantBridge {
+		return fmt.Errorf("existing libvirt network %s uses bridge %q, but config.yaml requests %q; stop its VMs, then recreate it with `virsh net-destroy %s` and `virsh net-undefine %s`", name, def.Bridge.Name, wantBridge, name, name)
+	}
+	if def.Domain == nil || def.Domain.Name == "" {
+		return fmt.Errorf("existing libvirt network %s has no DNS domain; recreate it to match config.yaml", name)
+	}
+	if def.Domain.Name != wantDomain {
+		return fmt.Errorf("existing libvirt network %s uses DNS domain %q, but config.yaml requests %q; stop its VMs, then recreate it with `virsh net-destroy %s` and `virsh net-undefine %s`", name, def.Domain.Name, wantDomain, name, name)
+	}
+	return nil
 }
 
 // configureHostBridge assigns a .254 IP address to a host bridge interface to allow host routing to VMs.

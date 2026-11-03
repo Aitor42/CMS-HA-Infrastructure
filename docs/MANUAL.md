@@ -135,6 +135,8 @@ Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the cl
 
 Fast provisioning needs the cloud image from the previous step. The Cobbler and `vm install-batches` steps can be skipped in this mode because no node boots the installer; `deploy` still runs the Cobbler phases so later phases see the same topology. The PXE run with `vm.provisioning: pxe` remains the deliverable gate; the hosted workflow reproduces it with `jumpstart_image=iso` and `fast_provisioning=false`. Measure both with `--timings-file`.
 
+`init-vms` reuses an existing `internal` or `main` libvirt network only when its bridge and DNS domain match `config.yaml`. After changing `network.*.bridge` or `network.*.domain`, stop the VMs on that network, recreate it with `virsh net-destroy <name>` and `virsh net-undefine <name>`, then rerun the phase. It fails explicitly instead of keeping the old network while configuring the host IP on the new bridge.
+
 ### Step 2: Sequential Installation and RAM Adjustment (Batches)
 
 Run the command that automates the creation and installation of client nodes in sequential batches:

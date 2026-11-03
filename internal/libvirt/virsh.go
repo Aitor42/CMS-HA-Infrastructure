@@ -308,6 +308,11 @@ func (c *Client) NetExistsChecked(ctx context.Context, name string) (bool, error
 	return false, nil
 }
 
+// NetDefinition returns the persistent XML definition of a libvirt network.
+func (c *Client) NetDefinition(ctx context.Context, name string) ([]byte, error) {
+	return c.virsh(ctx, "net-dumpxml", name)
+}
+
 // NetIsActive checks if a libvirt network is active.
 func (c *Client) NetIsActive(ctx context.Context, name string) bool {
 	out, err := c.virsh(ctx, "net-info", name)

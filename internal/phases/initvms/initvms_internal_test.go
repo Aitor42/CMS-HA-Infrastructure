@@ -514,3 +514,39 @@ func TestRenderNetworkXMLUsesConfiguredBridgeAndDomain(t *testing.T) {
 		t.Errorf("rendered XML still has placeholders:\n%s", out)
 	}
 }
+
+func TestVerifyNetworkDefinitionRejectsBridgeAndDomainDrift(t *testing.T) {
+	const matching = `<network>
+  <name>internal</name>
+  <bridge name='virbr-int' stp='on' delay='0'/>
+  <domain name='internal.local'/>
+</network>`
+	cases := []struct {
+		name       string
+		definition string
+		bridge     string
+		domain     string
+		wantErr    string
+	}{
+		{name: "matching", definition: matching, bridge: "virbr-int", domain: "internal.local"},
+		{name: "bridge drift", definition: matching, bridge: "virbr-other", domain: "internal.local", wantErr: "uses bridge"},
+		{name: "domain drift", definition: matching, bridge: "virbr-int", domain: "lab.internal", wantErr: "uses DNS domain"},
+		{name: "missing bridge", definition: `<network><domain name='internal.local'/></network>`, bridge: "virbr-int", domain: "internal.local", wantErr: "has no bridge"},
+		{name: "missing domain", definition: `<network><bridge name='virbr-int'/></network>`, bridge: "virbr-int", domain: "internal.local", wantErr: "has no DNS domain"},
+		{name: "malformed XML", definition: `<network>`, bridge: "virbr-int", domain: "internal.local", wantErr: "parse existing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyNetworkDefinition("internal", []byte(tc.definition), tc.bridge, tc.domain)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("verifyNetworkDefinition() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("verifyNetworkDefinition() = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}

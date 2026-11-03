@@ -3,6 +3,7 @@ package tests
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,6 +35,39 @@ func fakeVirtInstall(t *testing.T) string {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return argsFile
+}
+
+func TestLibvirt_NetDefinitionUsesNetDumpXML(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	xmlFile := filepath.Join(dir, "network.xml")
+	const networkXML = "<network><name>internal</name></network>\n"
+	if err := os.WriteFile(xmlFile, []byte(networkXML), 0o644); err != nil {
+		t.Fatalf("write network XML: %v", err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\ncat \"" + xmlFile + "\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "virsh"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake virsh: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	c := &libvirt.Client{URI: "test:///default"}
+	got, err := c.NetDefinition(t.Context(), "internal")
+	if err != nil {
+		t.Fatalf("NetDefinition: %v", err)
+	}
+	if string(got) != networkXML {
+		t.Errorf("NetDefinition() = %q, want %q", got, networkXML)
+	}
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	want := []string{"-c", "test:///default", "net-dumpxml", "internal"}
+	if gotArgs := strings.Split(strings.TrimSpace(string(args)), "\n"); !reflect.DeepEqual(gotArgs, want) {
+		t.Errorf("virsh args = %v, want %v", gotArgs, want)
+	}
 }
 
 func TestLibvirt_VirtInstallBuildsExpectedArgs(t *testing.T) {
