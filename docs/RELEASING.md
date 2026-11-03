@@ -1,15 +1,21 @@
 # Releasing `cms-ha`
 
-Releases are built from annotated tags by `.github/workflows/release.yml`. The
-workflow uses GoReleaser to produce `linux/amd64` and `linux/arm64` archives and
+Releases are triggered by `v*` tags in `.github/workflows/release.yml` (use
+annotated tags by convention; the trigger itself accepts either tag kind).
+The workflow runs reusable CI, then the full hosted ISO/PXE integration with
+strict chaos and teardown, against the exact tagged commit before publishing.
+Failure or cancellation prevents publication. It then uses GoReleaser to
+produce `linux/amd64` and `linux/arm64` archives and
 a single `SHA256SUMS` file. Syft attaches an SBOM for each archive, and Cosign
 signs the checksum file with a short-lived keyless certificate (OIDC from
 GitHub Actions). No long-lived signing key is stored in the repository.
 
 ## Cut a release
 
-1. Confirm the PXE/Cobbler gate is green for the commit on `main` (the hosted
-   cloud run is a fast iteration path, not the deliverable gate).
+1. Review the target commit on `main` and record the applicable measurements
+   using the [acceptance procedure](MANUAL.md#73-automated-failover-testing).
+   A green cloud smoke run is not the ISO/PXE deliverable gate. The tag workflow reruns CI and PXE
+   before publication; this can occupy a hosted runner for several hours.
 2. Create and push an annotated tag:
 
    ```bash
@@ -17,8 +23,11 @@ GitHub Actions). No long-lived signing key is stored in the repository.
    git push origin v2.2.0
    ```
 
-3. The **Release** workflow publishes the GitHub release and uploads
-   `release-evidence` as a workflow artifact. The binary reports its identity:
+3. After both gates pass, the **Release** workflow publishes the GitHub release
+   and uploads `release-evidence`. The integration artifacts include
+   `failover.json` and expire after 30 days; attach a sanitized report and
+   supporting evidence to a durable release location. There is no reliance on
+   a subsequent `release.published` event. The binary reports its identity:
 
    ```bash
    cms-ha --version
@@ -28,20 +37,22 @@ GitHub Actions). No long-lived signing key is stored in the repository.
 ## Verify a download
 
 ```bash
-sha256sum -c SHA256SUMS
-
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp 'https://github.com/Aitor42/CMS-HA-Infrastructure/.github/workflows/release.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 
+# Only trust the checksums after the signature verification succeeds.
+sha256sum -c SHA256SUMS
+
 # Inspect the attached SBOM (one per archive).
 syft packages cms-ha_2.2.0_linux_amd64.tar.gz -o table
 ```
 
-The checksum file is the root of trust for the archives; verify it first, then
-verify each archive against it. A release without `SHA256SUMS.sigstore.json` or
+Verify the checksum file's signature and the expected signer identity before
+trusting its archive checksums. The signature authenticates the checksum file;
+the checksum file alone is not a trust anchor. A release without `SHA256SUMS.sigstore.json` or
 an SBOM is incomplete and should not be deployed.
 
 ## Local dry run

@@ -75,23 +75,33 @@ runs:
 |------|-------|------|
 | **gosec** | Go SAST (HIGH severity, MEDIUM confidence) | **Blocking** — build fails on any HIGH finding |
 | **govulncheck** | Reachable vulnerabilities in dependencies | **Blocking** |
-| **Gitleaks** | Committed secrets in the working tree (`.gitleaks.toml`) | **Blocking** — any finding |
-| **Trivy** (`vuln,secret`) | Filesystem CVEs and leaked secrets | **Blocking** — HIGH/CRITICAL |
+| **Gitleaks** | Current working-tree files (`--no-git`, `.gitleaks.toml`); not Git history | **Blocking** — any finding |
+| **Trivy** (`vuln,secret`) | Filesystem CVEs and leaked secrets; vulnerabilities without a fix are excluded by `--ignore-unfixed` | **Blocking** — HIGH/CRITICAL |
 | **Trivy** (`misconfig`) | Kubernetes manifest posture | Report only (see *Accepted risks*) |
 
-gosec results are also uploaded as SARIF to GitHub code scanning.
+gosec results are also uploaded as SARIF to GitHub code scanning. These
+filesystem/dependency checks do not scan the live guest OS or prove that all
+deployed container images are vulnerability-free.
+
+`make security` requires every scanner by default and propagates blocking
+failures. `SECURITY_STRICT=0` permits missing tools for local exploration only;
+a partial scan is not a clean security result. Neither mode makes Kubernetes
+misconfiguration findings blocking.
 
 ### CI supply chain
 
-- Every workflow declares `permissions: contents: read`; only the security job
-  raises `security-events: write` for the SARIF upload. Checkout does not
-  persist `GITHUB_TOKEN` in the repository's git config
+- Workflows default to `permissions: contents: read`. The security job uses
+  `security-events: write` for SARIF; release publication separately grants
+  `contents: write` and `id-token: write` for publishing and keyless signing.
+  Checkout does not persist `GITHUB_TOKEN` in the repository's Git config
   (`persist-credentials: false`).
 - Every action is pinned to a **commit SHA**, not a mutable tag. Dependabot
   (`.github/dependabot.yml`) updates both Go modules and the pinned Actions
   weekly.
-- Integration artifacts are retained for **7 days**, not 14: they contain
-  diagnostics and guest console captures, not release deliverables.
+- Hosted integration artifacts are retained for **30 days**; self-hosted
+  integration artifacts for **7 days**. They include diagnostics and guest
+  console captures: sanitize them before sharing and archive release evidence
+  separately if it must outlive that retention period.
 - The hosted runner grants `/dev/kvm` and the libvirt socket to the runner user
   with **ACLs** where the filesystem supports them (owner/group-scoped
   fallback otherwise); it no longer makes either world-writable
@@ -125,11 +135,12 @@ WordPress, reachable through the nginx VIP.
 |-------|--------------|
 | **Package (the fix)** | `role::cms_frontend` pins `php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3` to **≥ 8.3.6-0ubuntu0.24.04.13**, the Ubuntu Noble revision that carries `CVE-2026-109618_109619.patch`. Ubuntu backports the upstream patch instead of bumping the upstream version, so a patched node still answers `PHP 8.3.6`: the Debian revision is what tells the two apart. A guarded `apt-get update` (skipped once every pinned package satisfies the floor) makes the patched release visible before the packages are resolved. |
 | **PHP ini** | `/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini` sets `session.upload_progress.enabled = Off`. The Apache SAPI reads it at startup, so it is in place *before* the request is parsed — the PHP team asks for exactly this, and not for `ini_set()` (too late) nor for a `.user.ini` (per request). It closes the session path CVE-2026-109619 was confirmed with. |
-| **Apache** | `/etc/apache2/conf-enabled/php-hardening.conf` sets `php_admin_value memory_limit -1` (removes the user-controllable out-of-memory bailout CVE-2026-109618 abuses — `php_admin_value` cannot be overridden by the application nor from `.htaccess`), `php_admin_flag session.upload_progress.enabled Off`, `php_admin_value post_max_size 32M`, `upload_max_filesize 16M` and `LimitRequestBody 33554432`. |
-| **nginx** | `client_max_body_size 32m` bounds the request at the proxy, so the same limit applies at every layer and a single request can never make PHP ask for more memory than the node has. |
+| **Apache** | `/etc/apache2/conf-enabled/php-hardening.conf` sets `php_admin_value memory_limit 128M`, `php_admin_flag session.upload_progress.enabled Off`, `post_max_size 32M`, `upload_max_filesize 16M` and `LimitRequestBody 33554432`. Prefork concurrency is limited to four workers in `mpm_prefork.conf`. These are resource safeguards, not substitutes for patched packages. |
+| **nginx** | `client_max_body_size 32m` bounds the request body at the proxy. Request size does not bound PHP execution memory: decoding, application work and concurrency can amplify consumption. |
 
-Only the package upgrade is the fix; the rest are the mitigations the PHP team
-and CERT-EU publish for the case where a node has not been patched yet.
+The package upgrade remains mandatory. Finite memory/concurrency limits and
+request-body limits protect lab resources; they must not be described as a
+replacement for the security patch or a total-memory guarantee.
 
 ### Proving it
 
@@ -174,18 +185,18 @@ follow-up that needs a live cluster to validate safely.
    emptyDir mounts. The scan stays **enabled and visible** (report-only) so the
    debt is not hidden; hardening is a follow-up to be done against real
    hardware.
-3. **fence SSH key** on the DRBD masters targets the hypervisor's **operator
-   account** (not root) and is scoped to `virsh` lifecycle calls; it is a
-   separate trust path from the VM deploy account.
-4. **`memory_limit = -1` on the frontends.** This is the mitigation the PHP
-   team asks for: a finite limit is exactly the out-of-memory bailout
-   CVE-2026-109618 abuses. The request size is bounded at every layer
-   (`client_max_body_size`, `LimitRequestBody`, `post_max_size`), so a request
-   cannot ask for more memory than the node has, and the kernel's own OOM
-   killer remains the last boundary if something does. The alternative — a
-   cgroup limit on `apache2.service` — was not adopted because a cgroup OOM
-   would stop the whole service instead of a single worker, which trades an
-   RCE for an outage on a 768 MB node.
+3. **Fencing trust path.** The automatic path authenticates as the current OS
+   account on the hypervisor. Its dedicated key has a forced command and
+   forwarding/PTY restrictions; only exact `destroy`/`domstate` requests for
+   the two DRBD peers are allowed (not the third quorum-only master). Host keys are pinned from trusted local
+   sshd public keys, distributed to the masters and checked strictly. Existing
+   sudo rights are still required; a dedicated account and narrow sudo policy
+   remain recommended deployment-specific hardening. Custom commands are not
+   covered by the automatic restrictions. See the [fencing migration procedure](MANUAL.md#71-master-1-failure-drbdk3s-primary).
+4. **Resource limits are not a complete DoS defense.** PHP is limited to 128M
+   per request and Apache prefork to four workers. Native allocations, other
+   services and workload behavior still need measurement. Package patching is
+   required regardless of those limits; HTTP body size does not bound memory.
 5. **VM disk images are mode `0600` and rely on libvirt dynamic ownership.**
    The deploy account and the qemu account are different users. The init-vms
    preflight reads `/etc/libvirt/qemu.conf` and fails if `dynamic_ownership` is

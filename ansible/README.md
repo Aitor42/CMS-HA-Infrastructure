@@ -12,13 +12,18 @@ as a second official deployment entry point. The two paths share `config.yaml`
 and the same inventory data; there is no independent source of addresses, MACs
 or VM sizes.
 
-Ansible is **not** used for runtime operations or fencing. Start/stop/shrink,
-state queries and STONITH stay on the libvirt primitive inside the Go
-orchestrator, so a failure in Python or the collections can never block a fence.
+Ansible is **not** used for runtime operations or fencing. Start/stop/shrink
+and state queries use the Go orchestrator's libvirt primitive. Guest-initiated
+STONITH uses the scripts installed by `setup-drbd`; the derived SSH path pins
+hypervisor host keys and uses a forced command restricted to `destroy`/`domstate`
+of the two configured DRBD domains. It does not invoke Ansible or its collections.
+It still depends on SSH, hypervisor access and successful power-off confirmation.
 
 ```bash
-make provision                       # Ansible creates networks + VMs
-./cms-ha deploy --skip-vm-create     # service phases only
+make provision                     # optional: define networks, disks and domains
+# Boot/install jumpstart, configure Cobbler/register nodes, and install clients
+# using the MANUAL procedure before attempting service deployment:
+./cms-ha deploy --skip-vm-create   # skips VM creation, not Cobbler/registration
 ```
 
 If you extend the optional Ansible path, put its creation logic in the Ansible
@@ -29,7 +34,7 @@ independently.
 
 | Layer | Tool | Responsibility |
 |:------|:-----|:---------------|
-| Infrastructure (create/declare) | **Ansible** | libvirt networks, pools, disks, domain XML |
+| Infrastructure (create/declare) | **Go by default; Ansible optional** | libvirt networks, disks, domain XML |
 | Node desired state | **Puppet** | packages, services, config files inside the guest |
 | Orchestration & hot ops | **Go/Cobra** | control flow, timeouts, phases, runtime libvirt primitive, fencing |
 
@@ -97,6 +102,22 @@ configured counts. CI also runs `ansible-lint` and `--syntax-check`.
 
 ## Idempotency
 
-Disks are guarded with `creates:` and the seed ISO is only rebuilt when the
-rendered user-data changes, so a second `provision.yml` run reports **0
-changes** (except when `config.yaml` genuinely changed).
+Disks are guarded with `creates:` and the seed ISO build handler is notified
+when user-data or meta-data changes. Domain definitions are reapplied; bridge
+address assignment treats `File exists` as unchanged. This is intended to be
+repeatable, not a verified guarantee that every second run reports zero changes.
+
+The network templates enable bridge STP only; they do not configure LACP,
+RSTP, bonded uplinks or physical cable failover. Inventory parity and syntax/lint
+checks are not equivalent to live deployment acceptance. The release's
+prepublication ISO/PXE gate uses the Go path, not this optional playbook.
+
+Re-running Ansible alone does not migrate guest storage or fencing policy.
+Existing labs need `setup-puppet` for generated frontend NFS allowlists, hard
+uploads mounts, Apache dependencies and PHP limits, and `setup-drbd` for the
+restricted fencing key and pinned host keys. Follow the standalone migration
+notes in [MANUAL](../docs/MANUAL.md#62-wordpress-media-and-file-backups) and
+[the fencing procedure](../docs/MANUAL.md#71-master-1-failure-drbdk3s-primary).
+Checkpoint resume additionally requires the original executable, host and
+non-secret deployment inputs; do not rebuild before `--resume` or carry progress
+from the optional provisioning path into a different deployment plan blindly.
