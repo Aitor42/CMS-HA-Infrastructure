@@ -2,9 +2,12 @@ package puppet
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -223,7 +226,7 @@ func TestGeneratedHieraDataUsesTheConfiguredTopology(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generatedHieraData: %v", err)
 	}
-	var data map[string]string
+	var data map[string]any
 	if err := yaml.Unmarshal(out, &data); err != nil {
 		t.Fatalf("generated Hiera data is not valid YAML: %v\n%s", err, out)
 	}
@@ -241,7 +244,10 @@ func TestGeneratedHieraDataUsesTheConfiguredTopology(t *testing.T) {
 			t.Errorf("%s = %q, want %q", key, data[key], want)
 		}
 	}
-	hosts := data["cms_ha::hosts_content"]
+	hosts, ok := data["cms_ha::hosts_content"].(string)
+	if !ok {
+		t.Fatalf("hosts_content must remain a string, got %T", data["cms_ha::hosts_content"])
+	}
 	for _, want := range []string{
 		"10.10.0.1\tgw1.lab.internal gw1",
 		"10.10.0.10\tprovisioner.lab.internal provisioner puppet ca.lab.internal ca",
@@ -250,6 +256,197 @@ func TestGeneratedHieraDataUsesTheConfiguredTopology(t *testing.T) {
 		if !strings.Contains(hosts, want) {
 			t.Errorf("generated hosts content is missing %q:\n%s", want, hosts)
 		}
+	}
+}
+
+func TestGeneratedHieraFrontendIPsExcludeOtherRoles(t *testing.T) {
+	cfg := puppetTestConfig()
+	cfg.Nodes.CMSFrontends = []config.NodeDetail{
+		{Name: "renamed-web", IP: "10.20.0.121", FQDN: "renamed-web.lab.main"},
+		{Name: "main-hotdesk-looking-name", IP: "10.20.0.122", FQDN: "other-web.lab.main"},
+		{Name: "duplicate", IP: "10.20.0.121", FQDN: "duplicate.lab.main"},
+	}
+	out, err := (&Phase{cfg: cfg}).generatedHieraData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		FrontendIPs []string `yaml:"cms_ha::cms_frontend_ips"`
+	}
+	if err := yaml.Unmarshal(out, &data); err != nil {
+		t.Fatalf("frontend IPs must be a YAML sequence of strings: %v", err)
+	}
+	want := []string{"10.20.0.121", "10.20.0.122"}
+	if !slices.Equal(data.FrontendIPs, want) {
+		t.Fatalf("cms_frontend_ips = %v, want only configured frontends %v (no hotdesks, LBs or other roles)", data.FrontendIPs, want)
+	}
+}
+
+func TestGeneratedHieraRejectsMissingOrUnsafeFrontendIPs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		frontends []config.NodeDetail
+	}{
+		{"nil", nil},
+		{"empty", []config.NodeDetail{}},
+		{"missing IP", []config.NodeDetail{{Name: "web"}}},
+		{"CIDR", []config.NodeDetail{{IP: "10.20.0.0/24"}}},
+		{"wildcard", []config.NodeDetail{{IP: "*"}}},
+		{"hostname", []config.NodeDetail{{IP: "main-cms1.lab.main"}}},
+		{"invalid IP", []config.NodeDetail{{IP: "10.20.0.999"}}},
+		{"shell argument", []config.NodeDetail{{IP: "10.20.0.121; true"}}},
+		{"partial list", []config.NodeDetail{{IP: "10.20.0.121"}, {IP: ""}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := puppetTestConfig()
+			cfg.Nodes.CMSFrontends = tc.frontends
+			out, err := (&Phase{cfg: cfg}).generatedHieraData()
+			if err == nil || !strings.Contains(err.Error(), "nodes.cms_frontends") || len(out) != 0 {
+				t.Fatalf("expected explicit frontend validation error and no Hiera, got %q, %v", out, err)
+			}
+		})
+	}
+}
+
+// Compile storage against the real generated Hiera without applying any
+// resources. Stub only role::base to avoid unrelated mount/cron module needs.
+func TestStorageCatalogUsesGeneratedFrontendIPs(t *testing.T) {
+	if _, err := exec.LookPath("ruby"); err != nil {
+		t.Skip("Ruby is not installed")
+	}
+	if out, err := exec.CommandContext(t.Context(), "ruby", "-rpuppet", "-e", "puts Puppet.version").CombinedOutput(); err != nil {
+		t.Skipf("Puppet Ruby library is unavailable: %s", out)
+	}
+	cfg := puppetTestConfig()
+	cfg.Nodes.CMSFrontends = append(cfg.Nodes.CMSFrontends, config.NodeDetail{Name: "web2", IP: "10.20.0.122"})
+	raw, err := (&Phase{cfg: cfg}).generatedHieraData()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated map[string]any
+	if err := yaml.Unmarshal(raw, &generated); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join("..", "..", "..", "puppet", "modules", "role", "manifests", "storage.pp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		ips  any
+		fail bool
+	}{
+		{"generated", generated["cms_ha::cms_frontend_ips"], false},
+		{"empty", []string{}, true},
+		{"missing", nil, true},
+		{"wildcard", []string{"*"}, true},
+		{"subnet", []string{"10.20.0.0/24"}, true},
+		{"invalid IP", []string{"10.20.0.999"}, true},
+		{"empty element", []string{""}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			manifests := filepath.Join(dir, "modules", "role", "manifests")
+			for _, path := range []string{manifests, filepath.Join(dir, "data")} {
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			data := make(map[string]any, len(generated))
+			for key, value := range generated {
+				data[key] = value
+			}
+			if tc.ips == nil {
+				delete(data, "cms_ha::cms_frontend_ips")
+			} else {
+				data["cms_ha::cms_frontend_ips"] = tc.ips
+			}
+			hiera, err := yaml.Marshal(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for path, contents := range map[string][]byte{
+				filepath.Join(manifests, "storage.pp"): manifest,
+				filepath.Join(manifests, "base.pp"): []byte(`class role::base {
+  exec { 'ufw-enable': command => '/bin/true' }
+}`),
+				filepath.Join(dir, "data", "common.yaml"): hiera,
+				filepath.Join(dir, "hiera.yaml"):          []byte("version: 5\ndefaults:\n  datadir: data\n  data_hash: yaml_data\nhierarchy:\n  - name: Common\n    path: common.yaml\n"),
+				filepath.Join(dir, "catalog.rb"): []byte(`require 'puppet'
+require 'json'
+root = ARGV.fetch(0)
+Puppet.initialize_settings([
+  '--confdir', File.join(root, 'conf'), '--vardir', File.join(root, 'var'),
+  '--logdir', File.join(root, 'log'), '--rundir', File.join(root, 'run'),
+  '--modulepath', File.join(root, 'modules'),
+  '--hiera_config', File.join(root, 'hiera.yaml'), '--code', 'include role::storage'
+])
+begin
+  catalog = Puppet::Parser::Compiler.compile(Puppet::Node.new('nfs-isolation'))
+  rules = catalog.resources.select { |r| r.type == 'Exec' }.to_h { |r| [r.title, { 'command' => r[:command], 'require' => Array(r[:require]).map(&:to_s) }] }
+  puts JSON.generate({ 'exports' => catalog.resource('File', '/etc/exports')[:content], 'rules' => rules })
+rescue => error
+  warn error.message
+  exit 1
+end
+`),
+			} {
+				if err := os.WriteFile(path, contents, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := exec.CommandContext(t.Context(), "ruby", filepath.Join(dir, "catalog.rb"), dir).CombinedOutput()
+			if tc.fail {
+				if err == nil || !strings.Contains(string(out), "cms_ha::cms_frontend_ips") {
+					t.Fatalf("unsafe/missing allowlist must fail explicitly, got %v: %s", err, out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("storage catalog: %v\n%s", err, out)
+			}
+			var catalog struct {
+				Exports string `json:"exports"`
+				Rules   map[string]struct {
+					Command string   `json:"command"`
+					Require []string `json:"require"`
+				} `json:"rules"`
+			}
+			if err := json.Unmarshal(out, &catalog); err != nil {
+				t.Fatalf("invalid catalog output: %v\n%s", err, out)
+			}
+			options := "(rw,sync,no_subtree_check,all_squash,anonuid=33,anongid=33)"
+			want := "/srv/nfs/wp-uploads 10.20.0.101" + options + " 10.20.0.122" + options + "\n"
+			if catalog.Exports != want {
+				t.Errorf("exports = %q, want frontend-only %q", catalog.Exports, want)
+			}
+			if strings.Contains(catalog.Exports, "10.20.0.201") || strings.Contains(catalog.Exports, "/24") {
+				t.Error("exports must not authorize hotdesks or the Main subnet")
+			}
+			for _, ip := range []string{"10.20.0.101", "10.20.0.122"} {
+				rule := catalog.Rules["ufw-storage-nfs-"+ip]
+				if !strings.Contains(rule.Command, "allow from "+ip+" to any port 2049 proto tcp") {
+					t.Errorf("missing frontend NFSv4 grant for %s: %q", ip, rule.Command)
+				}
+			}
+			for name, rule := range catalog.Rules {
+				if strings.Contains(rule.Command, "ufw allow from ") &&
+					!strings.Contains(rule.Command, "from 10.20.0.101 to ") && !strings.Contains(rule.Command, "from 10.20.0.122 to ") {
+					t.Errorf("unexpected NFS grant %s: %s", name, rule.Command)
+				}
+			}
+			for port, arguments := range map[string]string{"2049": "2049", "2049/tcp": "2049 proto tcp", "111": "111"} {
+				rule := catalog.Rules["ufw-storage-remove-legacy-"+port]
+				if rule.Command != "/usr/sbin/ufw --force delete allow from 10.20.0.0/24 to any port "+arguments {
+					t.Errorf("legacy %s migration missing: %q", port, rule.Command)
+				}
+				for _, ip := range []string{"10.20.0.101", "10.20.0.122"} {
+					if !slices.Contains(rule.Require, "Exec[ufw-storage-nfs-"+ip+"]") {
+						t.Errorf("legacy %s deletion must wait for frontend %s grant: %v", port, ip, rule.Require)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -262,7 +459,7 @@ func TestManifestsOnlyLookUpHieraKeysThePhaseGenerates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generatedHieraData: %v", err)
 	}
-	var generated map[string]string
+	var generated map[string]any
 	if err := yaml.Unmarshal(raw, &generated); err != nil {
 		t.Fatalf("generated Hiera data: %v", err)
 	}

@@ -12,6 +12,7 @@ class role::k3s_master {
   include role::base
 
   $internal_cidr = lookup('cms_ha::internal_cidr', String, undef, '192.168.10.0/24')
+  $main_cidr = lookup('cms_ha::main_cidr', String, undef, '192.168.20.0/24')
   $monitor_ip = lookup('cms_ha::monitor_ip', String, undef, '192.168.10.20')
 
   # ---------------------------------------------------------------------------
@@ -148,11 +149,24 @@ class role::k3s_master {
   # UFW — K3s control-plane firewall rules
   # ---------------------------------------------------------------------------
 
-  # Kubernetes API server
+  # Hiera currently exposes subnet CIDRs, not master/worker/frontend IP lists
+  # or the hypervisor's administration address. Keep the internal subnet for
+  # joins and monitoring; orchestration runs kubectl locally over SSH. Exact
+  # node/admin allowlists require generated role data, not hostname heuristics.
   exec { 'ufw-k3s-api':
-    command => '/usr/sbin/ufw allow 6443/tcp comment "K3s API server"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "6443/tcp"',
+    command => "/usr/sbin/ufw allow from ${internal_cidr} to any port 6443 proto tcp comment \"K3s API from Internal subnet\"",
+    unless  => "/usr/sbin/ufw status | /usr/bin/grep -E '^6443/tcp[[:space:]]+ALLOW[[:space:]]' | /usr/bin/grep -Fq ' ${internal_cidr} '",
     require => Exec['ufw-enable'],
+  }
+
+  # Remove the previous IPv4/IPv6 public grants only after the replacements
+  # exist. A port-only guard would mistake those old grants for scoped rules.
+  [6443, 30306].each |$port| {
+    exec { "ufw-k3s-remove-public-${port}":
+      command => "/usr/sbin/ufw --force delete allow ${port}/tcp",
+      onlyif  => "/usr/sbin/ufw status | /usr/bin/grep -Eq '^${port}/tcp[[:space:]].*ALLOW.*Anywhere'",
+      require => [Exec['ufw-k3s-api'], Exec['ufw-mariadb-nodeport-main'], Exec['ufw-mariadb-nodeport-internal']],
+    }
   }
 
   # etcd peer communication (HA cluster)
@@ -184,11 +198,18 @@ class role::k3s_master {
     require => Exec['ufw-enable'],
   }
 
-  # MariaDB NodePort (exposed by K3s service)
-  exec { 'ufw-mariadb-nodeport':
-    command => '/usr/sbin/ufw allow 30306/tcp comment "MariaDB NodePort"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "30306/tcp"',
-    require => Exec['ufw-enable'],
+  # Main contains the CMS clients; Internal contains the hypervisor running
+  # verify/traffic TCP healthchecks and the monitor. mysqld_exporter uses
+  # 127.0.0.1:30306 (UFW's existing loopback allowance is left intact).
+  # These are subnet bounds only: kube-proxy DNAT/FORWARD can bypass UFW INPUT.
+  # Do not claim NodePort isolation without a pre-DNAT/CNI enforcement layer.
+  $database_sources = { 'main' => $main_cidr, 'internal' => $internal_cidr }
+  $database_sources.each |$zone, $source| {
+    exec { "ufw-mariadb-nodeport-${zone}":
+      command => "/usr/sbin/ufw allow from ${source} to any port 30306 proto tcp comment \"MariaDB NodePort from ${zone}\"",
+      unless  => "/usr/sbin/ufw status | /usr/bin/grep -E '^30306/tcp[[:space:]]+ALLOW[[:space:]]' | /usr/bin/grep -Fq ' ${source} '",
+      require => Exec['ufw-enable'],
+    }
   }
 
   # mysqld_exporter metrics

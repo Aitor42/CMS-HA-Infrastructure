@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"sort"
@@ -212,7 +213,7 @@ func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) err
 		set -euo pipefail
 		shopt -s nullglob
 		export DEBIAN_FRONTEND=noninteractive
-		
+
 		# Ensure puppet user and group exist
 		id -u puppet >/dev/null 2>&1 || adduser --system --group --home /var/lib/puppet --shell /bin/false puppet
 		mkdir -p /usr/share/puppet/modules
@@ -449,7 +450,23 @@ func (p *Phase) generatedSitePP() ([]byte, error) {
 // generatedHieraData is the config subset the manifests look up. Every value is
 // rendered by yaml.Marshal so a domain or user name cannot break the file.
 func (p *Phase) generatedHieraData() ([]byte, error) {
-	data := map[string]string{
+	if len(p.cfg.Nodes.CMSFrontends) == 0 {
+		return nil, fmt.Errorf("nodes.cms_frontends must contain at least one frontend IP for NFS isolation")
+	}
+	frontendIPs := make([]string, 0, len(p.cfg.Nodes.CMSFrontends))
+	seen := make(map[string]bool)
+	for i, frontend := range p.cfg.Nodes.CMSFrontends {
+		ip := net.ParseIP(frontend.IP)
+		if ip == nil || ip.To4() == nil {
+			return nil, fmt.Errorf("nodes.cms_frontends[%d].ip must be a valid IPv4 address for NFS isolation: %q", i, frontend.IP)
+		}
+		address := ip.To4().String()
+		if !seen[address] {
+			frontendIPs = append(frontendIPs, address)
+			seen[address] = true
+		}
+	}
+	data := map[string]any{
 		"cms_ha::deploy_user":       p.cfg.SSHUser(),
 		"cms_ha::jumpstart_ip":      p.cfg.Nodes.Jumpstart.IP,
 		"cms_ha::jumpstart_ip_main": p.cfg.Nodes.Jumpstart.IPMain,
@@ -459,6 +476,7 @@ func (p *Phase) generatedHieraData() ([]byte, error) {
 		"cms_ha::monitor_ip":        p.cfg.Nodes.Monitor.IP,
 		"cms_ha::storage_ip":        p.cfg.Nodes.Storage.IP,
 		"cms_ha::hosts_content":     p.hostsContent(),
+		"cms_ha::cms_frontend_ips":  frontendIPs,
 	}
 	return yaml.Marshal(data)
 }
