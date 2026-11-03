@@ -12,6 +12,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
@@ -54,6 +55,23 @@ printf '%%s  %%s\n' %q "$tmp" | sha256sum -c -
 install -m 0755 "$tmp" /usr/local/bin/k3s
 curl -fsSL --connect-timeout 15 --max-time 60 --retry 3 --retry-delay 2 https://get.k3s.io | %sINSTALL_K3S_SKIP_DOWNLOAD=true %sINSTALL_K3S_EXEC=%q sh -
 `, url, k3sSHA256, installEnv, skip, execArgs)
+}
+
+// flannelIfaceArg selects the interface that owns the node's internal address
+// at runtime. The NIC name depends on the guest's PCI order and on how many
+// networks initvms attached, so a hardcoded enp1s0 silently pointed Flannel at
+// the wrong NIC (or at a non-existent one) in any other topology.
+const flannelIfaceArg = `--flannel-iface "$flannel_iface"`
+
+// flannelInterfaceScript resolves the interface that owns nodeIP into
+// flannel_iface. It fails the node install instead of letting K3s fall back to
+// an arbitrary default route when no interface matches.
+func flannelInterfaceScript(nodeIP string) string {
+	return fmt.Sprintf(`flannel_iface=$(ip -o -4 addr show | awk -v target=%s '$3 == "inet" { split($4, parts, "/"); if (parts[1] == target) { print $2; exit } }')
+if [ -z "$flannel_iface" ]; then
+  echo "no network interface owns %s" >&2
+  exit 1
+fi`, shell.Quote(nodeIP), nodeIP)
 }
 
 // Phase implements the Kubernetes setup phase.
@@ -141,7 +159,7 @@ func (p *Phase) bootstrapControlPlane(ctx context.Context, master1 config.NodeDe
 	// Start the server with --no-block too: the upstream unit is Type=notify
 	// with TimeoutStartSec=0, so a server that cannot start would otherwise
 	// hang systemctl forever. The API wait below is the bounded readiness gate.
-	initCmd := k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP), "", true) + "systemctl daemon-reload\nsystemctl start k3s --no-block\n"
+	initCmd := flannelInterfaceScript(master1.IP) + "\n" + k3sInstallCommand(fmt.Sprintf("server --cluster-init --secrets-encryption --etcd-expose-metrics --node-external-ip %s %s", master1.IP, flannelIfaceArg), "", true) + "systemctl daemon-reload\nsystemctl start k3s --no-block\n"
 	if err := runChecked(ctx, p.pool, master1.IP, initCmd, "install K3s on master1"); err != nil {
 		return err
 	}
@@ -209,7 +227,7 @@ func (p *Phase) joinControlPlane(ctx context.Context, master1 config.NodeDetail)
 		m := m
 		serverJoinTasks[m.IP] = func(ctx context.Context, pool ssh.Executor) error {
 			logging.Info("Installing K3s on %s (server join)...", m.Name)
-			joinCmd := k3sInstallCommand(fmt.Sprintf("server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s --flannel-iface enp1s0", master1.IP, joinTokenPath, m.IP), "", true) + "systemctl daemon-reload\nsystemctl start k3s --no-block\n"
+			joinCmd := flannelInterfaceScript(m.IP) + "\n" + k3sInstallCommand(fmt.Sprintf("server --server https://%s:6443 --token-file %s --secrets-encryption --etcd-expose-metrics --node-external-ip %s %s", master1.IP, joinTokenPath, m.IP, flannelIfaceArg), "", true) + "systemctl daemon-reload\nsystemctl start k3s --no-block\n"
 			return runChecked(ctx, pool, m.IP, joinCmd, "join K3s "+m.Name)
 		}
 	}
@@ -228,20 +246,24 @@ func (p *Phase) joinWorkers(ctx context.Context, master1 config.NodeDetail) erro
 	logging.Info("Installing K3s Agents on Workers...")
 	const joinTokenPath = "/root/.k3s-join-token"
 	installEnv := fmt.Sprintf("K3S_TOKEN_FILE=%s K3S_URL=https://%s:6443 ", joinTokenPath, master1.IP)
-	agentJoinCmd := k3sInstallCommand("--flannel-iface enp1s0", installEnv, true) + "systemctl daemon-reload\nsystemctl start k3s-agent --no-block\n"
-	var workerIPs []string
+	workerTasks := make(map[string]func(context.Context, ssh.Executor) error, len(p.cfg.Nodes.Workers))
 	for _, w := range p.cfg.Nodes.Workers {
-		if w.IP != "" {
-			workerIPs = append(workerIPs, w.IP)
+		if w.IP == "" {
+			continue
+		}
+		w := w
+		workerTasks[w.IP] = func(ctx context.Context, pool ssh.Executor) error {
+			agentJoinCmd := flannelInterfaceScript(w.IP) + "\n" + k3sInstallCommand(flannelIfaceArg, installEnv, true) + "systemctl daemon-reload\nsystemctl start k3s-agent --no-block\n"
+			if err := runChecked(ctx, pool, w.IP, agentJoinCmd, "join K3s agent "+w.Name); err != nil {
+				return fmt.Errorf("failed to join k3s agent on %s: %w", w.IP, err)
+			}
+			return nil
 		}
 	}
 
-	for _, r := range p.pool.RunParallel(ctx, workerIPs, agentJoinCmd) {
+	for _, r := range p.pool.RunParallelFunc(ctx, workerTasks) {
 		if r.Err != nil {
-			return fmt.Errorf("failed to join k3s agent on %s: %w", r.Host, r.Err)
-		}
-		if r.ExitCode != 0 {
-			return fmt.Errorf("failed to join k3s agent on %s (exit code %d): %s", r.Host, r.ExitCode, strings.TrimSpace(r.Output))
+			return r.Err
 		}
 	}
 	return nil

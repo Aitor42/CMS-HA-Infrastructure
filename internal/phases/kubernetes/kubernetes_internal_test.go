@@ -98,7 +98,7 @@ func TestK3sServerInstallSkipsBlockingStart(t *testing.T) {
 }
 
 func TestK3sAgentInstallSkipsBlockingStart(t *testing.T) {
-	cmd := k3sInstallCommand("--flannel-iface enp1s0", "K3S_TOKEN_FILE=/root/.k3s-join-token ", true)
+	cmd := k3sInstallCommand(flannelIfaceArg, "K3S_TOKEN_FILE=/root/.k3s-join-token ", true)
 	if !strings.Contains(cmd, "INSTALL_K3S_SKIP_START=true") {
 		t.Errorf("k3s agent command is missing INSTALL_K3S_SKIP_START=true:\n%s", cmd)
 	}
@@ -110,6 +110,60 @@ func TestK3sAgentInstallSkipsBlockingStart(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "| K3S_TOKEN_FILE=/root/.k3s-join-token") {
 		t.Error("k3s agent install must pass K3S_TOKEN_FILE to the install script")
+	}
+}
+
+func TestFlannelInterfaceIsResolvedFromTheNodeAddress(t *testing.T) {
+	script := flannelInterfaceScript("10.10.0.11")
+	if !strings.Contains(script, "ip -o -4 addr show") {
+		t.Errorf("flannel script does not inspect the node interfaces:\n%s", script)
+	}
+	if !strings.Contains(script, "target='10.10.0.11'") {
+		t.Errorf("flannel script does not match the configured node address:\n%s", script)
+	}
+	if !strings.Contains(script, "parts[1] == target") {
+		t.Errorf("flannel script does not extract the interface that owns the address:\n%s", script)
+	}
+	if !strings.Contains(script, `if [ -z "$flannel_iface" ]`) {
+		t.Errorf("flannel script does not fail when no interface matches:\n%s", script)
+	}
+	if strings.Contains(flannelIfaceArg, "enp1s0") {
+		t.Errorf("flannel interface argument hardcodes a NIC name: %q", flannelIfaceArg)
+	}
+}
+
+func TestJoinWorkersResolvesFlannelPerWorker(t *testing.T) {
+	cfg := &config.Config{Nodes: config.NodesConfig{
+		Masters: []config.NodeDetail{{Name: "master1", IP: "10.10.0.11"}},
+		Workers: []config.NodeDetail{
+			{Name: "worker1", IP: "10.10.0.13"},
+			{Name: "worker2", IP: "10.10.0.14"},
+		},
+	}}
+	fake := &testutil.FakeExecutor{}
+	p := &Phase{cfg: cfg, pool: fake}
+	if err := p.joinWorkers(context.Background(), cfg.Nodes.Masters[0]); err != nil {
+		t.Fatalf("joinWorkers: %v", err)
+	}
+	for _, worker := range cfg.Nodes.Workers {
+		found := false
+		for _, command := range fake.Commands {
+			if command.Host != worker.IP {
+				continue
+			}
+			if strings.Contains(command.Cmd, "target='"+worker.IP+"'") && strings.Contains(command.Cmd, "$flannel_iface") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("joinWorkers did not resolve the flannel interface on %s", worker.IP)
+		}
+	}
+	for _, command := range fake.Commands {
+		if strings.Contains(command.Cmd, "enp1s0") {
+			t.Errorf("joinWorkers still hardcodes enp1s0:\n%s", command.Cmd)
+		}
 	}
 }
 
