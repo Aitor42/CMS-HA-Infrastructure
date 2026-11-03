@@ -25,6 +25,8 @@ Installed on all managed nodes via the `prometheus-node-exporter` apt package. P
 
 ### Prometheus Configuration
 
+`cms-ha phase setup-puppet` renders `/etc/prometheus/prometheus.yml` from `config.yaml` and uploads it through Puppet's fileserver, so the scrape jobs follow the configured topology instead of the committed default lab. The committed file (`puppet/modules/role/files/prometheus/prometheus.yml`) is only the manual fallback used outside the orchestrator. The generated file includes one job per role:
+
 ```yaml
 global:
   scrape_interval: 15s
@@ -46,6 +48,8 @@ scrape_configs:
         - '192.168.20.101:9100'
         - '192.168.20.102:9100'
 ```
+
+The default addresses above correspond to the default `config.yaml`. Renaming a node, changing either subnet or adding/removing workers updates `node_exporter`, `nginx`, `apache`, `mysql`, `k3s_kubelet`, `etcd`, `blackbox` and `blackbox-frontends` targets automatically; a role with no nodes (for example, no load balancers) omits its job rather than keeping a stale target.
 
 ### Infrastructure Metrics
 

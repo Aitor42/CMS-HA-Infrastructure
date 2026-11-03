@@ -259,6 +259,97 @@ func TestGeneratedHieraDataUsesTheConfiguredTopology(t *testing.T) {
 	}
 }
 
+func TestGeneratedPrometheusConfigUsesTheConfiguredTopology(t *testing.T) {
+	p := &Phase{cfg: puppetTestConfig()}
+	out, err := p.generatedPrometheusConfig()
+	if err != nil {
+		t.Fatalf("generatedPrometheusConfig: %v", err)
+	}
+	if strings.Contains(string(out), "192.168.") {
+		t.Errorf("generated prometheus.yml still contains a default lab address:\n%s", out)
+	}
+
+	var doc struct {
+		Global        map[string]string `yaml:"global"`
+		RuleFiles     []string          `yaml:"rule_files"`
+		ScrapeConfigs []struct {
+			JobName       string `yaml:"job_name"`
+			StaticConfigs []struct {
+				Targets []string `yaml:"targets"`
+			} `yaml:"static_configs"`
+		} `yaml:"scrape_configs"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("generated prometheus.yml is not valid YAML: %v\n%s", err, out)
+	}
+	if doc.Global["scrape_interval"] != "15s" {
+		t.Errorf("scrape_interval = %q, want 15s", doc.Global["scrape_interval"])
+	}
+	if len(doc.RuleFiles) != 1 || doc.RuleFiles[0] != "/etc/prometheus/alert-rules.yml" {
+		t.Errorf("rule_files = %v, want the alert rules file", doc.RuleFiles)
+	}
+
+	jobs := make(map[string][]string, len(doc.ScrapeConfigs))
+	for _, job := range doc.ScrapeConfigs {
+		var targets []string
+		for _, group := range job.StaticConfigs {
+			targets = append(targets, group.Targets...)
+		}
+		jobs[job.JobName] = targets
+	}
+
+	for job, want := range map[string][]string{
+		"node_exporter": {
+			"10.10.0.1:9100", "10.10.0.10:9100", "10.10.0.11:9100", "10.10.0.12:9100", "10.10.0.13:9100",
+			"10.10.0.14:9100", "10.10.0.15:9100", "10.10.0.16:9100", "10.20.0.103:9100", "10.20.0.104:9100", "10.20.0.101:9100",
+		},
+		"nginx":              {"10.20.0.103:9113", "10.20.0.104:9113"},
+		"apache":             {"10.20.0.101:9117"},
+		"mysql":              {"10.10.0.11:9104"},
+		"k3s_kubelet":        {"10.10.0.11:10250", "10.10.0.12:10250", "10.10.0.13:10250", "10.10.0.14:10250"},
+		"etcd":               {"10.10.0.11:2381", "10.10.0.12:2381", "10.10.0.13:2381"},
+		"blackbox":           {"https://10.20.0.100/"},
+		"blackbox-frontends": {"10.20.0.101:80"},
+	} {
+		if got := jobs[job]; !slices.Equal(got, want) {
+			t.Errorf("%s targets = %v, want %v", job, got, want)
+		}
+	}
+}
+
+func TestGeneratedPrometheusConfigOmitsEmptyRoles(t *testing.T) {
+	cfg := puppetTestConfig()
+	cfg.Nodes.LBs = nil
+	cfg.Nodes.CMSFrontends = nil
+	cfg.Network.Main.VIP = ""
+	out, err := (&Phase{cfg: cfg}).generatedPrometheusConfig()
+	if err != nil {
+		t.Fatalf("generatedPrometheusConfig: %v", err)
+	}
+	for _, unwanted := range []string{"job_name: nginx", "job_name: apache", "job_name: blackbox"} {
+		if strings.Contains(string(out), unwanted) {
+			t.Errorf("prometheus.yml contains %q without the matching role:\n%s", unwanted, out)
+		}
+	}
+}
+
+func TestUploadPuppetCodeWritesTheGeneratedPrometheusConfig(t *testing.T) {
+	t.Chdir("../../..")
+	fake := &testutil.FakeExecutor{}
+	p := &Phase{cfg: puppetTestConfig(), pool: fake}
+	if err := p.uploadPuppetCode(context.Background(), "192.168.10.10"); err != nil {
+		t.Fatalf("uploadPuppetCode() = %v", err)
+	}
+	const remote = "/etc/puppetlabs/code/environments/production/modules/role/files/prometheus/prometheus.yml"
+	content, ok := fake.Files["192.168.10.10"][remote]
+	if !ok {
+		t.Fatalf("uploadPuppetCode() did not write %s", remote)
+	}
+	if !strings.Contains(string(content), "10.10.0.11:9100") {
+		t.Errorf("uploaded prometheus.yml does not use the configured topology:\n%s", content)
+	}
+}
+
 func TestGeneratedHieraFrontendIPsExcludeOtherRoles(t *testing.T) {
 	cfg := puppetTestConfig()
 	cfg.Nodes.CMSFrontends = []config.NodeDetail{
