@@ -522,7 +522,7 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 	// failover — and only reveal it at the end of the chaos test.
 	var fenceKey, knownHosts []byte
 	if p.cfg.DRBD.Fencing && !custom {
-		fenceKey, knownHosts, err = p.ensureFenceKey()
+		fenceKey, knownHosts, err = p.ensureFenceKey(ctx)
 		if err != nil {
 			return fmt.Errorf("could not provision the hypervisor fence SSH key, so automatic promotion would never fence: %w "+
 				"(set drbd.fencing: false to accept that, or configure a custom drbd.fence_command)", err)
@@ -600,7 +600,7 @@ var fenceDomainPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // Use the OS account, not HOME/USER from a potentially sudo-inherited environment:
 // sshd looks up this account's actual home for authorized_keys.
-func (p *Phase) ensureFenceKey() ([]byte, []byte, error) {
+func (p *Phase) ensureFenceKey(ctx context.Context) ([]byte, []byte, error) {
 	account, err := user.Current()
 	if err != nil {
 		return nil, nil, err
@@ -608,11 +608,11 @@ func (p *Phase) ensureFenceKey() ([]byte, []byte, error) {
 	if !regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$`).MatchString(account.Username) || p.cfg.HypervisorIP() == "" {
 		return nil, nil, fmt.Errorf("invalid local fencing account or hypervisor address")
 	}
-	return p.provisionFenceKey(account.HomeDir, "/etc/ssh")
+	return p.provisionFenceKey(ctx, account.HomeDir, "/etc/ssh")
 }
 
 // Parameters make all provisioning regressions testable without touching ~/.ssh.
-func (p *Phase) provisionFenceKey(home, hostKeyDir string) ([]byte, []byte, error) {
+func (p *Phase) provisionFenceKey(ctx context.Context, home, hostKeyDir string) ([]byte, []byte, error) {
 	if !filepath.IsAbs(home) || strings.ContainsAny(home, "\r\n\x00") {
 		return nil, nil, fmt.Errorf("unsafe fencing home path")
 	}
@@ -690,7 +690,7 @@ func (p *Phase) provisionFenceKey(home, hostKeyDir string) ([]byte, []byte, erro
 		if err := fenceSafePath(keyPath+".pub", false, false); err != nil {
 			return nil, nil, err
 		}
-		out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-C", "cms-ha-fence", "-f", keyPath).CombinedOutput() // #nosec G204
+		out, err := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "cms-ha-fence", "-f", keyPath).CombinedOutput() // #nosec G204
 		if err != nil {
 			return nil, nil, fmt.Errorf("ssh-keygen: %w: %s", err, strings.TrimSpace(string(out)))
 		}

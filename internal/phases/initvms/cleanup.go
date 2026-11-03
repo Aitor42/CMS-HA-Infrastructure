@@ -128,13 +128,13 @@ func (p *Phase) destroyVM(ctx context.Context, name, state string, exists bool) 
 }
 
 // ensureSSHKey returns the public key for the given private key path, generating it if needed.
-func (p *Phase) ensureSSHKey(keyPath string) (string, error) {
+func (p *Phase) ensureSSHKey(ctx context.Context, keyPath string) (string, error) {
 	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
 		logging.Info("Generating SSH key at %s...", keyPath)
 		if err := os.MkdirAll(filepath.Dir(keyPath), 0700); err != nil {
 			return "", fmt.Errorf("failed to create SSH dir: %w", err)
 		}
-		cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-N", "", "-f", filepath.Clean(keyPath)) // #nosec G204 -- keyPath is within configured safe storage directory
+		cmd := exec.CommandContext(ctx, "ssh-keygen", "-t", "ed25519", "-N", "", "-f", filepath.Clean(keyPath)) // #nosec G204 -- keyPath is within configured safe storage directory
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("ssh-keygen failed: %v: %s", err, out)
 		}

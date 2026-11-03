@@ -131,7 +131,7 @@ func TestFenceProvisionPersistsPinAndDeploysIt(t *testing.T) {
 	fenceTestWrite(t, auth, []byte(string(cryptossh.MarshalAuthorizedKey(public))+otherLine), 0644)
 	// A mismatched .pub must not change which identity is migrated.
 	fenceTestWrite(t, filepath.Join(home, ".ssh/id_ed25519_fence.pub"), cryptossh.MarshalAuthorizedKey(other), 0644)
-	key, pins, err := p.provisionFenceKey(home, hostDir)
+	key, pins, err := p.provisionFenceKey(t.Context(), home, hostDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestFenceProvisionPersistsPinAndDeploysIt(t *testing.T) {
 	if err := checkHost("192.168.10.254:22", addr, other); err == nil {
 		t.Fatal("pin accepts a substituted host key")
 	}
-	_, again, err := p.provisionFenceKey(home, hostDir)
+	_, again, err := p.provisionFenceKey(t.Context(), home, hostDir)
 	if err != nil || !bytes.Equal(pins, again) {
 		t.Fatalf("repeat provisioning: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestFenceProvisionPersistsPinAndDeploysIt(t *testing.T) {
 	}
 	_, newHost := fenceTestKey(t)
 	fenceTestWrite(t, filepath.Join(hostDir, "ssh_host_ed25519_key.pub"), cryptossh.MarshalAuthorizedKey(newHost), 0644)
-	if _, _, err := p.provisionFenceKey(home, hostDir); err == nil || !strings.Contains(err.Error(), "differ from persistent") {
+	if _, _, err := p.provisionFenceKey(t.Context(), home, hostDir); err == nil || !strings.Contains(err.Error(), "differ from persistent") {
 		t.Fatalf("rotation accepted: %v", err)
 	}
 	after, _ := os.ReadFile(auth)
@@ -211,7 +211,7 @@ func TestFenceProvisionPersistsPinAndDeploysIt(t *testing.T) {
 func TestFenceProvisionExcludesQuorumOnlyMaster(t *testing.T) {
 	p, home, hostDir, _, _ := fenceFixture(t)
 	p.cfg.Nodes.Masters = append(p.cfg.Nodes.Masters, config.NodeDetail{Name: "quorum-only-master"})
-	if _, _, err := p.provisionFenceKey(home, hostDir); err != nil {
+	if _, _, err := p.provisionFenceKey(t.Context(), home, hostDir); err != nil {
 		t.Fatal(err)
 	}
 	helper, err := os.ReadFile(filepath.Join(home, ".ssh/cms-ha-fence/command"))
@@ -241,7 +241,7 @@ func TestFenceProvisionRejectsUnsafePaths(t *testing.T) {
 			if err := os.Symlink(victim, path); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := p.provisionFenceKey(home, hostDir); err == nil {
+			if _, _, err := p.provisionFenceKey(t.Context(), home, hostDir); err == nil {
 				t.Fatal("accepted symlink")
 			}
 			got, _ := os.ReadFile(victim)
@@ -255,7 +255,7 @@ func TestFenceProvisionRejectsUnsafePaths(t *testing.T) {
 		if err := os.Chmod(home, 0777); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := p.provisionFenceKey(home, hostDir); err == nil {
+		if _, _, err := p.provisionFenceKey(t.Context(), home, hostDir); err == nil {
 			t.Fatal("accepted writable home")
 		}
 	})
@@ -267,7 +267,7 @@ func TestFenceProvisionGeneratesDedicatedKeyInTemp(t *testing.T) {
 	if err := os.Remove(keyPath); err != nil {
 		t.Fatal(err)
 	}
-	key, pins, err := p.provisionFenceKey(home, hostDir)
+	key, pins, err := p.provisionFenceKey(t.Context(), home, hostDir)
 	if err != nil {
 		t.Fatal(err)
 	}

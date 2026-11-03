@@ -1,12 +1,24 @@
 package hypervisor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 )
+
+func TestRestrictDiskHonoursContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := RestrictDisk(ctx, filepath.Join(t.TempDir(), "missing.qcow2"))
+	if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("RestrictDisk() = %v, want the context cancellation", err)
+	}
+}
 
 func TestDynamicOwnershipEnabled(t *testing.T) {
 	tests := []struct {
@@ -37,8 +49,8 @@ func TestQEMUUserFromConfig(t *testing.T) {
 	if err := os.WriteFile(qemuConfigPath, []byte("#user = \"root\"\nuser = \"lab-qemu\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := qemuUser(); got != "lab-qemu" {
-		t.Fatalf("qemuUser() = %q, want lab-qemu", got)
+	if got := qemuUser(t.Context()); got != "lab-qemu" {
+		t.Fatalf("qemuUser(t.Context()) = %q, want lab-qemu", got)
 	}
 }
 
@@ -49,10 +61,10 @@ func TestCheckDiskAccessRejectsDisabledDynamicOwnership(t *testing.T) {
 	if err := os.WriteFile(qemuConfigPath, []byte("dynamic_ownership = 0\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckDiskAccess(&libvirt.Client{URI: "qemu:///system"}); err == nil {
+	if err := CheckDiskAccess(t.Context(), &libvirt.Client{URI: "qemu:///system"}); err == nil {
 		t.Fatal("expected an error when dynamic_ownership is disabled")
 	}
-	if err := CheckDiskAccess(&libvirt.Client{URI: "qemu:///session"}); err != nil {
+	if err := CheckDiskAccess(t.Context(), &libvirt.Client{URI: "qemu:///session"}); err != nil {
 		t.Fatalf("session connections should not require system dynamic ownership: %v", err)
 	}
 }

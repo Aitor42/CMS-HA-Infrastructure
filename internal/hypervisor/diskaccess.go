@@ -1,6 +1,7 @@
 package hypervisor
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,14 +21,14 @@ var qemuConfigPath = "/etc/libvirt/qemu.conf"
 // as the deploy user, libvirt chowns it to the qemu user when the domain
 // starts, and the file stays mode 0600. If the operator disabled
 // dynamic_ownership, fail before creating VMs instead of falling back to 0666.
-func CheckDiskAccess(lv *libvirt.Client) error {
+func CheckDiskAccess(ctx context.Context, lv *libvirt.Client) error {
 	if lv == nil || lv.URI != "qemu:///system" {
 		// A session connection runs qemu as the invoking user, so 0600 is
 		// enough. A remote URI is outside the local-storage model this lab
 		// documents and is left to the operator.
 		return nil
 	}
-	data, err := readQEMUConfig()
+	data, err := readQEMUConfig(ctx)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -51,11 +52,11 @@ func CheckDiskAccess(lv *libvirt.Client) error {
 // when the deploy account cannot chmod a file after libvirt has chowned it.
 // It is best-effort: RestrictDisk still fails closed if a file remains
 // world-accessible and neither chmod nor sudo can fix it.
-func EnsureStorageACL(storageDir string) error {
+func EnsureStorageACL(ctx context.Context, storageDir string) error {
 	if storageDir == "" {
 		return nil
 	}
-	qemu := qemuUser()
+	qemu := qemuUser(ctx)
 	if qemu == "" {
 		return nil
 	}
@@ -68,7 +69,7 @@ func EnsureStorageACL(storageDir string) error {
 		{"-d", "-m", "u:" + qemu + ":rw,m::rw,o::---", storageDir},
 	}
 	for _, args := range commands {
-		if out, err := exec.Command("setfacl", args...).CombinedOutput(); err != nil { // #nosec G204 -- fixed command, validated config path
+		if out, err := exec.CommandContext(ctx, "setfacl", args...).CombinedOutput(); err != nil { // #nosec G204 -- fixed command, validated config path
 			logging.Warn("could not apply storage ACL for %s on %s: %v: %s", qemu, storageDir, err, strings.TrimSpace(string(out)))
 			return nil
 		}
@@ -79,8 +80,8 @@ func EnsureStorageACL(storageDir string) error {
 // qemuUser returns the account configured in qemu.conf, with the two common
 // distro defaults as a fallback. An empty result means this host does not use
 // a separate qemu account (or qemu.conf is unavailable).
-func qemuUser() string {
-	if data, err := readQEMUConfig(); err == nil {
+func qemuUser(ctx context.Context) string {
+	if data, err := readQEMUConfig(ctx); err == nil {
 		for _, raw := range strings.Split(string(data), "\n") {
 			line := strings.TrimSpace(raw)
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -105,13 +106,13 @@ func qemuUser() string {
 
 // readQEMUConfig reads qemu.conf, falling back to sudo when the file is
 // root-only. On a standard Ubuntu libvirt install it is mode 0600 root:root.
-func readQEMUConfig() ([]byte, error) {
+func readQEMUConfig(ctx context.Context) ([]byte, error) {
 	data, err := os.ReadFile(qemuConfigPath)
 	if err == nil {
 		return data, nil
 	}
 	if os.IsPermission(err) {
-		out, sudoErr := exec.Command("sudo", "-n", "cat", qemuConfigPath).Output() // #nosec G204 -- fixed command and path
+		out, sudoErr := exec.CommandContext(ctx, "sudo", "-n", "cat", qemuConfigPath).Output() // #nosec G204 -- fixed command and path
 		if sudoErr == nil {
 			return out, nil
 		}
@@ -141,7 +142,7 @@ func dynamicOwnershipEnabled(data []byte) bool {
 // file before libvirt starts the domain, but dynamic ownership can chown it to
 // qemu before this runs; the deploy account has passwordless sudo by design,
 // so fall back to sudo rather than leaving the image world-readable.
-func RestrictDisk(path string) error {
+func RestrictDisk(ctx context.Context, path string) error {
 	if err := os.Chmod(path, 0600); err == nil {
 		return nil
 	}
@@ -151,7 +152,7 @@ func RestrictDisk(path string) error {
 	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0007 == 0 {
 		return nil
 	}
-	out, err := exec.Command("sudo", "-n", "chmod", "0600", path).CombinedOutput() // #nosec G204 -- fixed command, path from validated config
+	out, err := exec.CommandContext(ctx, "sudo", "-n", "chmod", "0600", path).CombinedOutput() // #nosec G204 -- fixed command, path from validated config
 	if err != nil {
 		return fmt.Errorf("restrict permissions on %s: %w: %s", path, err, strings.TrimSpace(string(out)))
 	}

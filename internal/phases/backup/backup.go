@@ -84,7 +84,7 @@ func (p *Phase) Run(ctx context.Context) error {
 	port := p.cfg.BackupS3Port()
 
 	dataDir := p.cfg.BackupDataDir()
-	if err := ensureDataDir(dataDir); err != nil {
+	if err := ensureDataDir(ctx, dataDir); err != nil {
 		return fmt.Errorf("failed to prepare Garage data dir %s: %w", dataDir, err)
 	}
 
@@ -116,7 +116,7 @@ func (p *Phase) Run(ctx context.Context) error {
 // the orchestrator runs unprivileged (the deploy account carries passwordless
 // sudo instead), so a fresh hypervisor needs sudo to create the directory and
 // to hand it over; the config file is written there right afterwards.
-func ensureDataDir(path string) error {
+func ensureDataDir(ctx context.Context, path string) error {
 	if err := os.MkdirAll(path, 0700); err != nil && !errors.Is(err, fs.ErrPermission) {
 		return err
 	}
@@ -130,7 +130,7 @@ func ensureDataDir(path string) error {
 		"-g", strconv.Itoa(os.Getgid()),
 		path,
 	}
-	cmd := exec.Command("sudo", args...) // #nosec G204 -- fixed argv; the path comes from the configuration
+	cmd := exec.CommandContext(ctx, "sudo", args...) // #nosec G204 -- fixed argv; the path comes from the configuration
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sudo install -d %s failed: %w: %s", path, err, strings.TrimSpace(string(out)))
 	}

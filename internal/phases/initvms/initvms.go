@@ -134,7 +134,7 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 			return fmt.Errorf("%q not found in PATH; install: apt install %s", cmd, pkg)
 		}
 	}
-	if err := hypervisor.CheckDiskAccess(p.lv); err != nil {
+	if err := hypervisor.CheckDiskAccess(ctx, p.lv); err != nil {
 		return err
 	}
 
@@ -142,7 +142,7 @@ func (p *Phase) preflightChecks(ctx context.Context) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("cannot create storage dir %s: %w", dir, err)
 	}
-	if err := hypervisor.EnsureStorageACL(dir); err != nil {
+	if err := hypervisor.EnsureStorageACL(ctx, dir); err != nil {
 		return err
 	}
 	var stat syscall.Statfs_t

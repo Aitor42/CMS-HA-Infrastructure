@@ -65,11 +65,11 @@ func (p *Phase) deployCloudClientNodes(ctx context.Context) error {
 	}
 	logging.Info("Using Ubuntu cloud image: %s", baseImage)
 
-	pubKey, err := p.ensureSSHKey(p.cfg.SSH.PrivateKey)
+	pubKey, err := p.ensureSSHKey(ctx, p.cfg.SSH.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("SSH key setup failed: %w", err)
 	}
-	passHash, err := generateRandomPasswordHash()
+	passHash, err := generateRandomPasswordHash(ctx)
 	if err != nil {
 		return fmt.Errorf("generate admin password hash: %w", err)
 	}

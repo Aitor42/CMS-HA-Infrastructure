@@ -32,7 +32,7 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 	if name == "" {
 		return fmt.Errorf("client VM with an empty name")
 	}
-	if err := CheckDiskAccess(lv); err != nil {
+	if err := CheckDiskAccess(ctx, lv); err != nil {
 		return err
 	}
 
@@ -85,7 +85,7 @@ func CreateClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Client,
 	// keep them owner-only instead of world-writable. CheckDiskAccess (run by
 	// the init-vms preflight) rejects hosts where that mechanism is disabled.
 	for _, disk := range append([]string{diskPath}, extraDiskPaths(extraDisks)...) {
-		if err := RestrictDisk(disk); err != nil {
+		if err := RestrictDisk(ctx, disk); err != nil {
 			return err
 		}
 	}
@@ -101,7 +101,7 @@ func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Cl
 	if name == "" {
 		return fmt.Errorf("client VM with an empty name")
 	}
-	if err := CheckDiskAccess(lv); err != nil {
+	if err := CheckDiskAccess(ctx, lv); err != nil {
 		return err
 	}
 	if baseImage == "" {
@@ -169,7 +169,7 @@ func CreateCloudClientVM(ctx context.Context, cfg *config.Config, lv *libvirt.Cl
 	// Dynamic ownership gives qemu the disks and the seed at start; the deploy
 	// user may already have lost ownership, so a permission error is expected.
 	for _, disk := range append([]string{diskPath, seedISO}, extraDiskPaths(extraDisks)...) {
-		if err := RestrictDisk(disk); err != nil {
+		if err := RestrictDisk(ctx, disk); err != nil {
 			return err
 		}
 	}

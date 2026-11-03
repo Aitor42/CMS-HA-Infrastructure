@@ -86,7 +86,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	logging.Info("Jumpstart install path: %s", mode)
 
 	keyPath := p.cfg.SSH.PrivateKey
-	pubKey, err := p.ensureSSHKey(keyPath)
+	pubKey, err := p.ensureSSHKey(ctx, keyPath)
 	if err != nil {
 		return fmt.Errorf("SSH key setup failed: %w", err)
 	}
@@ -94,7 +94,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 	// Generate a random password hash for the admin user (password login disabled).
 	// A failure here must abort: falling back to a static, publicly known hash
 	// would ship a guessable admin credential into the cloud-init user-data.
-	passHash, err := generateRandomPasswordHash()
+	passHash, err := generateRandomPasswordHash(ctx)
 	if err != nil {
 		return fmt.Errorf("generate admin password hash: %w", err)
 	}
@@ -217,7 +217,7 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		installOpts.Wait = -1
 		installOpts.NoReboot = true
 	}
-	if err := hypervisor.RestrictDisk(diskPath); err != nil {
+	if err := hypervisor.RestrictDisk(ctx, diskPath); err != nil {
 		return fmt.Errorf("restrict jumpstart disk: %w", err)
 	}
 
@@ -347,7 +347,7 @@ func (p *Phase) writeSeed(ctx context.Context, seedDir, seedISO, metaData string
 	if err := libvirt.CreateISO(ctx, seedISO, seedDir, "cidata"); err != nil {
 		return fmt.Errorf("failed to create seed ISO: %w", err)
 	}
-	if err := hypervisor.RestrictDisk(seedISO); err != nil {
+	if err := hypervisor.RestrictDisk(ctx, seedISO); err != nil {
 		return fmt.Errorf("restrict seed ISO: %w", err)
 	}
 	logging.Success("Cloud-init seed ISO created: %s", seedISO)

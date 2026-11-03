@@ -1,6 +1,7 @@
 package initvms
 
 import (
+	"context"
 	crand "crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -34,13 +35,13 @@ func findUbuntuISO(dir string) (string, error) {
 
 // generateRandomPasswordHash generates a random SHA-512 password hash using crypto/rand.
 // The actual password is random and discarded; SSH key auth is enforced and late-commands locks the accounts.
-func generateRandomPasswordHash() (string, error) {
+func generateRandomPasswordHash(ctx context.Context) (string, error) {
 	b := make([]byte, 16)
 	if _, err := crand.Read(b); err != nil {
 		return "", fmt.Errorf("generate random password: %w", err)
 	}
 	randSecret := hex.EncodeToString(b)
-	out, err := exec.Command("openssl", "passwd", "-6", randSecret).Output() // #nosec G204 -- openssl with generated random string
+	out, err := exec.CommandContext(ctx, "openssl", "passwd", "-6", randSecret).Output() // #nosec G204 -- openssl with generated random string
 	if err != nil {
 		return "", fmt.Errorf("openssl passwd -6 failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
