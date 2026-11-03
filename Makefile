@@ -30,6 +30,8 @@ BUILD_DIR   := .
 # (measured: 12.19 MB dynamic vs 12.15 MB static). Override with
 # `make build CGO_ENABLED=1` if a future dependency needs cgo.
 CGO_ENABLED ?= 0
+# Missing scanners fail closed by default; set to 0 only for best-effort local use.
+SECURITY_STRICT ?= 1
 
 # Keep the compiler cache warm across build/vet/test/staticcheck: mixing flag
 # sets invalidated it and turned a 0.35s cached build into an 8.7s rebuild.
@@ -67,9 +69,9 @@ build-check: ## Verify all packages compile
 	@echo "✔ All packages compile successfully"
 
 .PHONY: test
-test: ## Run Go unit tests
-	@echo "▶ Running tests..."
-	$(GO) test -race ./...
+test: ## Run Go unit tests with the cgo-backed race detector
+	@echo "▶ Running tests with race detection (cgo enabled)..."
+	CGO_ENABLED=1 $(GO) test -race ./...
 
 .PHONY: test-cover
 test-cover: ## Run Go tests with cross-package coverage (coverage.out)
@@ -229,7 +231,7 @@ integration-drills: build ## Integration test including traffic and the operatio
 	tests/integration/run.sh --with-traffic --with-drills
 
 .PHONY: integration-resume
-integration-resume: build ## Resume the end-to-end integration test from the deploy checkpoint
+integration-resume: ## Resume with the original binary and compatible deploy checkpoint
 	@echo "▶ Resuming end-to-end integration test..."
 	tests/integration/run.sh --resume
 
@@ -301,25 +303,31 @@ lint-puppet: ## Lint Puppet manifests (puppet-lint)
 	fi
 
 .PHONY: lint-k8s
-lint-k8s: ## Validate Kubernetes manifests (kustomize render + kubeconform)
-	@echo "▶ Validating Kubernetes manifests..."
-	@if command -v kustomize >/dev/null 2>&1; then \
-		kustomize build $(K8S_DIR)/overlays/lab >/dev/null && \
-		kustomize build $(K8S_DIR)/backups >/dev/null && \
-		kustomize build $(K8S_DIR)/jobs >/dev/null && \
-		echo "  ✓ kustomize roots render"; \
-	else \
-		echo "  ℹ kustomize not installed — skipping render check"; \
-	fi
-	@if command -v kubeconform >/dev/null 2>&1; then \
-		kubeconform -strict -summary -skip Kustomization -ignore-filename-pattern '\.patch\.yaml$$' -kubernetes-version 1.29.0 $(K8S_DIR); \
-	else \
-		echo "  ℹ kubeconform not installed — skipping"; \
-	fi
+lint-k8s: ## Validate non-empty rendered Kustomize roots with kubeconform
+	@echo "▶ Validating rendered Kubernetes resources..."
+	@set -euo pipefail; \
+	for tool in kustomize kubeconform python3; do \
+		command -v "$$tool" >/dev/null || { echo "Required tool missing: $$tool" >&2; exit 1; }; \
+	done; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	for root in overlays/lab backups jobs monitoring; do \
+		echo "  · $(K8S_DIR)/$$root"; \
+		kustomize build "$(K8S_DIR)/$$root" > "$$tmp/rendered.yaml"; \
+		kubeconform -strict -summary -output json -kubernetes-version 1.29.0 "$$tmp/rendered.yaml" > "$$tmp/result.json" || { cat "$$tmp/result.json"; exit 1; }; \
+		cat "$$tmp/result.json"; \
+		python3 -c 'import json, sys; s = json.load(open(sys.argv[1]))["summary"]; ok = s["valid"] > 0 and all(s[k] == 0 for k in ("invalid", "errors", "skipped")); sys.exit(0 if ok else "Expected >0 valid resources and no invalid, errored or skipped resources")' "$$tmp/result.json"; \
+	done
 
 .PHONY: security
-security: ## Security scan: gosec + govulncheck + Gitleaks + Trivy
+security: ## Strict security scan (SECURITY_STRICT=0 permits missing local tools)
 	@echo "▶ Security scan..."
+	@set -eu; \
+	case "$(SECURITY_STRICT)" in 0|1) ;; *) echo "SECURITY_STRICT must be 0 or 1" >&2; exit 1;; esac; \
+	if [ "$(SECURITY_STRICT)" = 1 ]; then \
+		for tool in gosec govulncheck gitleaks trivy; do \
+			command -v "$$tool" >/dev/null || { echo "Required security scanner missing: $$tool" >&2; exit 1; }; \
+		done; \
+	fi
 	@if command -v gosec >/dev/null 2>&1; then \
 		gosec -severity high -confidence medium -exclude-dir=tests ./... && \
 		echo "  ✓ gosec: no HIGH findings"; \
@@ -338,7 +346,7 @@ security: ## Security scan: gosec + govulncheck + Gitleaks + Trivy
 	fi
 	@if command -v trivy >/dev/null 2>&1; then \
 		echo "  · dependencies & secrets (blocking on HIGH/CRITICAL)"; \
-		trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .; \
+		trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 . || exit $$?; \
 		echo "  · Kubernetes misconfig (report only)"; \
 		trivy fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 0 .; \
 	else \

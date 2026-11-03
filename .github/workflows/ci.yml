@@ -1,6 +1,7 @@
 name: CI Pipeline
 
 on:
+  workflow_call:
   push:
     branches: ["main", "feature/rewrite-in-go"]
   pull_request:
@@ -32,11 +33,10 @@ jobs:
   build-go:
     name: Build & Test Go CLI
     runs-on: ubuntu-latest
-    # Same flags as `make build`, so vet, build and test share one compiler
-    # cache entry instead of each invalidating the others' (8.7s vs 0.35s).
+    # Keep production builds static; the race step explicitly enables cgo.
     env:
       GOFLAGS: -trimpath
-      # Match `make build` (static binary) so compile/vet/test share its cache.
+      # Match the production binary, not the race detector's requirements.
       CGO_ENABLED: "0"
     steps:
       - name: Checkout repository
@@ -77,6 +77,8 @@ jobs:
           sudo apt-get install -y libvirt-clients
 
       - name: Run unit tests with race detection
+        env:
+          CGO_ENABLED: "1"
         run: make test
 
       - name: Generate coverage profile and enforce minimum
@@ -215,24 +217,8 @@ jobs:
           echo "${KUSTOMIZE_SHA256}  /tmp/kustomize.tar.gz" | sha256sum -c -
           tar xz -C /usr/local/bin -f /tmp/kustomize.tar.gz kustomize
 
-      - name: Render kustomize roots (overlay/backups/jobs)
-        run: |
-          echo "Rendering kustomize roots..."
-          kustomize build kubernetes/overlays/lab > /dev/null
-          kustomize build kubernetes/backups    > /dev/null
-          kustomize build kubernetes/jobs       > /dev/null
-
-      - name: Validate Kubernetes manifests
-        run: |
-          echo "Validating Kubernetes manifests in kubernetes/..."
-          kubeconform \
-            -strict \
-            -summary \
-            -output json \
-            -skip Kustomization \
-            -ignore-filename-pattern '\.patch\.yaml$' \
-            -kubernetes-version 1.29.0 \
-            kubernetes/
+      - name: Validate rendered Kubernetes resources (non-empty, strict)
+        run: make lint-k8s
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 5. Puppet Manifest Validation
@@ -406,7 +392,7 @@ jobs:
           echo "validate-ansible:   ${{ needs.validate-ansible.result }}"
           echo "security-scan:      ${{ needs.security-scan.result }}"
 
-          # Fail if any required job failed
+          # Skipped and cancelled dependencies are not successful checks.
           for result in \
             "${{ needs.build-go.result }}" \
             "${{ needs.lint-actions.result }}" \
@@ -416,8 +402,8 @@ jobs:
             "${{ needs.lint-puppet.result }}" \
             "${{ needs.validate-ansible.result }}" \
             "${{ needs.security-scan.result }}"; do
-            if [ "$result" = "failure" ]; then
-              echo "::error::One or more CI checks failed"
+            if [ "$result" != "success" ]; then
+              echo "::error::Every required CI check must succeed (got: $result)"
               exit 1
             fi
           done

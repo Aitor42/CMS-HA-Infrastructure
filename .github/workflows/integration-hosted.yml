@@ -26,11 +26,33 @@ name: Integration (KVM lab, hosted)
 # self-hosted `integration.yml` workflow.
 #
 # Cadence: pull requests stay on the static/unit CI; the nightly schedule and
-# pushes to main use the fast cloud path; a published release forces the full
-# ISO/PXE path (`jumpstart_image=iso`, `fast_provisioning=false`). Manual
-# dispatch still accepts every profile.
+# pushes to main use the fast cloud path; release calls this workflow with the
+# full ISO/PXE profile before publication. Manual dispatch accepts every profile.
 
 on:
+  workflow_call:
+    inputs:
+      stage:
+        description: "provision = stop after provisioning; full = deploy + verify + failover"
+        type: string
+        default: "full"
+      skip_chaos:
+        description: "Skip the DRBD failover chaos exercise"
+        type: boolean
+        default: false
+      teardown:
+        description: "Run `cleanup` at the end (the runner is thrown away anyway; proves the teardown path)"
+        type: boolean
+        default: false
+      jumpstart_image:
+        description: "Jumpstart install path: cloud (default fast boot) or iso (PXE/Cobbler gate)"
+        type: string
+        default: "cloud"
+      fast_provisioning:
+        description: "Provision client nodes from the cloud image (default fast path; set false for the PXE gate)"
+        type: boolean
+        default: true
+
   workflow_dispatch:
     inputs:
       stage:
@@ -65,11 +87,10 @@ on:
     # Nightly fast-cloud drift check. Scheduled workflows only run on the
     # default branch; keep the expensive full PXE run for releases.
     - cron: '0 3 * * *'
-  release:
-    types: [published]
-
+# A called workflow inherits github.workflow from its caller. Keep the hosted
+# lock namespaced so it never waits on a release lock held by that same caller.
 concurrency:
-  group: integration-hosted-${{ github.ref }}
+  group: integration-hosted-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 # The job only needs to read the repository. It generates credentials inside
@@ -85,9 +106,8 @@ env:
   CONFIG: config.ci.local.yaml
   STATE_FILE: deploy.state
   ARTIFACTS_DIR: integration-artifacts
-  # Resolved per event in the "Resolve integration profile" step: release runs
-  # force the PXE gate, while manual/scheduled runs default to the fast cloud
-  # path. Do not read inputs directly from jobs: schedule/release have none.
+  # Resolve the profile from inputs, falling back to cloud for push/schedule.
+  # Reusable workflows retain the caller's event name (push for release tags).
 
 jobs:
   integration:
@@ -100,6 +120,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Free disk space
         run: |
@@ -367,16 +388,19 @@ jobs:
           PY
 
       - name: Resolve integration profile
+        env:
+          STAGE_INPUT: ${{ inputs.stage }}
+          IMAGE_INPUT: ${{ inputs.jumpstart_image }}
+          FAST_INPUT: ${{ inputs.fast_provisioning }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "JUMPSTART_IMAGE=iso" >> "$GITHUB_ENV"
-            echo "FAST_PROVISIONING=false" >> "$GITHUB_ENV"
-          else
-            image="${{ inputs.jumpstart_image }}"
-            fast="${{ inputs.fast_provisioning }}"
-            echo "JUMPSTART_IMAGE=${image:-cloud}" >> "$GITHUB_ENV"
-            echo "FAST_PROVISIONING=${fast:-true}" >> "$GITHUB_ENV"
-          fi
+          stage="${STAGE_INPUT:-full}"
+          image="${IMAGE_INPUT:-cloud}"
+          fast="${FAST_INPUT:-true}"
+          case "$stage" in full|provision) ;; *) echo "::error::Invalid stage: $stage"; exit 1;; esac
+          case "$image" in cloud|iso) ;; *) echo "::error::Invalid jumpstart_image: $image"; exit 1;; esac
+          case "$fast" in true|false) ;; *) echo "::error::Invalid fast_provisioning: $fast"; exit 1;; esac
+          echo "JUMPSTART_IMAGE=$image" >> "$GITHUB_ENV"
+          echo "FAST_PROVISIONING=$fast" >> "$GITHUB_ENV"
 
       # Both stages need the lab installed; `full` then continues with the
       # service phases, which find the client VMs already defined and skip
@@ -708,9 +732,9 @@ jobs:
           name: integration-hosted-artifacts
           path: integration-artifacts/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 30
 
-      # Opt-in, and a real gate: this is the only place CI exercises the
+      # Opt-in for manual runs and required by release: CI exercises the
       # teardown path (VMs, disks and networks removed from whatever state the
       # lab is in), so a failure here is a failure of the deliverable.
       - name: Tear the lab down

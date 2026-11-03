@@ -7,9 +7,13 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -36,23 +40,51 @@ func main() {
 		fatalf("%v", err)
 	}
 
-	total, covered := 0, 0
+	total, covered, err := changedCoverage(coverage, changed)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if total == 0 {
+		fmt.Println("changed-line coverage: no executable Go lines changed")
+		return
+	}
+	pct := float64(covered) / float64(total) * 100
+	fmt.Printf("changed-line coverage: %.1f%% (%d/%d executable lines)\n", pct, covered, total)
+	if pct < *min {
+		fatalf("changed-line coverage %.1f%% is below the %.1f%% minimum", pct, *min)
+	}
+}
+
+func changedCoverage(coverage map[string][]block, changed map[string]map[int]bool) (total, covered int, err error) {
+	var missing []string
 	for file, lines := range changed {
 		if strings.HasSuffix(file, "_test.go") || strings.HasPrefix(file, "tools/diffcoverage/") {
 			continue
 		}
 		blocks := coverage[file]
 		if len(blocks) == 0 {
+			if len(lines) == 0 {
+				continue
+			}
+			instrumentable, err := hasInstrumentableCode(file)
+			if err != nil {
+				return total, covered, err
+			}
+			if instrumentable {
+				missing = append(missing, file)
+			}
 			continue
 		}
 		for line := range lines {
-			hit := false
+			hit := true
 			executable := false
 			for _, b := range blocks {
 				if line >= b.start && line <= b.end {
 					executable = true
-					if b.count > 0 {
-						hit = true
+					// Line-only matching cannot distinguish branches sharing a
+					// line. Require every overlapping block to have executed.
+					if b.count <= 0 {
+						hit = false
 						break
 					}
 				}
@@ -67,15 +99,35 @@ func main() {
 		}
 	}
 
-	if total == 0 {
-		fmt.Println("changed-line coverage: no executable Go lines changed")
-		return
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return total, covered, fmt.Errorf("changed Go files missing from coverage profile: %s", strings.Join(missing, ", "))
 	}
-	pct := float64(covered) / float64(total) * 100
-	fmt.Printf("changed-line coverage: %.1f%% (%d/%d executable lines)\n", pct, covered, total)
-	if pct < *min {
-		fatalf("changed-line coverage %.1f%% is below the %.1f%% minimum", pct, *min)
+	return total, covered, nil
+}
+
+// Go coverage instruments function bodies, including empty bodies and function
+// literals in package variable initializers, but not type/const/var declarations
+// alone or external function declarations without a body.
+func hasInstrumentableCode(path string) (bool, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return false, fmt.Errorf("parse changed Go file %s: %w", path, err)
 	}
+	found := false
+	ast.Inspect(file, func(node ast.Node) bool {
+		if found {
+			return false
+		}
+		switch node := node.(type) {
+		case *ast.FuncDecl:
+			found = node.Body != nil
+		case *ast.FuncLit:
+			found = true
+		}
+		return !found
+	})
+	return found, nil
 }
 
 func modulePath() string {
@@ -127,7 +179,11 @@ func readProfile(path, module string) (map[string][]block, error) {
 		}
 		file = strings.TrimPrefix(file, module+"/")
 		if filepath.IsAbs(file) {
-			if rel, err := filepath.Rel(".", file); err == nil {
+			cwd, err := os.Getwd()
+			if err != nil {
+				return nil, fmt.Errorf("resolve coverage path: %w", err)
+			}
+			if rel, err := filepath.Rel(cwd, file); err == nil {
 				file = rel
 			}
 		}

@@ -12,8 +12,31 @@ permissions:
   contents: read
 
 jobs:
+  # A local reusable workflow runs against this tag's exact commit. This also
+  # handles tags without a prior branch CI run and avoids API polling races.
+  ci:
+    name: CI for tagged commit
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      security-events: write
+
+  integration-pxe:
+    name: PXE gate for tagged commit
+    needs: [ci]
+    uses: ./.github/workflows/integration-hosted.yml
+    permissions:
+      contents: read
+    with:
+      stage: full
+      skip_chaos: false
+      jumpstart_image: iso
+      fast_provisioning: false
+      teardown: true
+
   release:
     name: Build, sign and publish
+    needs: [ci, integration-pxe]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,6 +46,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
