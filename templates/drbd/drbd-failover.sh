@@ -12,6 +12,39 @@ set -euo pipefail
 RESOURCE="cms_data"
 MOUNT_POINT="/mnt/data/mariadb"
 DRBD_DEVICE="/dev/drbd0"
+export KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+
+storage_is_ready() {
+  local source fstype options root record actual expected
+  [ -b "$DRBD_DEVICE" ] || return 1
+  record=$(findmnt -rn -M "$MOUNT_POINT" -o SOURCE,FSTYPE,OPTIONS,FSROOT) || return 1
+  [[ "$record" != *$'\n'* ]] || return 1
+  read -r source fstype options root <<< "$record"
+  actual=$(readlink -f "$source") || return 1
+  expected=$(readlink -f "$DRBD_DEVICE") || return 1
+  [ -n "$expected" ] && [ "$actual" = "$expected" ] &&
+    [ "$fstype" = "ext4" ] && [ "$root" = "/" ] && [[ ",$options," = *,rw,* ]]
+}
+
+withdraw_storage() {
+  local node role label="" pod_node=""
+  echo "  ✗ Promotion failed; withdrawing storage availability."
+  if command -v kubectl &>/dev/null && [ -f "$KUBECONFIG" ]; then
+    node=$(local_k8s_node) || true
+    if [ -n "$node" ]; then
+      label=$(kubectl get node "$node" --request-timeout=3s -o jsonpath='{.metadata.labels.drbd-status}' 2>/dev/null || true)
+      pod_node=$(kubectl get pod mariadb-0 -n cms --request-timeout=3s -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+      kubectl label node "$node" drbd-status- --request-timeout=3s || echo "ERROR: failed to remove primary label"
+    fi
+    role=$(drbdadm role "$RESOURCE" 2>/dev/null | cut -d/ -f1) || true
+    # A rejected promotion on a passive node must not stop a healthy peer DB.
+    if [ "$role" = "Primary" ] || [ "$label" = "primary" ] || { [ -n "$pod_node" ] && [ "$pod_node" = "$node" ]; }; then
+      kubectl scale statefulset mariadb -n cms --replicas=0 --request-timeout=3s || echo "ERROR: failed to stop MariaDB"
+    fi
+  else
+    echo "ERROR: Kubernetes unavailable; cannot withdraw labels or stop MariaDB"
+  fi
+}
 
 # Resolve this host's Kubernetes node object. Node names are usually the VM's
 # short hostname but may be the FQDN; compare the first label so that
@@ -19,13 +52,14 @@ DRBD_DEVICE="/dev/drbd0"
 # host is not registered, and the callers skip label/pod maintenance.
 local_k8s_node() {
   local short="${HOSTNAME%%.*}"
-  kubectl get nodes -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
+  kubectl get nodes --request-timeout=3s -o jsonpath='{.items[*].metadata.name}' 2>/dev/null \
     | tr ' ' '\n' \
     | awk -v h="$short" 'NF { n=$0; sub(/\..*/, "", n); if (n == h) { print $0; exit } }'
 }
 
 case "${1:-status}" in
   promote)
+    trap 'if [ "$?" -ne 0 ]; then withdraw_storage; fi' EXIT
     echo "[FAILOVER] Promoting local node to Primary..."
 
     # Verify the resource is defined and active in the kernel
@@ -42,13 +76,20 @@ case "${1:-status}" in
     drbdadm primary "$RESOURCE"
     echo "  ✔ Node promoted to Primary"
 
-    mkdir -p "$MOUNT_POINT"
-    if ! mountpoint -q "$MOUNT_POINT"; then
-      mount "$DRBD_DEVICE" "$MOUNT_POINT"
-      echo "  ✔ Filesystem mounted at $MOUNT_POINT"
-    else
-      echo "  ℹ $MOUNT_POINT was already mounted"
+    if ! storage_is_ready; then
+      # Clear stale availability before attempting recovery. Do not overmount
+      # another device, a read-only volume or a bind-mounted subdirectory.
+      withdraw_storage
+      if ! mountpoint -q "$MOUNT_POINT" && [ -b "$DRBD_DEVICE" ]; then
+        mkdir -p "$MOUNT_POINT"
+        mount -t ext4 -o rw "$DRBD_DEVICE" "$MOUNT_POINT"
+      fi
+      if ! storage_is_ready; then
+        echo "  ✗ ERROR: expected writable DRBD filesystem is not mounted"
+        exit 1
+      fi
     fi
+    echo "  ✔ Verified DRBD filesystem mounted at $MOUNT_POINT"
 
     # Label local node as the active primary and clear stale labels from every
     # other master.

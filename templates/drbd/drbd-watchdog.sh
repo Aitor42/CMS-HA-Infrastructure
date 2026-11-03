@@ -59,6 +59,41 @@ local_k8s_node() {
     | awk -v h="$short" 'NF { n=$0; sub(/\..*/, "", n); if (n == h) { print $0; exit } }'
 }
 
+# An arbitrary mountpoint (or a bind of a subdirectory) is not our data volume.
+# Explicit source/type/options also avoid accepting a read-only error remount.
+storage_is_ready() {
+  local source fstype options root record actual expected
+  [ -b "$DRBD_DEVICE" ] || return 1
+  record=$(findmnt -rn -M "$MOUNT_POINT" -o SOURCE,FSTYPE,OPTIONS,FSROOT) || return 1
+  [[ "$record" != *$'\n'* ]] || return 1
+  read -r source fstype options root <<< "$record"
+  actual=$(readlink -f "$source") || return 1
+  expected=$(readlink -f "$DRBD_DEVICE") || return 1
+  [ -n "$expected" ] && [ "$actual" = "$expected" ] &&
+    [ "$fstype" = "ext4" ] && [ "$root" = "/" ] && [[ ",$options," = *,rw,* ]]
+}
+
+withdraw_storage() {
+  local node label="" pod_node=""
+  log "ERROR: withdrawing local storage availability; MariaDB must not use an unverified volume."
+  if ! command -v kubectl &>/dev/null || [ ! -f "$KUBECONFIG" ]; then
+    log "ERROR: Kubernetes unavailable; cannot withdraw labels or stop MariaDB."
+    return
+  fi
+  node=$(local_k8s_node)
+  if [ -z "$node" ]; then
+    log "ERROR: cannot resolve local Kubernetes node to withdraw availability."
+  else
+    label=$(kubectl get node "$node" --request-timeout=3s -o jsonpath='{.metadata.labels.drbd-status}' 2>/dev/null || true)
+    pod_node=$(kubectl get pod mariadb-0 -n cms --request-timeout=3s -o jsonpath='{.spec.nodeName}' 2>/dev/null || true)
+    kubectl label node "$node" drbd-status- --request-timeout=3s || log "ERROR: failed to remove primary label."
+  fi
+  # A passive/unknown node must not stop a healthy database on its peer.
+  if [ "${1:-}" = "primary" ] || [ "$label" = "primary" ] || { [ -n "$pod_node" ] && [ "$pod_node" = "$node" ]; }; then
+    kubectl scale statefulset mariadb -n cms --replicas=0 --request-timeout=3s || log "ERROR: failed to stop MariaDB."
+  fi
+}
+
 get_peer_ip() {
   local peer=""
   for ip in $(grep -oP "address \K[0-9.]+" /etc/drbd.d/cms_data.res 2>/dev/null); do
@@ -110,10 +145,21 @@ while true; do
   if [ "$LOCAL_ROLE" = "Primary" ]; then
     STRIKE_COUNT=0
 
-    mkdir -p "$MOUNT_POINT"
-    if ! mountpoint -q "$MOUNT_POINT"; then
-      log "Primary storage not mounted. Mounting $DRBD_DEVICE at $MOUNT_POINT..."
-      mount "$DRBD_DEVICE" "$MOUNT_POINT" 2>/dev/null || true
+    if ! storage_is_ready; then
+      # Withdraw first, including stale labels left by an earlier successful
+      # iteration. Never stack DRBD over an unexpected existing mount.
+      withdraw_storage primary
+      if ! mountpoint -q "$MOUNT_POINT" && [ -b "$DRBD_DEVICE" ]; then
+        log "Primary storage not mounted. Mounting $DRBD_DEVICE at $MOUNT_POINT..."
+        if ! { mkdir -p "$MOUNT_POINT" && mount -t ext4 -o rw "$DRBD_DEVICE" "$MOUNT_POINT"; }; then
+          log "ERROR: DRBD mount failed."
+        fi
+      fi
+      if ! storage_is_ready; then
+        log "ERROR: expected writable DRBD filesystem is not mounted; refusing primary label and DB scale-up."
+        sleep "$CHECK_INTERVAL"
+        continue
+      fi
     fi
 
     # Ensure Kubernetes label and pod placement are consistent
@@ -156,7 +202,7 @@ while true; do
   # ──────────────────────────────────────────────────────────────────────────
   if [ "$LOCAL_ROLE" = "Secondary" ]; then
     # Secondary cleanup: Ensure storage is NOT mounted locally
-    if mountpoint -q "$MOUNT_POINT" 2>/dev/null; then
+    if storage_is_ready; then
       log "Secondary node has volume mounted. Unmounting $MOUNT_POINT..."
       umount "$MOUNT_POINT" 2>/dev/null || true
     fi
@@ -268,6 +314,7 @@ while true; do
   # ──────────────────────────────────────────────────────────────────────────
   # CASE 3: Role is unknown or uninitialized
   # ──────────────────────────────────────────────────────────────────────────
+  withdraw_storage
   log "DRBD resource in unexpected state: role=$LOCAL_ROLE, cstate=$CSTATE. Attempting drbdadm up..."
   drbdadm up "$RESOURCE" 2>/dev/null || true
   sleep "$CHECK_INTERVAL"
