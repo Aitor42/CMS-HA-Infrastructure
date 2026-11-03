@@ -3,7 +3,6 @@ package ufw
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -185,8 +184,10 @@ func (p *Phase) verifyNAT(ctx context.Context, routerIP string, spec NATSpec) er
 	if err != nil || code != 0 {
 		return fmt.Errorf("could not read the router's live NAT table (exit %d): %s %v", code, strings.TrimSpace(stderr), err)
 	}
-	_, internalNet, _ := net.ParseCIDR(spec.InternalCIDR)
-	_, mainNet, _ := net.ParseCIDR(spec.MainCIDR)
+	internalNet, mainNet, err := spec.networks()
+	if err != nil {
+		return err
+	}
 	checks := []struct {
 		label  string
 		tokens []string

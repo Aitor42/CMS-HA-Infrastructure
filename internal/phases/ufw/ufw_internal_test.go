@@ -263,6 +263,20 @@ func TestNodeIPsToVerifySkipsRouterAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestVerifyNATRejectsInvalidSubnetsInsteadOfPanicking(t *testing.T) {
+	p := &Phase{pool: healthyPhaseFake(t)}
+	spec := NATSpec{
+		WANIface:     "enp3s0",
+		InternalCIDR: "not-a-cidr",
+		MainCIDR:     "192.168.20.0/24",
+		VIP:          "192.168.20.100",
+	}
+	err := p.verifyNAT(t.Context(), testRouterIP, spec)
+	if err == nil || !strings.Contains(err.Error(), "internal network CIDR") {
+		t.Fatalf("verifyNAT() = %v, want an invalid-CIDR error", err)
+	}
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

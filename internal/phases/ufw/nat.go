@@ -42,6 +42,19 @@ func (s NATSpec) validate() error {
 	if !ifaceNamePattern.MatchString(s.WANIface) {
 		return fmt.Errorf("invalid WAN interface name %q", s.WANIface)
 	}
+	if _, _, err := s.networks(); err != nil {
+		return err
+	}
+	ip := net.ParseIP(s.VIP)
+	if ip == nil || ip.To4() == nil {
+		return fmt.Errorf("load-balancer VIP %q is not a valid IPv4 address", s.VIP)
+	}
+	return nil
+}
+
+// networks parses the configured subnets. Callers that need the parsed values
+// use this instead of repeating net.ParseCIDR and discarding its error.
+func (s NATSpec) networks() (internal, main *net.IPNet, err error) {
 	for _, network := range []struct {
 		label string
 		cidr  string
@@ -49,19 +62,20 @@ func (s NATSpec) validate() error {
 		{"internal", s.InternalCIDR},
 		{"main", s.MainCIDR},
 	} {
-		ip, _, err := net.ParseCIDR(network.cidr)
-		if err != nil {
-			return fmt.Errorf("%s network CIDR %q is invalid: %w", network.label, network.cidr, err)
+		ip, ipnet, parseErr := net.ParseCIDR(network.cidr)
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("%s network CIDR %q is invalid: %w", network.label, network.cidr, parseErr)
 		}
 		if ip.To4() == nil {
-			return fmt.Errorf("%s network CIDR %q is not IPv4", network.label, network.cidr)
+			return nil, nil, fmt.Errorf("%s network CIDR %q is not IPv4", network.label, network.cidr)
+		}
+		if network.label == "internal" {
+			internal = ipnet
+		} else {
+			main = ipnet
 		}
 	}
-	ip := net.ParseIP(s.VIP)
-	if ip == nil || ip.To4() == nil {
-		return fmt.Errorf("load-balancer VIP %q is not a valid IPv4 address", s.VIP)
-	}
-	return nil
+	return internal, main, nil
 }
 
 // WANIface discovers the router's WAN uplink: first by the MAC declared in the
@@ -114,8 +128,10 @@ func RenderNATRules(spec NATSpec) ([]byte, error) {
 	if err := spec.validate(); err != nil {
 		return nil, err
 	}
-	_, internalNet, _ := net.ParseCIDR(spec.InternalCIDR)
-	_, mainNet, _ := net.ParseCIDR(spec.MainCIDR)
+	internalNet, mainNet, err := spec.networks()
+	if err != nil {
+		return nil, err
+	}
 
 	tmplContent, err := cms.TemplatesFS.ReadFile("templates/ufw/nat-rules")
 	if err != nil {
