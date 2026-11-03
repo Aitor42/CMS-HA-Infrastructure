@@ -972,21 +972,67 @@ func TestConfig_HotdeskSpecsFollowMainCIDRAndDomain(t *testing.T) {
 	}
 }
 
-func TestConfig_PrefixFromCIDR(t *testing.T) {
+func TestConfig_HostAddress(t *testing.T) {
 	tests := []struct {
-		cidr     string
-		fallback string
-		want     string
+		cidr   string
+		offset uint32
+		want   string
 	}{
-		{"192.168.30.0/24", "192.168.20.", "192.168.30."},
-		{"10.0.30.0/24", "192.168.20.", "10.0.30."},
-		{"", "192.168.20.", "192.168.20."},
-		{"not-a-cidr", "192.168.20.", "192.168.20."},
+		{"192.168.30.0/24", 201, "192.168.30.201"},
+		{"10.0.30.0/24", 1, "10.0.30.1"},
+		// A /23 continues into the next octet instead of wrapping inside .30.
+		{"10.0.30.0/23", 260, "10.0.31.4"},
+		// The network address is normalised, not taken from the written octet.
+		{"192.168.21.5/16", 201, "192.168.0.201"},
 	}
 	for _, tt := range tests {
-		if got := config.PrefixFromCIDR(tt.cidr, tt.fallback); got != tt.want {
-			t.Errorf("PrefixFromCIDR(%q, %q) = %q, want %q", tt.cidr, tt.fallback, got, tt.want)
+		got, err := config.HostAddress(tt.cidr, tt.offset)
+		if err != nil {
+			t.Errorf("HostAddress(%q, %d): %v", tt.cidr, tt.offset, err)
+			continue
 		}
+		if got != tt.want {
+			t.Errorf("HostAddress(%q, %d) = %q, want %q", tt.cidr, tt.offset, got, tt.want)
+		}
+	}
+	for _, tt := range []struct {
+		cidr   string
+		offset uint32
+	}{
+		{"192.168.30.0/24", 0},
+		{"192.168.30.0/24", 255},
+		{"", 1},
+		{"not-a-cidr", 1},
+	} {
+		if got, err := config.HostAddress(tt.cidr, tt.offset); err == nil {
+			t.Errorf("HostAddress(%q, %d) = %q, want an error", tt.cidr, tt.offset, got)
+		}
+	}
+}
+
+func TestConfig_HotdeskSpecsRespectNonSlash24Networks(t *testing.T) {
+	cfg := &config.Config{
+		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/23", Domain: "lab.example"}},
+		Nodes:   config.NodesConfig{Hotdesks: config.HotdesksConf{Count: 10, BaseIPOctet: 250}},
+	}
+	specs := cfg.HotdeskSpecs()
+	if len(specs) != 10 {
+		t.Fatalf("expected 10 hotdesk specs, got %d", len(specs))
+	}
+	for i, spec := range specs {
+		if spec.IP == "" {
+			t.Fatalf("hotdesk %d has no address", i+1)
+		}
+		if !config.ValidMAC(spec.MAC) {
+			t.Errorf("hotdesk %d MAC = %q, want a valid MAC", i+1, spec.MAC)
+		}
+	}
+	if got, want := specs[0].IP, "10.0.30.250"; got != want {
+		t.Errorf("first hotdesk IP = %q, want %q", got, want)
+	}
+	// Offset 260 crosses the /24 boundary but stays inside the /23.
+	if got, want := specs[9].IP, "10.0.31.3"; got != want {
+		t.Errorf("last hotdesk IP = %q, want %q", got, want)
 	}
 }
 

@@ -280,18 +280,29 @@ func (c *Config) validateNodes() error {
 }
 
 func (c *Config) validateHotdesks() error {
-	// Hotdesk IPs are generated as <network>.<octet>: detect overflow before
-	// the node sweep in validateNodeFields so this clearer message wins
+	// Hotdesk IPs are generated as network base + offset: detect overflow
+	// before the node sweep in validateNodeFields so this clearer message wins
 	// (generation happens inside AllNodes and would otherwise surface as
 	// "invalid IPv4 .256").
-	if c.Nodes.Hotdesks.Count > 0 {
-		base := c.Nodes.Hotdesks.BaseIPOctet
-		if base == 0 || base == 201 {
-			base = 201
-		}
-		if base+c.Nodes.Hotdesks.Count-1 > 254 {
-			return fmt.Errorf("hotdesk range overflows: base octet %d with %d nodes exceeds 254", base, c.Nodes.Hotdesks.Count)
-		}
+	count := c.Nodes.Hotdesks.Count
+	if count <= 0 {
+		return nil
+	}
+	// The synthetic MAC uses one octet, so more than 254 consecutive offsets
+	// would repeat an address.
+	if count > 254 {
+		return fmt.Errorf("hotdesk range overflows: %d nodes exceeds the 254 addresses the generated MAC scheme supports", count)
+	}
+	base := c.Nodes.Hotdesks.BaseIPOctet
+	if base == 0 {
+		base = 201
+	}
+	if base < 1 {
+		return fmt.Errorf("nodes.hotdesks.base_ip_octet must be positive (got %d)", base)
+	}
+	if _, err := HostAddress(c.Network.Main.CIDR, uint32(base+count-1)); err != nil {
+		return fmt.Errorf("hotdesk range overflows network.main.cidr %s: base octet %d with %d nodes: %w",
+			c.Network.Main.CIDR, base, count, err)
 	}
 	return nil
 }

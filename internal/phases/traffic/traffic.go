@@ -98,7 +98,10 @@ func (t *Traffic) Run(ctx context.Context) error {
 	timer := logging.PhaseStart("Traffic Test Phase (k6)")
 	defer timer.End()
 
-	baseURL := resolveBaseURL(t.cfg, t.opts)
+	baseURL, err := resolveBaseURL(t.cfg, t.opts)
+	if err != nil {
+		return err
+	}
 	logging.Info("Target URL: %s", baseURL)
 
 	script, err := cms.TemplatesFS.ReadFile(k6ScriptPath)
@@ -145,24 +148,25 @@ func (t *Traffic) checkDashboardData(ctx context.Context) error {
 }
 
 // resolveBaseURL derives the entry point to exercise from the options and the
-// configured topology.
-func resolveBaseURL(cfg *config.Config, opts Options) string {
+// configured topology. It returns an error instead of synthesising an address
+// from a /24 assumption when the configuration does not identify one.
+func resolveBaseURL(cfg *config.Config, opts Options) (string, error) {
 	if opts.TargetIP != "" {
 		if strings.HasPrefix(opts.TargetIP, "http://") || strings.HasPrefix(opts.TargetIP, "https://") {
-			return opts.TargetIP
+			return opts.TargetIP, nil
 		}
-		return "https://" + opts.TargetIP
+		return "https://" + opts.TargetIP, nil
 	}
 	if opts.Mode == "internal" {
 		if len(cfg.Nodes.CMSFrontends) > 0 && cfg.Nodes.CMSFrontends[0].IP != "" {
-			return "http://" + cfg.Nodes.CMSFrontends[0].IP
+			return "http://" + cfg.Nodes.CMSFrontends[0].IP, nil
 		}
-		return "http://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.20.") + "101"
+		return "", fmt.Errorf("traffic mode \"internal\" requires nodes.cms_frontends[0].ip")
 	}
-	if cfg.LBVIP() != "" {
-		return "https://" + cfg.LBVIP()
+	if v := cfg.LBVIP(); v != "" {
+		return "https://" + v, nil
 	}
-	return "https://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.20.") + "100"
+	return "", fmt.Errorf("traffic mode %q requires network.main.vip (the keepalived floating address)", opts.Mode)
 }
 
 // k6Run groups the parameters that shape the container invocation.

@@ -84,22 +84,31 @@ func (c *Config) HotdeskSpecs() []NodeSpec {
 	// Hotdesks live on the main network, so derive their address range and DNS
 	// domain from the configured network instead of hardcoding 192.168.20.0/24
 	// and main.local.
-	prefix := PrefixFromCIDR(c.Network.Main.CIDR, "192.168.20.")
 	domain := strings.TrimSpace(c.Network.Main.Domain)
 	if domain == "" {
 		domain = "main.local"
 	}
+	base := c.Nodes.Hotdesks.BaseIPOctet
+	if base == 0 {
+		base = 201
+	}
 	var nodes []NodeSpec
 	for i := 1; i <= c.Nodes.Hotdesks.Count; i++ {
-		lastOctet := 200 + i
-		if c.Nodes.Hotdesks.BaseIPOctet > 0 && c.Nodes.Hotdesks.BaseIPOctet != 201 {
-			lastOctet = c.Nodes.Hotdesks.BaseIPOctet + i - 1
+		offset := base + i - 1
+		ip, err := HostAddress(c.Network.Main.CIDR, uint32(offset))
+		if err != nil {
+			// Validate rejects the range before this point; leaving the IP
+			// empty is safer than emitting an address outside the subnet.
+			ip = ""
 		}
 		nodes = append(nodes, NodeSpec{
-			Name:         fmt.Sprintf("main-hotdesk%d", i),
-			IP:           fmt.Sprintf("%s%d", prefix, lastOctet),
-			FQDN:         fmt.Sprintf("main-hotdesk%d.%s", i, domain),
-			MAC:          fmt.Sprintf("52:54:00:10:02:%02x", lastOctet),
+			Name: fmt.Sprintf("main-hotdesk%d", i),
+			IP:   ip,
+			FQDN: fmt.Sprintf("main-hotdesk%d.%s", i, domain),
+			// The historical scheme uses the last octet. Offset modulo 256
+			// keeps it valid for prefixes wider than /24 while the validator
+			// caps the count at 254, so low bytes cannot collide.
+			MAC:          fmt.Sprintf("52:54:00:10:02:%02x", offset&0xff),
 			RAMInstallMB: c.Nodes.Hotdesks.RAMInstallMB,
 			RAMFinalMB:   c.Nodes.Hotdesks.RAMFinalMB,
 			VCPUs:        c.Nodes.Hotdesks.VCPUs,
@@ -109,15 +118,31 @@ func (c *Config) HotdeskSpecs() []NodeSpec {
 	return nodes
 }
 
-// PrefixFromCIDR returns the first three octets of an IPv4 CIDR plus the
-// trailing dot (e.g. "192.168.20."), so callers can compose static host IPs
-// in that range. Returns fallback for malformed CIDRs.
-func PrefixFromCIDR(cidr, fallback string) string {
-	parts := strings.Split(cidr, ".")
-	if len(parts) >= 3 {
-		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
+// HostAddress returns the IPv4 address at offset from the network address of
+// cidr, where offset 1 is the first usable host. It rejects offsets outside the
+// usable range instead of composing an address that wraps into another subnet
+// or lands on the broadcast address.
+func HostAddress(cidr string, offset uint32) (string, error) {
+	_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return "", fmt.Errorf("parse CIDR %q: %w", cidr, err)
 	}
-	return fallback
+	ip := ipnet.IP.To4()
+	if ip == nil {
+		return "", fmt.Errorf("CIDR %q is not IPv4", cidr)
+	}
+	network := binary.BigEndian.Uint32(ip)
+	mask := binary.BigEndian.Uint32(ipnet.Mask)
+	broadcast := network | ^mask
+	addr := uint64(network) + uint64(offset)
+	if offset == 0 || addr <= uint64(network) || addr >= uint64(broadcast) {
+		first, last, _, rangeErr := UsableHostRange(cidr)
+		if rangeErr != nil {
+			return "", rangeErr
+		}
+		return "", fmt.Errorf("offset %d is outside the usable range of %q (%s-%s)", offset, cidr, first, last)
+	}
+	return formatIPv4(uint32(addr)), nil
 }
 
 // UsableHostRange returns the first and last usable IPv4 host addresses of an

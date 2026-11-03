@@ -3,6 +3,7 @@ package registernodes
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
@@ -57,7 +58,13 @@ func (p *Phase) Run(ctx context.Context) error {
 func (p *Phase) registrationScript() (string, error) {
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
 	jumpIPMain := p.cfg.Nodes.Jumpstart.IPMain
-	mainPrefix := config.PrefixFromCIDR(p.cfg.Network.Main.CIDR, "192.168.20.")
+	// Classify nodes by actual subnet membership. Comparing textual prefixes
+	// breaks as soon as main.cidr is not a /24 (for example 10.20.0.0/23,
+	// where 10.20.1.5 is inside the network but does not share the prefix).
+	_, mainNet, err := net.ParseCIDR(strings.TrimSpace(p.cfg.Network.Main.CIDR))
+	if err != nil {
+		return "", fmt.Errorf("network.main.cidr is invalid: %w", err)
+	}
 
 	var scriptBuilder strings.Builder
 	scriptBuilder.WriteString("set -e\n")
@@ -78,7 +85,7 @@ func (p *Phase) registrationScript() (string, error) {
 		}
 
 		cobblerServerIP := jumpIP
-		if strings.HasPrefix(node.IP, mainPrefix) {
+		if ip := net.ParseIP(node.IP); ip != nil && mainNet.Contains(ip) {
 			if jumpIPMain == "" {
 				// Guessing <main-prefix>10 would point main-network clients at
 				// an address that may belong to another node.

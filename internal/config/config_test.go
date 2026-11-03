@@ -327,12 +327,36 @@ func TestNodeSpecsAndNetworks(t *testing.T) {
 	}
 }
 
-func TestPrefixFromCIDRAndMACValidation(t *testing.T) {
-	if got := PrefixFromCIDR("192.168.20.0/24", "fallback."); got != "192.168.20." {
-		t.Fatalf("prefix = %q", got)
+func TestHostAddressAndMACValidation(t *testing.T) {
+	for _, tc := range []struct {
+		cidr   string
+		offset uint32
+		want   string
+	}{
+		{"192.168.20.0/24", 201, "192.168.20.201"},
+		{"10.20.0.0/23", 260, "10.20.1.4"},
+		{"10.0.28.0/22", 1, "10.0.28.1"},
+	} {
+		got, err := HostAddress(tc.cidr, tc.offset)
+		if err != nil {
+			t.Fatalf("HostAddress(%q, %d): %v", tc.cidr, tc.offset, err)
+		}
+		if got != tc.want {
+			t.Fatalf("HostAddress(%q, %d) = %q, want %q", tc.cidr, tc.offset, got, tc.want)
+		}
 	}
-	if got := PrefixFromCIDR("bad", "fallback."); got != "fallback." {
-		t.Fatalf("fallback prefix = %q", got)
+	for _, tc := range []struct {
+		cidr   string
+		offset uint32
+	}{
+		{"192.168.20.0/24", 0},
+		{"192.168.20.0/24", 255},
+		{"not-a-cidr", 1},
+		{"10.0.0.0/31", 1},
+	} {
+		if got, err := HostAddress(tc.cidr, tc.offset); err == nil {
+			t.Fatalf("HostAddress(%q, %d) = %q, want an out-of-range error", tc.cidr, tc.offset, got)
+		}
 	}
 	for _, mac := range []string{"52:54:00:aa:bb:cc", "AA:BB:CC:DD:EE:FF"} {
 		if !ValidMAC(mac) {

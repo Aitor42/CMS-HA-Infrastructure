@@ -84,6 +84,32 @@ func TestRegistrationScriptRejectsNodesWithoutMACOrFQDN(t *testing.T) {
 	})
 }
 
+func TestRegistrationScriptClassifiesNodesBySubnetForNonSlash24Main(t *testing.T) {
+	cfg := registerConfig()
+	cfg.Network.Main.CIDR = "10.20.0.0/23"
+	cfg.Nodes.Jumpstart.IPMain = "10.20.1.10"
+	cfg.Nodes.LBs[0].IP = "10.20.1.103" // inside 10.20.0.0/23, outside a literal /24 prefix
+	p := &Phase{cfg: cfg}
+
+	script, err := p.registrationScript()
+	if err != nil {
+		t.Fatalf("registrationScript: %v", err)
+	}
+	if !strings.Contains(script, "--name='main-lb1'") || !strings.Contains(script, "--server='10.20.1.10'") {
+		t.Fatalf("main node was not classified against the real subnet:\n%s", script)
+	}
+}
+
+func TestRegistrationScriptRejectsAnInvalidMainCIDR(t *testing.T) {
+	cfg := registerConfig()
+	cfg.Network.Main.CIDR = "not-a-cidr"
+	p := &Phase{cfg: cfg}
+
+	if _, err := p.registrationScript(); err == nil || !strings.Contains(err.Error(), "network.main.cidr") {
+		t.Fatalf("registrationScript() = %v, want an invalid CIDR error", err)
+	}
+}
+
 func TestRunRejectsAnEmptyJumpstartIPBeforeTouchingCobbler(t *testing.T) {
 	cfg := registerConfig()
 	cfg.Nodes.Jumpstart.IP = ""

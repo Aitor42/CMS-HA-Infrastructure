@@ -33,19 +33,32 @@ func TestResolveBaseURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveBaseURL(testConfig(), tc.opts); got != tc.want {
+			got, err := resolveBaseURL(testConfig(), tc.opts)
+			if err != nil {
+				t.Fatalf("resolveBaseURL() error = %v", err)
+			}
+			if got != tc.want {
 				t.Fatalf("resolveBaseURL() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestResolveBaseURL_InternalFallback(t *testing.T) {
-	cfg := testConfig()
-	cfg.Nodes.CMSFrontends = nil
-	if got := resolveBaseURL(cfg, Options{Mode: "internal"}); got != "http://192.168.20.101" {
-		t.Fatalf("internal fallback = %q, want http://192.168.20.101", got)
-	}
+func TestResolveBaseURL_RequiresAConfiguredTarget(t *testing.T) {
+	t.Run("internal without a frontend address", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.Nodes.CMSFrontends = nil
+		if _, err := resolveBaseURL(cfg, Options{Mode: "internal"}); err == nil || !strings.Contains(err.Error(), "cms_frontends") {
+			t.Fatalf("resolveBaseURL() error = %v, want the missing frontend error", err)
+		}
+	})
+	t.Run("external without a VIP", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.Network.Main.VIP = ""
+		if _, err := resolveBaseURL(cfg, Options{Mode: "external"}); err == nil || !strings.Contains(err.Error(), "network.main.vip") {
+			t.Fatalf("resolveBaseURL() error = %v, want the missing VIP error", err)
+		}
+	})
 }
 
 func TestRunDBCheckRequiresAMaster(t *testing.T) {
