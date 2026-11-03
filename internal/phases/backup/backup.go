@@ -234,13 +234,15 @@ func (p *Phase) writeGarageEnv(path string) error {
 }
 
 // garageConfigHash fingerprints everything a running container cannot pick up
-// without a restart: the image, the mounted configuration and the credential
-// environment. The label written at creation time is compared on the next
-// deploy, so a changed bind address, region or secret recreates the container
-// instead of leaving it on the old configuration.
-func garageConfigHash(image, cfgPath, envPath string) (string, error) {
+// without a restart: the image, the data volume path, the mounted configuration
+// and the credential environment. The label written at creation time is compared
+// on the next deploy, so a changed bind address, region, secret or data
+// directory recreates the container instead of leaving it on the old volume.
+func garageConfigHash(image, dataDir, cfgPath, envPath string) (string, error) {
 	h := sha256.New()
 	_, _ = io.WriteString(h, image)
+	_, _ = h.Write([]byte{0})
+	_, _ = io.WriteString(h, dataDir)
 	for _, path := range []string{cfgPath, envPath} {
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -256,7 +258,7 @@ func garageConfigHash(image, cfgPath, envPath string) (string, error) {
 // runs the pinned image on the host network with the current configuration.
 func (p *Phase) ensureContainer(ctx context.Context, runtime, dataDir, cfgPath, envPath string) error {
 	image := p.cfg.GarageImage()
-	wantHash, err := garageConfigHash(image, cfgPath, envPath)
+	wantHash, err := garageConfigHash(image, dataDir, cfgPath, envPath)
 	if err != nil {
 		return err
 	}

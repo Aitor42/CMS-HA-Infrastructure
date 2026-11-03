@@ -245,9 +245,18 @@ func TestEnsureContainerRecreatesWhenTheConfigChanges(t *testing.T) {
 	if err := p.writeGarageEnv(envPath); err != nil {
 		t.Fatalf("writeGarageEnv failed: %v", err)
 	}
-	hash, err := garageConfigHash(p.cfg.GarageImage(), cfgPath, envPath)
+	hash, err := garageConfigHash(p.cfg.GarageImage(), dir, cfgPath, envPath)
 	if err != nil {
 		t.Fatalf("garageConfigHash failed: %v", err)
+	}
+	// A different data volume must invalidate the label: reusing the container
+	// would keep mounting the old directory.
+	otherHash, err := garageConfigHash(p.cfg.GarageImage(), filepath.Join(dir, "other"), cfgPath, envPath)
+	if err != nil {
+		t.Fatalf("garageConfigHash failed: %v", err)
+	}
+	if otherHash == hash {
+		t.Fatal("data directory change did not change the container fingerprint")
 	}
 
 	// A running container whose label does not match the current config must
