@@ -62,10 +62,17 @@ COMMIT
 | internal (eth1) → main (eth2) | main | ALLOW | Internal to main access |
 | internal (eth1) → Internet (eth0) | WAN | ALLOW (NAT) | Package and Puppet downloads |
 
+Inter-zone routing is not permission to use every endpoint service. Puppet
+scopes K3s API `6443/tcp` to Internal, MariaDB NodePort `30306/tcp` to both lab
+CIDRs, and storage NFSv4 `2049/tcp` to configured frontend IPs only. Validate
+those TCP paths from allowed and denied sources; ICMP alone cannot prove the
+service policy. NodePort DNAT/FORWARD may bypass UFW INPUT, so those rules alone
+do not prove complete NodePort isolation.
+
 ### Implementation
 
 - `internal/phases/ufw` (`cms-ha phase setup-ufw`) — re-injects the router NAT, reloads UFW and verifies the live router policies, forwarding and NAT. Per-node service rules are owned by Puppet (`role::base` and each role manifest), not by this phase.
-- `internal/phases/router` (`cms-ha phase bootstrap-router`) — sets the gateway addresses, IP forwarding and NAT.
+- `internal/phases/routerbootstrap` (`cms-ha phase bootstrap-router`) — sets the gateway addresses, IP forwarding and NAT.
 
 ### Verification
 
@@ -75,8 +82,8 @@ ssh ubuntu@192.168.10.1 "sudo ufw status verbose"
 ssh ubuntu@192.168.10.1 "sudo iptables -t nat -L -n -v"
 
 # From a hot-desk node: should access the internet and reach permitted TCP
-# services on the internal subnet. ICMP is intentionally denied by the node
-# UFW default policy, so ping is not the right routing test.
+# services on the internal subnet. Ping alone does not test the endpoint's
+# service-specific policy.
 ssh ubuntu@192.168.20.201 "sudo curl -s http://example.com"
 ssh ubuntu@192.168.20.201 "timeout 2 bash -c '</dev/tcp/192.168.10.11/22' && echo reachable"
 

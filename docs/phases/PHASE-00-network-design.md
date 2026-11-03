@@ -3,7 +3,7 @@
 ## Objectives to Achieve
 
 - [x] Segment the network into `internal` and `main` subnets.
-- [x] Design network layout defining L3 addresses and VLANs.
+- [x] Design network layout defining L3 addresses and separate libvirt bridges (no 802.1Q VLAN trunk or redundant physical uplinks are configured).
 - [x] Place the 7 internal service nodes and the 4 main service nodes.
 
 ---
@@ -52,7 +52,7 @@
 
 ### Implementation
 
-- `internal/phases/vms` (`cms-ha phase init-vms`) — creates the libvirt networks and VM domains from `config.yaml`.
+- `internal/phases/initvms` (`cms-ha phase init-vms`) — creates the libvirt networks and VM domains from `config.yaml`.
 - `cms-ha vm install-batches` — installs the clients in batches and shrinks their RAM afterwards.
 - `cms-ha vm start` / `cms-ha vm shrink` — powers the guests on and applies the production memory profile.
 

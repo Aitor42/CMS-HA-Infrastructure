@@ -27,10 +27,11 @@ The hot-desk VMs are created by the `init-vms` phase (or Ansible) and provisione
 
 ### Connectivity
 
-Each hot-desk node can successfully:
+Validate these expected paths from each deployed hot-desk node:
 - Access the CMS web interface: `curl http://192.168.20.100`
 - Access the internet: `curl http://example.com` (via NAT on the router)
-- Reach nodes in the internal network: `ping 192.168.10.11`
+- Reach permitted services on the routed internal network, for example SSH on `192.168.10.11:22`; ICMP alone does not prove service isolation.
+- Must not access the uploads export on `192.168.10.15:2049`: its NFS export and firewall allow only configured CMS frontend IPs.
 
 ### Expanding Hot-desks
 

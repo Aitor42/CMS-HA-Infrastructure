@@ -42,7 +42,7 @@ Below is a screenshot of the automated network installation process (PXE) manage
 ### Implementation
 
 - `internal/phases/cobbler` (`cms-ha phase setup-cobbler`) — installs and configures Cobbler, DHCP, TFTP, DNS and NFS on the jumpstart node.
-- `internal/phases/register` (`cms-ha phase register-nodes`) — registers every node, its MAC address and static IP in Cobbler.
+- `internal/phases/registernodes` (`cms-ha phase register-nodes`) — registers every node, its MAC address and static IP in Cobbler.
 
 ### Verification
 

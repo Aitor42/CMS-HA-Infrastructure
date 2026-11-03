@@ -65,6 +65,7 @@ it; without sudo, the default ACL is what keeps the PXE path working.
 *   **Non-root deploy account.** `cms-ha` never logs in as `root`. Every VM connection uses `ssh.user` (default `ubuntu`, provisioned by the installers with an authorised key) and privileged commands are elevated transparently with `sudo -n -H`. Direct root SSH is disabled on every provisioned node (`PermitRootLogin no`).
 *   **Host-key pinning (TOFU).** VM host keys are pinned on first contact and stored in `ssh.known_hosts_file` (default `~/.ssh/cms_known_hosts`). A later mismatch **fails closed** instead of silently trusting a changed key (MITM protection).
 *   **Secrets at rest.** Service passwords and `backup.secret_key` are age-encrypted on first load; the identity and recipient live outside the repository (`${HOME}/.config/cms-ha`).
+*   **DRBD fencing is a separate trust path.** With derived SSH fencing enabled, `setup-drbd` installs a forced command for the dedicated key: only exact `virsh destroy` / `virsh domstate` requests for the first two configured masters are accepted. Shell access, forwarding, PTYs and user RC files are disabled. Hypervisor host keys are read from local `/etc/ssh/ssh_host_*_key.pub`, persistently pinned under the deploy account's `~/.ssh/cms-ha-fence/known_hosts`, and copied to `/etc/drbd-fence/known_hosts` on both peers; SSH uses strict checking, not network key discovery. Custom fencing commands must be supplied as a pair and remain the operator's responsibility.
 *   See `docs/SECURITY.md` for the full model, the accepted risks, and the CI scanner configuration.
 
 ---
@@ -111,7 +112,7 @@ On the hypervisor terminal, create the virtual networks and install the central 
 ./cms-ha phase register-nodes
 ```
 
-**Cloud-image jumpstart (hosted workflow default).** The ISO/autoinstall path above is the CLI/config default and the deliverable. The hosted `Integration (KVM lab, hosted)` workflow defaults to `jumpstart_image=cloud` because it is the fastest way to exercise the rest of the pipeline. For local iteration, `--jumpstart-image cloud` (or `vm.jumpstart_image: cloud` for a persistent choice) boots a qcow2 overlay of the official Ubuntu cloud image instead: the base system is already installed, cloud-init applies the same hostname, MACs, IPs and SSH key, and the node is reachable in well under a minute instead of ~4 minutes. The run pays for the base image once and shares it read-only across overlays:
+**Cloud-image jumpstart (hosted workflow default).** The ISO/autoinstall path above is the CLI/config default and the deliverable. The hosted `Integration (KVM lab, hosted)` workflow defaults to `jumpstart_image=cloud` because it is the fastest way to exercise the rest of the pipeline. For local iteration, `--jumpstart-image cloud` (or `vm.jumpstart_image: cloud` for a persistent choice) boots a qcow2 overlay of the official Ubuntu cloud image instead: the base system is already installed, cloud-init applies the same hostname, MACs, IPs and SSH key, without running the live installer. Startup time depends on the host and image. The run pays for the base image once and shares it read-only across overlays:
 
 ```bash
 cd "${HOME}/vm_storage"
@@ -120,7 +121,7 @@ curl -LO https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd
 ./cms-ha phase init-vms --jumpstart-only --jumpstart-image cloud
 ```
 
-Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the client install and every later phase are unchanged. The ISO/PXE run remains the gate: use the self-hosted `Integration (KVM lab)` workflow, or dispatch the hosted one with `jumpstart_image=iso` and `fast_provisioning=false`. Measure both with `--timings-file` before changing the CLI/config default.
+Set `vm.jumpstart_base_image` if the image lives elsewhere. Cobbler, PXE, the client install and every later phase are unchanged. The ISO/PXE run remains the gate and is required before release publication. For an independent run, use the self-hosted `Integration (KVM lab)` workflow, or dispatch the hosted one with `jumpstart_image=iso` and `fast_provisioning=false`. Measure both with `--timings-file` before changing the CLI/config default.
 
 **Cloud-image client nodes (hosted workflow default).** `--fast-provisioning` applies the same base image to every client node, so the lab skips the PXE installs entirely. Each VM gets a qcow2 overlay and its own cloud-init seed ISO (hostname, MACs, static addresses, SSH key); everything from `03-repair-ssh` onwards is unchanged. The hosted workflow defaults to `fast_provisioning=true`; the CLI/config default remains PXE. Use it on `deploy`, or persist the choice for clients with `vm.provisioning: cloud`:
 
@@ -164,10 +165,11 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 ./cms-ha deploy
 
 # The orchestrator writes a checkpoint (deploy.state) after every phase, so a
-# failed run can resume instead of starting over. A second concurrent deploy
-# fails fast because deploy.state.lock is held:
-./cms-ha deploy --resume                    # skip phases already completed
-./cms-ha deploy --from-phase drbd-setup     # start at a named phase
+# failed run can resume with the SAME executable, host, configuration and
+# provisioning flags. A second concurrent deploy fails fast because the
+# state-file lock is held:
+./cms-ha deploy --resume                    # skip completed/assumed phases
+./cms-ha deploy --from-phase drbd-setup     # explicitly restart this suffix
 ./cms-ha deploy --state-file /var/tmp/deploy.state
 
 # Record per-phase and per-sub-step durations (JSON) for before/after
@@ -178,17 +180,44 @@ Once all VMs are running and adjusted to production profiles, run the deployment
 # Pin the identifier when correlating with an external CI job or ticket:
 ./cms-ha deploy --run-id ci-1234 --timings-file integration-artifacts/timings.json
 
-# (Or Makefile: make deploy-resume)
+# Checkpoint resume must use the original executable; do not rebuild first.
 ```
 
-Phase names for `--from-phase` are the normalised phase names (e.g.
-`00-init-vms`, `drbd-setup`, `kubernetes-setup`, `monitoring-setup`); an
-unknown value is rejected with the list of valid phases.
+Phase keys for `--from-phase` are normalised and unique within the selected
+plan (e.g. `00-init-vms`, `00-init-vms-2` for client creation, `drbd-setup`,
+`kubernetes-setup`, `monitoring-setup`); an unknown value is rejected with the
+valid keys. `--resume` and `--from-phase` are mutually exclusive.
+Despite its name, `make deploy-resume` rebuilds and runs `deploy --skip-vm-create`;
+it is not checkpoint resume. Use the direct `deploy --resume` invocation above
+with the original flags, or `make integration-resume` for the integration driver.
+
+**Checkpoint identity and migration.** Progress is bound to the executable's
+SHA-256, the host (hostname and machine ID), and the non-secret configuration,
+including `--skip-vm-create` and `--fast-provisioning`. Preserve the original
+executable when resuming; rebuilding can change its hash even from the same
+source. Deployment timeout/concurrency settings and credentials are excluded
+from the configuration fingerprint. Credential rotation therefore requires
+explicit convergence of the affected services, not `--resume` skipping them.
+
+A legacy checkpoint with recorded progress but no identity, or one with a
+mismatched identity, is rejected before preflight. Inspect the existing lab,
+retain its old checkpoint, then select the earliest phase that must run and a
+**new** state file, for example (only after verifying all preceding prerequisites):
+
+```bash
+./cms-ha deploy --skip-vm-create --from-phase drbd-setup --state-file deploy-migration.state
+```
+
+`--from-phase` resets the selected checkpoint's progress: earlier phases become
+`assumed_phases`, not verified `completed_phases`; the suffix must succeed again.
+A later `--resume` skips both lists. Checkpoints are execution records, not live
+health checks; inspect the environment and run `verify` separately. Do not edit
+identity hashes or mark phases completed to bypass these checks.
 
 **Orchestration in short:**
 1. The jumpstart node converges first, so Puppet Server, DNS, Cobbler, DHCP and TFTP are up before any client runs.
-2. Clients converge in parallel with automatic recovery from stale Puppet SSL state (private-key mismatch or signature/verify failure); the window is `deploy.puppet_concurrency` (auto: 4–8 by CPU count, or `PUPPET_CONCURRENCY`). Each node converges once, in phase 04.
-3. `bootstrap-router` gives the router static addresses, IP forwarding and NAT before clients download packages.
+2. Before Puppet convergence, `bootstrap-router` gives the router static addresses, IP forwarding and NAT so clients can download packages.
+3. Clients converge in parallel with automatic recovery from stale Puppet SSL state (private-key mismatch or signature/verify failure); the window is `deploy.puppet_concurrency` (auto: 4–8 by CPU count, or `PUPPET_CONCURRENCY`). Each node gets its initial catalog in phase 04.
 4. DRBD is promoted and mounted on `internal-master1`; K3s then resolves the current DRBD primary and labels that node `drbd-status=primary` so `mariadb-0` can mount the volume.
 5. In phase 07 (Nginx/WordPress), the CMS frontends converge sequentially (the first one creates the WordPress schema); monitoring, UFW and the CA fan out in parallel. This sequential CMS convergence is not part of the parallel Puppet phase.
 6. Every remote exit code is checked: a broken DRBD/K3s state aborts the deploy instead of reporting success.
@@ -206,8 +235,12 @@ virsh -c qemu:///system list --all
 ### 3.2 Network Connectivity and Isolation (DTE-to-DTE Tests)
 1.  **Internal Connectivity**: `ping` from `internal-master1` (`192.168.10.11`) to `jumpstart` (`192.168.10.10`) → **Allowed** (0% loss).
 2.  **Allowed Inter-VLAN Connectivity**: `ping` from `internal-master1` (`192.168.10.11`) to the LB VIP (`192.168.20.100`) → **Allowed** (routed).
-3.  **Security Isolation (Main → Internal)**: `ping` from a hotdesk (`192.168.20.201`) to `internal-master1` (`192.168.10.11`) → **Denied** by the node firewall (UFW has no ICMP rule for `main`).
+3.  **Service isolation (Main → Internal)**: test the specific TCP service and source, not just ICMP. The router permits inter-zone routing; endpoint rules restrict services. K3s API `6443/tcp` is allowed from Internal, while MariaDB NodePort `30306/tcp` is allowed from both lab CIDRs. Storage `2049/tcp` is allowlisted only to configured CMS frontend IPs, not hotdesks. A ping result alone does not prove these restrictions.
 4.  **Internet Access**: `ping -c 3 8.8.8.8` from any node → **Allowed** (NAT masqueraded by the router).
+
+The NodePort UFW rules are INPUT policy, not proof of complete isolation:
+kube-proxy DNAT/FORWARD can bypass INPUT. Validate the real packet path;
+stronger NodePort isolation needs pre-DNAT/CNI enforcement not supplied here.
 
 ### 3.3 WordPress CMS Service Verification
 Send an HTTPS request to the load balancer to verify the CMS is responding:
@@ -217,7 +250,7 @@ curl -sk https://192.168.20.100/ | grep -i "wordpress"
 
 ### 3.4 Full Infrastructure Health Check
 
-The health check validates all infrastructure phases. The Go CLI executes these checks concurrently using the SSH connection pool, and finishes in a few seconds (the end-to-end HTTP check dominates: it loads the CMS through the load-balancer VIP a hundred times to prove the request path, not just that its units started):
+The health check validates the infrastructure through concurrent checks using the SSH connection pool. The end-to-end HTTP check loads the CMS through the load-balancer VIP a hundred times to test the request path, not just whether units started. Runtime depends on the lab:
 
 ```bash
 # Go CLI (parallel execution across all phases):
@@ -226,7 +259,7 @@ The health check validates all infrastructure phases. The Go CLI executes these 
 # (Or Makefile: make verify)
 ```
 
-**Go CLI Concurrent Verification Output:**
+**Illustrative verification output (not a recorded result for the current tree):**
 ```text
 ℹ Starting phase: Infrastructure Verification
 ✓ Phase 00 - Libvirt VMs & Networks: [PASS] (16 running VMs)
@@ -303,7 +336,7 @@ main-hotdesk2        192.168.20.202  running    OK
 main-hotdesk3        192.168.20.203  running    OK        
 ```
 
-### 3.6 End-to-End Integration Test
+### 3.7 End-to-End Integration Test
 
 `tests/integration/run.sh` (also `make integration`) drives the whole pipeline
 on a real KVM host: **build → deploy → verify → traffic → drills → failover**.
@@ -318,17 +351,41 @@ make integration-resume          # resume from the deploy.state checkpoint
 tests/integration/run.sh --skip-deploy --skip-chaos   # verify only
 ```
 
-It requires `/dev/kvm`, a working libvirt connection and a container runtime
-(docker/podman). The checkpoint and the phase logs are uploaded as CI artifacts.
+The driver preflight requires `/dev/kvm`, working `virsh` access, and `docker`.
+`--resume` reuses the original executable and requires an existing checkpoint;
+it does not rebuild. Preserve the same config and provisioning flags (including
+`SKIP_VM_CREATE`) used for that checkpoint.
 
 The same driver runs on a GitHub-hosted runner through
-`.github/workflows/integration-hosted.yml` (nightly, release and manual dispatch). Hosted runners
+`.github/workflows/integration-hosted.yml` (branch pushes, nightly, manual dispatch,
+and reusable calls from the release workflow). Hosted runners
 expose nested KVM but are small (4 vCPU, 15 GiB), so that workflow deploys
 `config.ci.yaml` (no hotdesks) and installs clients in batches of four. Its
 dispatch defaults to the fast cloud path (`jumpstart_image=cloud`,
 `fast_provisioning=true`); the PXE/Cobbler deliverable gate is the self-hosted
-workflow, or a hosted dispatch with `jumpstart_image=iso` and
-`fast_provisioning=false`.
+workflow, or a full hosted dispatch with `jumpstart_image=iso`,
+`fast_provisioning=false` and chaos enabled. Provision-only and cloud runs do not
+satisfy full PXE acceptance.
+
+**CI and release gates.** CI Summary requires every dependency to report
+`success`; failed, cancelled or skipped jobs are not accepted. On a `v*` tag,
+`release.yml` first runs reusable CI, then the hosted **full ISO/PXE** gate with
+chaos enabled and teardown required, all against the triggering SHA. Build,
+signing and publication depend on both gates succeeding. This is a
+prepublication gate, not a `release.published` test after assets are public.
+Teardown failure also blocks publication.
+
+**Failure evidence.** The driver stops later acceptance stages after failure
+and preserves a checkpoint when available. It captures both stdout and stderr
+for verify, traffic, drills and failover with `pipefail`; failover uses
+`--require-all --results-file integration-artifacts/failover.json`. A skipped
+scenario is missing coverage and fails strict acceptance. Hosted diagnostics
+and artifact upload run with `always()` (30-day retention), before requested
+teardown. Evidence may be partial if failure occurs before a stage starts;
+an artifact's existence is not a pass. Check job conclusions, logs and JSON
+verdicts. Failover scenario durations include preflight and restoration, not
+just user-visible outage; neither those durations nor deployment timings prove
+CMS RTO.
 
 ---
 
@@ -495,8 +552,12 @@ split-brain on the replicated volume cannot take the backups with it.
 **Restore drill.** A second CronJob (`mariadb-restore-test-cronjob.yaml`) runs
 daily at 03:30 UTC: it downloads the newest object from the bucket, restores it
 into a throwaway MariaDB instance, and validates that the WordPress schema was
-recovered (`wp_posts`, `wp_options`, `wp_users`). It records the restore time
-and duration as metrics.
+recovered (`wp_posts`, `wp_options`, `wp_users`). It records the success timestamp
+and `cms_backup_restore_duration_seconds`, measured from before S3 listing and
+download through ephemeral DB initialization, SQL import, validation and shutdown.
+The start timestamp survives fetch retries. This measures database restore
+drill duration, **not end-to-end CMS RTO**: it does not restore the production DB,
+uploads, frontends or routing, nor prove that user traffic has recovered.
 
 The store runs on the host network and binds the S3 API directly on the
 hypervisor's internal address (never the WAN); the other Garage APIs stay on
@@ -515,7 +576,8 @@ collector:
 **Configuration.** The endpoint/bucket/region are injected into a
 `backup-config` ConfigMap and the credentials into a `backup-secret` Secret by
 the `kubernetes` phase, all derived from the `backup:` block in `config.yaml`
-(the S3 secret must be encrypted: `cms-ha secrets encrypt`).
+(the S3 secret is age-encrypted on normal config load; there is no separate
+`secrets encrypt` step).
 
 To perform a manual backup:
 ```bash
@@ -532,6 +594,44 @@ rclone --s3-endpoint "http://192.168.10.254:3900" --s3-provider Other \
 
 ### 6.2 WordPress Media and File Backups
 Uploaded media (`wp-content/uploads`) is centrally stored on the NFS server `internal-storage` at `/srv/nfs/wp-uploads` and mounted across both frontend nodes.
+
+**Storage and PHP upgrade notes (existing labs).** Re-run `cms-ha phase
+setup-puppet` to upload the current roles and regenerate Hiera, including
+`cms_ha::cms_frontend_ips` from the configured frontend nodes. The storage
+catalog rejects an empty or non-IPv4 allowlist. Its export maps all clients to
+UID/GID 33 (`all_squash,anonuid=33,anongid=33`), allows only those IPs, and adds
+per-frontend NFSv4 `2049/tcp` grants before removing the legacy Main-subnet
+`2049`, `2049/tcp` and `111` grants. Review any additional hand-written rules
+separately; hotdesks must not retain uploads access.
+
+Frontend fstab options are now
+`_netdev,auto,rw,hard,timeo=600,retrans=2,nfsvers=4` (no `soft` or `nofail`).
+The catalog stops Apache if the live mount is unsafe, and migrates only the
+expected writable legacy soft export: it tries remount, then a normal
+unmount/mount only after rechecking identity. It refuses a different export,
+read-only mount, subdirectory bind or stacked mount; a busy unmount or failed
+recovery leaves Apache stopped. Plan a maintenance window and resolve the cause
+instead of forcing/lazily unmounting a live share. The underlying local uploads
+directory is root-owned `0555` when exposed, so `www-data` cannot silently write
+local uploads. Apache requires/binds to the mount and runs
+`cms-ha-check-uploads` before startup; loss of connectivity on a still-mounted
+hard NFS share can block I/O rather than stop Apache. The single storage VM is
+still an availability dependency, not redundant NFS.
+
+After convergence, inspect `exportfs -s` and `ufw status` on storage; on each
+frontend use `findmnt -rn -M /var/www/html/wp-content/uploads -o
+SOURCE,FSTYPE,OPTIONS,FSROOT` and
+`sudo /usr/local/sbin/cms-ha-check-uploads 192.168.10.15:/srv/nfs/wp-uploads`
+(adapt the address to config). Do not treat fstab alone as proof of migration.
+
+The same frontend catalog enforces `php_admin_value memory_limit 128M` and
+`ServerLimit 4` / `MaxRequestWorkers 4` in the standard prefork config. The
+32 MiB request-body/post cap and 16 MiB upload cap are separate bounds; they do
+not bound all PHP allocations. Four requests can each consume PHP's 128 MiB
+budget plus Apache/native overhead, so this is a resource budget for the 1 GiB
+lab frontends, not an OOM guarantee or a substitute for patched packages.
+`cms-ha verify` checks the PHP package floor, upload-progress setting, enabled
+memory limit and prefork worker settings.
 
 To back up the shared uploads volume:
 ```bash
@@ -586,19 +686,36 @@ If that automated path ever fails, the manual fallback is:
 # 1. Check cluster status from master2
 ssh ubuntu@192.168.10.12 'sudo -H kubectl get nodes; sudo -H kubectl get pods -n cms'
 
-# 2. Force-delete the zombie pod
-ssh ubuntu@192.168.10.12 'sudo -H kubectl delete pod mariadb-0 -n cms --force --grace-period=0'
+# 2. Inspect fencing and role-resolution logs before changing any writer state
+ssh ubuntu@192.168.10.12 'sudo journalctl -u drbd-failover-watchdog.service -n 100 --no-pager; sudo drbdadm status cms_data'
 
-# 3. If MariaDB does not start on master2, promote DRBD there and migrate the PV
-# (requires manual intervention — see full procedure in section 8)
+# Do not force-delete the pod or promote a second writer until the old domain
+# is confirmed powered off and the surviving DRBD disk is safe to promote.
+# After fencing is confirmed, use the installed failover utility on the survivor:
+ssh ubuntu@192.168.10.12 'sudo /usr/local/bin/drbd-failover.sh promote'
 ```
 
+**Fencing migration.** Re-run `cms-ha phase setup-drbd` on existing labs to
+replace all authorized-key entries for the dedicated fencing identity with the
+restricted forced command, deploy the helper allowlisting only the DRBD pair,
+and install pinned host keys on both peers. Unrelated authorized keys are
+preserved. The host account needs local sshd public keys, safe account-owned
+home/SSH paths (no symlinks or group/other writes), and non-interactive permission
+for the helper's `sudo -n /usr/bin/virsh` calls. Unsafe paths and changed
+persistent pins fail closed. For deliberate host-key rotation, verify the new
+local sshd keys out of band, archive and explicitly replace the reviewed
+`~/.ssh/cms-ha-fence/known_hosts` pin, then rerun `setup-drbd` to distribute it;
+do not disable strict checking or populate pins using unauthenticated
+`ssh-keyscan`. Required fencing must be successfully provisioned before
+promotion; setting `drbd.fencing: false` removes that safety guarantee and is
+not an HA acceptance workaround.
+
 ### 7.2 Jumpstart Node Shutdown
-Once the entire infrastructure is deployed, the `jumpstart` node can be safely shut down to free CPU/RAM resources on the physical server:
+After deployment, a temporary `jumpstart` shutdown can free CPU/RAM for a lab drill. Verify that CMS traffic continues and account for the support services that become unavailable:
 ```bash
 virsh -c qemu:///system shutdown jumpstart
 ```
-The CMS infrastructure (WordPress, Nginx, MariaDB, K3s, Monitoring) will continue operating normally without depending on the provisioning server.
+The existing CMS data path can continue serving without the provisioning server; this must be checked on the running lab. Jumpstart also hosts Puppet Server, DNS, NTP and step-ca, so configuration convergence, name/time services and certificate renewal are unavailable while it is down.
 
 > **Important:** If `jumpstart` is shut down, the internal NTP server becomes unavailable. Node clocks may drift if they remain powered off for extended periods. Restart it before resuming the lab to ensure clock synchronisation.
 
@@ -611,7 +728,14 @@ Run the chaos engineering test suite to validate HA behaviour:
 # (Optional: inspect state without auto-restoring)
 ./cms-ha test failover --skip-restore
 ```
-This tests DRBD master failover (graceful and power-cut), CMS frontend failover, K3s worker failover, and load-balancer VIP failover with timing metrics. The DRBD scenarios read the role from **both** masters and take down whichever one actually holds `Primary` (never a Secondary), after checking that the survivor's `drbd-failover-watchdog` is active and that `mariadb-0` is Running and **Ready** on the writer; they then assert that the pod comes back Running and Ready on the survivor. The worker scenario asserts that `mariadb-0` stays Running and Ready on a master and that the VIP keeps serving — this design pins the stateful workload to the DRBD primary (node affinity + hostPath), so it is not expected to reschedule onto a worker. The VIP scenario stops whichever balancer currently owns the floating address, asserts that the survivor takes it over and serves **HTTPS** (a plain-HTTP redirect is not accepted), then restarts the node and waits until both balancers are reachable and exactly one owns the VIP again. Scenarios that cannot run (fewer than 2 masters, 2 frontends, 2 workers or 2 balancers) are reported as **`SKIP`** — they are no longer counted as failures. Every scenario verifies that the node actually reached `shut off`, and a restore is only successful once the node accepts SSH again; a failed restore fails the scenario instead of passing. With `--skip-restore` the failed node is intentionally left down, so later DRBD scenarios report **`SKIP`** when the pair can no longer be inspected and the post-restore VIP check is omitted. Cancelled runs return an error instead of a silent success.
+For acceptance evidence, create the output directory first and run
+`./cms-ha test failover --require-all --results-file integration-artifacts/failover.json`.
+The report records `PASS` / `FAIL` / `SKIP`, reasons, `complete`, errors and
+`duration_scope`; `complete: true` means all scenarios were visited, not that
+all passed. A cancelled run may have only partial evidence. Durations cover the
+whole scenario including preflight and restoration, **not CMS RTO**.
+
+This tests DRBD master failover (graceful and power-cut), CMS frontend failover, K3s worker failover, and load-balancer VIP failover. The DRBD scenarios read the role from **both** masters and take down whichever one actually holds `Primary` (never a Secondary), after checking that the survivor's `drbd-failover-watchdog` is active and that `mariadb-0` is Running and **Ready** on the writer; they then assert that the pod comes back Running and Ready on the survivor. The worker scenario asserts that `mariadb-0` stays Running and Ready on a master and that the VIP keeps serving — this design pins the stateful workload to the DRBD primary (node affinity + hostPath), so it is not expected to reschedule onto a worker. The VIP scenario stops whichever balancer currently owns the floating address, asserts that the survivor takes it over and serves **HTTPS** (a plain-HTTP redirect is not accepted), then restarts the node and waits until both balancers are reachable and exactly one owns the VIP again. Scenarios that cannot run (fewer than 2 masters, 2 frontends, 2 workers or 2 balancers) are reported as **`SKIP`** — they do not fail the default exploratory run, but **do fail `--require-all` acceptance**. Every scenario verifies that the node actually reached `shut off`, and a restore is only successful once the node accepts SSH again; a failed restore fails the scenario instead of passing. With `--skip-restore` the failed node is intentionally left down, so later DRBD scenarios report **`SKIP`** when the pair can no longer be inspected and the post-restore VIP check is omitted. Cancelled runs return an error instead of a silent success.
 
 ---
 
@@ -758,10 +882,14 @@ data:
     [mysqld]
     innodb_use_native_aio=0
     innodb_flush_method=fsync
-    innodb_flush_log_at_trx_commit=2
+    innodb_flush_log_at_trx_commit=1
 ```
 
 Mounted in the StatefulSet as `/etc/mysql/conf.d/custom.cnf`.
+Existing labs using `innodb_flush_log_at_trx_commit=2` must reapply the Kubernetes
+configuration and restart MariaDB in a maintenance window to load the new value
+`1`; changing a mounted ConfigMap does not reload startup settings. Confirm the
+live variable after restart rather than relying only on the manifest.
 
 ```bash
 # Verify the ConfigMap exists
@@ -792,12 +920,13 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
-**Functionality & High Availability Guarantees:**
+**Configured failover behavior (not a runtime acceptance result):**
 - **Continuous Health Polling:** Evaluates DRBD replication status and peer node responsiveness every 5 seconds.
 - **Anti-Split-Brain Quorum Verification:**
   - *Default Gateway Reachability (`192.168.10.1`):* If the local node cannot reach the gateway, failover is suppressed to prevent split-brain during network partition events where the local node is isolated.
   - *Peer Heartbeat (ICMP):* Verifies the peer master node is completely unreachable before taking action, avoiding failovers during transient DRBD replication reconnections.
-  - *Debounce Strike Counter:* Requires 3 consecutive failed checks (15 seconds) before triggering failover promotion.
+  - *Debounce Strike Counter:* Requires 3 consecutive failed checks before attempting failover; command and probe time adds to the nominal 5-second polling intervals.
+  - *Required STONITH:* Gateway/peer pings are only preconditions, not proof of quorum or power-off. With `drbd.fencing: true`, the peer must be fenced and confirmed off before promotion; failure suppresses takeover.
 - **Autonomous Recovery Actions:**
   - Invokes `/usr/local/bin/drbd-failover.sh promote` on the healthy node.
   - Promotes DRBD resource `cms_data` to Primary.

@@ -4,7 +4,7 @@
 
 - [x] Install high-availability cluster: 3 control-plane (server) nodes, 2 agent/worker nodes.
 - [x] Configure SQL database within the cluster.
-- [x] Verify database and controller synchronization and failover.
+- [x] Implement database/controller synchronization checks and failover scenarios (live acceptance requires recorded results).
 
 ---
 
@@ -43,11 +43,12 @@
   - **Quorum & Anti-Split-Brain Safeguards:**
     1. *Gateway Ping Check:* Verifies reachability of the default gateway (`192.168.10.1`). If the gateway is unreachable, failover is suppressed to prevent split-brain under network isolation.
     2. *Peer Heartbeat Check:* Pings the peer master before taking action, avoiding false positives during transient replication interruptions.
-    3. *Debounce Strike Threshold:* Requires 3 consecutive failed checks (15s timeout) before triggering promotion.
-    4. *STONITH Fencing (`/usr/local/bin/fence-peer.sh`):* The ping checks are only a precondition. Before promoting, the failed peer domain is powered off at the hypervisor and the power-off is **confirmed**; without a confirmed fence the watchdog refuses to promote (unless `drbd.fencing` is disabled). This makes split-brain impossible rather than merely unlikely.
+    3. *Debounce Strike Threshold:* Requires 3 consecutive failed checks before attempting takeover; the nominal 5-second poll interval excludes time spent on probes and fencing.
+    4. *STONITH Fencing (`/usr/local/bin/fence-peer.sh`):* The ping checks are only a precondition. Before promoting, the failed peer domain is powered off at the hypervisor and the power-off is **confirmed**; without a confirmed fence the watchdog refuses to promote when `drbd.fencing` is enabled. Derived SSH fencing uses a dedicated restricted key and forced command allowing only exact `virsh destroy` / `virsh domstate` requests for the first two configured masters, never the third quorum member. Hypervisor host keys come from local sshd public keys, are persistently pinned and copied to the peers, and are checked strictly. Custom command pairs are operator-managed. This is a safety control, not an unconditional split-brain guarantee; disabling fencing removes it. Existing labs must rerun `setup-drbd` and review key/pin migration as described in [MANUAL section 7.1](../MANUAL.md#71-master-1-failure-drbdk3s-primary).
     5. *Autonomous Orchestration:* Automatically promotes DRBD, mounts the partition, updates Kubernetes node affinity labels, and reschedules the MariaDB StatefulSet. The pod left behind on the failed master is force-deleted (`--force --grace-period=0`) instead of gracefully: a pod whose node is unreachable stays in `Terminating` until that node's kubelet confirms the deletion, and a StatefulSet only creates its replacement once the old pod object is gone — with a graceful delete the database would stay down until the failed master came back, long after DRBD had failed over. The peer is fenced off before this happens, so no process can still be writing the volume.
     6. *Automatic Split-Brain Auto-healing:* Upon node recovery, DRBD kernel handlers (`after-sb-1pri discard-secondary`) automatically resynchronize outdated blocks without human intervention.
-- **Exposure:** ClusterIP (3306) + NodePort (30306) for access from the main network.
+- **Durability:** `mariadb-configmap.yaml` sets `innodb_use_native_aio=0`, `innodb_flush_method=fsync` and `innodb_flush_log_at_trx_commit=1`. Reapply the Kubernetes phase and restart the MariaDB pod in a maintenance window if an existing server still uses the old commit setting; updating a mounted ConfigMap alone does not reload server startup options.
+- **Exposure:** ClusterIP (3306) + NodePort (30306). Endpoint UFW rules scope the K3s API (6443/tcp) to Internal and MariaDB NodePort to the Internal/Main CIDRs, removing legacy public grants. This is INPUT-rule subnet scoping, not a per-frontend DB allowlist or complete NodePort isolation: kube-proxy DNAT/FORWARD can bypass UFW INPUT.
 - **Database:** `wordpress`
 - **User:** `wp_user` with GRANT ALL on `wordpress`.
 
@@ -76,7 +77,11 @@ hypervisor (`backup` phase), on a data volume under `backup.data_dir`
 - **Restore drill** (`mariadb-restore-test-cronjob.yaml`, daily 03:30): fetches
   the newest object, restores it into a throwaway MariaDB instance, and
   validates the WordPress schema (`wp_posts`, `wp_options`, `wp_users`). It also
-  measures the restore duration, so RTO is proven rather than assumed.
+  records `cms_backup_restore_duration_seconds` from before S3 listing/download
+  through ephemeral DB initialization, import, validation and shutdown (including
+  fetch retries). This is **database restore drill duration, not CMS RTO**: the
+  production DB, uploads, frontends, routing and user traffic are not recovered
+  by this drill.
 - **Alerts:** the jobs publish `cms_backup_last_success_timestamp_seconds` and
   `cms_backup_restore_*` through the node-exporter textfile collector;
   `BackupMissing` (26 h) and `BackupRestoreTestFailing` (48 h) guard the RPO.
@@ -85,7 +90,8 @@ hypervisor (`backup` phase), on a data volume under `backup.data_dir`
   (endpoint/bucket/region/retention) and a `backup-secret` Secret
   (access/secret key) from it, and pins the CronJob schedules.
 - **Engine:** `backup.engine: "garage"` (`""` disables the whole feature). The
-  S3 secret must be encrypted with `cms-ha secrets encrypt`.
+  S3 secret is age-encrypted on normal config load; no separate encryption
+  command is required.
 
 ### Kubernetes Manifests (Kustomize)
 
