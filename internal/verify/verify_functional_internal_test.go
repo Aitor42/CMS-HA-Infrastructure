@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
@@ -285,7 +287,7 @@ func TestParsePHPPatchProbe(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if state.mitigations["memory_limit_unlimited"] {
+		if state.mitigations["memory_limit_128m"] {
 			t.Error("a missing mitigation must not be reported as in place")
 		}
 		if !state.mitigations["upload_progress_off"] {
@@ -351,6 +353,106 @@ func TestParsePHPPatchProbe(t *testing.T) {
 			t.Error("expected an error without the mod_php answer")
 		}
 	})
+}
+
+// Run the actual shell probe with temporary configuration and executable
+// substitutes, so comments, duplicate settings and numeric prefixes cannot
+// accidentally satisfy a resource limit check.
+func TestPHPPatchProbeResourceLimits(t *testing.T) {
+	const boundedPrefork = "<IfModule mpm_prefork_module>\nServerLimit 4\nMaxRequestWorkers 4\n</IfModule>\n"
+	for _, tc := range []struct {
+		name, memory, prefork, modules string
+		memoryOK, workersOK            bool
+	}{
+		{"bounded", "php_admin_value memory_limit 128M\n", boundedPrefork, "php_module mpm_prefork_module", true, true},
+		{"unlimited", "php_admin_value memory_limit -1\n", boundedPrefork, "php_module mpm_prefork_module", false, true},
+		{"different-limit", "php_admin_value memory_limit 256M\n", boundedPrefork, "php_module mpm_prefork_module", false, true},
+		{"numeric-prefix", "php_admin_value memory_limit 1280M\n", boundedPrefork, "php_module mpm_prefork_module", false, true},
+		{"commented-memory", "# php_admin_value memory_limit 128M\n", boundedPrefork, "php_module mpm_prefork_module", false, true},
+		{"missing-memory", "", boundedPrefork, "php_module mpm_prefork_module", false, true},
+		{"duplicate-memory", "php_admin_value memory_limit 128M\nphp_admin_value memory_limit -1\n", boundedPrefork, "php_module mpm_prefork_module", false, true},
+		{"too-many-workers", "php_admin_value memory_limit 128M\n", "ServerLimit 4\nMaxRequestWorkers 40\n", "php_module mpm_prefork_module", true, false},
+		{"wrong-server-limit", "php_admin_value memory_limit 128M\n", "ServerLimit 256\nMaxRequestWorkers 4\n", "php_module mpm_prefork_module", true, false},
+		{"missing-prefork", "php_admin_value memory_limit 128M\n", "", "php_module mpm_prefork_module", true, false},
+		{"commented-prefork", "php_admin_value memory_limit 128M\n", "# ServerLimit 4\n# MaxRequestWorkers 4\n", "php_module mpm_prefork_module", true, false},
+		{"duplicate-prefork", "php_admin_value memory_limit 128M\n", boundedPrefork + "MaxRequestWorkers 150\n", "php_module mpm_prefork_module", true, false},
+		{"inactive-prefork", "php_admin_value memory_limit 128M\n", boundedPrefork, "php_module mpm_event_module", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			probe := phpPatchProbe
+			files := map[string]string{
+				phpHardeningINI:                              "session.upload_progress.enabled = Off\n",
+				phpHardeningApacheConf:                       tc.memory,
+				"/etc/apache2/mods-enabled/mpm_prefork.conf": tc.prefork,
+				"/usr/bin/dpkg-query":                        "#!/bin/sh\nprintf '%s' '" + phpPatchedPackage + "'\n",
+				"/usr/bin/dpkg":                              "#!/bin/sh\nexit 0\n",
+				"/usr/sbin/apache2ctl":                       "#!/bin/sh\nprintf '%s\\n' '" + tc.modules + "'\n",
+			}
+			for path, content := range files {
+				tmp := filepath.Join(dir, filepath.Base(path))
+				if err := os.WriteFile(tmp, []byte(content), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				probe = strings.ReplaceAll(probe, path, tmp)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "sh", "-c", probe).CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe failed: %v\n%s", err, out)
+			}
+			state, err := parsePHPPatchProbe(string(out))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.mitigations["memory_limit_128m"] != tc.memoryOK || state.mitigations["prefork_workers_4"] != tc.workersOK {
+				t.Fatalf("unexpected resource limits: %v\n%s", state.mitigations, out)
+			}
+			for _, pkg := range phpPatchedPackages {
+				if !state.packages[pkg].patched {
+					t.Errorf("resource checks must retain the patch verdict for %s", pkg)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckPHPSecurityPatchResourceLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mitigations []string
+		vulnerable  bool
+		pass        bool
+	}{
+		{"bounded-and-patched", []string{"upload_progress_off", "memory_limit_128m", "prefork_workers_4"}, false, true},
+		{"legacy-unlimited", []string{"upload_progress_off", "memory_limit_unlimited", "prefork_workers_4"}, false, false},
+		{"missing-concurrency", []string{"upload_progress_off", "memory_limit_128m"}, false, false},
+		{"unpatched-sapi", []string{"upload_progress_off", "memory_limit_128m", "prefork_workers_4"}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			patched := map[string]bool{}
+			for _, pkg := range phpPatchedPackages {
+				patched[pkg] = true
+			}
+			versions := patchedPHPVersions()
+			if tc.vulnerable {
+				patched["libapache2-mod-php8.3"] = false
+				versions["libapache2-mod-php8.3"] = "8.3.6-0ubuntu0.24.04.9"
+			}
+			fake := &testutil.FakeExecutor{RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+				if cmd != phpPatchProbe {
+					t.Errorf("unexpected probe: %s", cmd)
+				}
+				return phpProbeOutput(versions, patched, "yes", tc.mitigations...), "", 0, nil
+			}}
+			v := &Verifier{cfg: &config.Config{Nodes: config.NodesConfig{CMSFrontends: []config.NodeDetail{{IP: "192.0.2.101"}}}}, ssh: fake}
+			got := v.checkPHPSecurityPatch(t.Context())
+			if got.pass != tc.pass {
+				t.Fatalf("pass=%v, want %v: %s", got.pass, tc.pass, got.detail)
+			}
+		})
+	}
 }
 
 func TestPHPPatchProbeChecksEveryPinnedPackage(t *testing.T) {

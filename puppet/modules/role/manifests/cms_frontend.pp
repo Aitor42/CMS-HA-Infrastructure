@@ -126,21 +126,40 @@ class role::cms_frontend {
     content => @("APACHEPHPHARDENING")
       # CMS-HA - PHP hardening for CVE-2026-109618 / CVE-2026-109619
       #
-      # - memory_limit=-1 removes the user-controllable out-of-memory bailout
-      #   that CVE-2026-109618 abuses. php_admin_value cannot be overridden by
-      #   the application, so WordPress cannot put a finite limit back.
-      # - session.upload_progress.enabled=Off closes the session path that
-      #   CVE-2026-109619 was confirmed with.
-      # - The request is bounded here and at the proxy, so a single request
-      #   can never make PHP ask for more memory than the node has.
+      # The version floor above supplies the CVE fixes; unlimited memory is
+      # not safe on the 1 GiB lab nodes. Prefork concurrency is bounded in
+      # mods-available/mpm_prefork.conf, leaving headroom for Apache and the OS.
       <Directory /var/www/html>
-          php_admin_value memory_limit -1
+          php_admin_value memory_limit 128M
           php_admin_flag session.upload_progress.enabled Off
           php_admin_value post_max_size 32M
           php_admin_value upload_max_filesize 16M
           LimitRequestBody 33554432
       </Directory>
       | APACHEPHPHARDENING
+  }
+
+  # Replace the packaged prefork settings at their standard location rather
+  # than redefining them later in conf-enabled/php-hardening.conf. This keeps
+  # a single authoritative limit and consistent initial/spare process counts.
+  file { '/etc/apache2/mods-available/mpm_prefork.conf':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => Package['apache2'],
+    notify  => Service['apache2'],
+    content => @("APACHEPREFORK")
+      # CMS-HA - bounded mod_php concurrency for 1 GiB lab frontends
+      <IfModule mpm_prefork_module>
+          StartServers 2
+          MinSpareServers 1
+          MaxSpareServers 2
+          ServerLimit 4
+          MaxRequestWorkers 4
+          MaxConnectionsPerChild 500
+      </IfModule>
+      | APACHEPREFORK
   }
 
   exec { 'apache-enable-php-hardening':

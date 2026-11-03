@@ -51,12 +51,15 @@ const (
 	// mitigations the application cannot override. The path is the enabled
 	// one, so a file that was deployed but never enabled does not pass.
 	phpHardeningApacheConf = "/etc/apache2/conf-enabled/php-hardening.conf"
+
+	// Check the enabled MPM configuration, not a second override in conf.d.
+	phpPreforkApacheConf = "/etc/apache2/mods-enabled/mpm_prefork.conf"
 )
 
-// requiredPHPMitigations are the mitigations every frontend has to carry on
-// top of the patched package: the session path CVE-2026-109619 was confirmed
-// with, and the out-of-memory bailout CVE-2026-109618 abuses.
-var requiredPHPMitigations = []string{"upload_progress_off", "memory_limit_unlimited"}
+// requiredPHPMitigations combines session hardening with bounded resource
+// usage on the 1 GiB frontends. Finite limits are not a substitute for the
+// patched packages: every pinned binary still has to satisfy the patch floor.
+var requiredPHPMitigations = []string{"upload_progress_off", "memory_limit_128m", "prefork_workers_4"}
 
 // phpPatchedPackages are all the packages pinned to the patched revision. The
 // Apache SAPI is the one that answers web requests, so checking only the CLI
@@ -82,8 +85,11 @@ var phpPatchProbe = `for pkg in ` + strings.Join(phpPatchedPackages, " ") + `; d
 	`printf 'php_mod_php=yes\n'; else printf 'php_mod_php=no\n'; fi; ` +
 	`if /usr/bin/grep -Eqi '^[[:space:]]*session\.upload_progress\.enabled[[:space:]]*=[[:space:]]*(off|0)[[:space:]]*$' ` + phpHardeningINI + ` 2>/dev/null; then ` +
 	`printf 'php_mitigation=upload_progress_off\n'; else printf 'php_mitigation=upload_progress_missing\n'; fi; ` +
-	`if /usr/bin/grep -Eqi 'php_admin_value[[:space:]]+memory_limit[[:space:]]+-1' ` + phpHardeningApacheConf + ` 2>/dev/null; then ` +
-	`printf 'php_mitigation=memory_limit_unlimited\n'; else printf 'php_mitigation=memory_limit_missing\n'; fi`
+	`if /usr/bin/awk 'tolower($1) == "php_admin_value" && tolower($2) == "memory_limit" { n++; ok = (NF == 3 && tolower($3) == "128m") } END { exit !(n == 1 && ok) }' ` + phpHardeningApacheConf + ` 2>/dev/null; then ` +
+	`printf 'php_mitigation=memory_limit_128m\n'; else printf 'php_mitigation=memory_limit_missing\n'; fi; ` +
+	`if /usr/sbin/apache2ctl -M 2>/dev/null | /usr/bin/grep -q mpm_prefork_module && ` +
+	`/usr/bin/awk 'tolower($1) == "serverlimit" { servers++; server_ok = (NF == 2 && $2 == "4") } tolower($1) == "maxrequestworkers" { workers++; worker_ok = (NF == 2 && $2 == "4") } END { exit !(servers == 1 && server_ok && workers == 1 && worker_ok) }' ` + phpPreforkApacheConf + ` 2>/dev/null; then ` +
+	`printf 'php_mitigation=prefork_workers_4\n'; else printf 'php_mitigation=prefork_workers_missing\n'; fi`
 
 // noRedirectClient stops at the first response: the caller has to see the
 // redirect itself, and a following client would chase the canonical vhost name,

@@ -169,10 +169,17 @@ func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
 		// The cache refresh must consider every pinned binary package, not
 		// only the CLI: Apache loads libapache2-mod-php8.3.
 		"for p in php8.3-cli php8.3-common libapache2-mod-php8.3; do",
-		// The mitigations: the session path CVE-2026-109619 was confirmed
-		// with, and the out-of-memory bailout CVE-2026-109618 abuses.
+		// Session hardening and finite resource limits accompany, rather than
+		// replace, the mandatory patched package versions above.
 		"session.upload_progress.enabled",
-		"php_admin_value memory_limit -1",
+		"php_admin_value memory_limit 128M",
+		"/etc/apache2/mods-available/mpm_prefork.conf",
+		"StartServers 2",
+		"MinSpareServers 1",
+		"MaxSpareServers 2",
+		"ServerLimit 4",
+		"MaxRequestWorkers 4",
+		"MaxConnectionsPerChild 500",
 		"php_admin_flag session.upload_progress.enabled Off",
 		"post_max_size",
 		"LimitRequestBody",
@@ -186,6 +193,20 @@ func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
 		if !strings.Contains(cmsContent, expected) {
 			t.Errorf("expected cms_frontend.pp to contain %q", expected)
 		}
+	}
+
+	if strings.Contains(cmsContent, "php_admin_value memory_limit -1") {
+		t.Error("the frontend must not disable PHP's memory limit")
+	}
+	prefork := puppetResourceBlock(t, cmsContent, "file { '/etc/apache2/mods-available/mpm_prefork.conf':")
+	for _, setting := range []string{"ServerLimit 4", "MaxRequestWorkers 4", "StartServers 2", "MinSpareServers 1", "MaxSpareServers 2"} {
+		if !strings.Contains(prefork, setting) || strings.Count(cmsContent, setting) != 1 {
+			t.Errorf("%q must be defined exactly once, in the standard prefork config", setting)
+		}
+	}
+	hardening := puppetResourceBlock(t, cmsContent, "file { '/etc/apache2/conf-available/php-hardening.conf':")
+	if strings.Contains(hardening, "ServerLimit") || strings.Contains(hardening, "MaxRequestWorkers") {
+		t.Error("PHP hardening must not duplicate the packaged prefork configuration")
 	}
 
 	// The request size is bounded at the proxy as well: the frontends answer
