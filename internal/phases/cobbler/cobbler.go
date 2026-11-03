@@ -78,7 +78,7 @@ type cobblerTemplateData struct {
 // planCobblerNetwork derives the DHCP network/netmask/pool from a configured
 // CIDR. The pool keeps the lab's documented .50-.99 window and is clamped to
 // the usable host range for prefixes smaller than /24.
-func planCobblerNetwork(detail config.NetworkDetail) (cobblerNetworkPlan, error) {
+func planCobblerNetwork(detail config.NetworkDetail, defaultDomain string) (cobblerNetworkPlan, error) {
 	_, ipnet, err := net.ParseCIDR(detail.CIDR)
 	if err != nil {
 		return cobblerNetworkPlan{}, fmt.Errorf("parse CIDR %q: %w", detail.CIDR, err)
@@ -100,12 +100,24 @@ func planCobblerNetwork(detail config.NetworkDetail) (cobblerNetworkPlan, error)
 	if start > end {
 		return cobblerNetworkPlan{}, fmt.Errorf("CIDR %q is too small for the DHCP pool", detail.CIDR)
 	}
+	// gateway and domain are optional in config.yaml (init-vms, Puppet and
+	// router-bootstrap all default them). Rendering the empty strings would
+	// produce a DHCP router option and DNS zone with no value, so apply the
+	// same defaults here instead of making Cobbler the odd phase out.
+	gateway := strings.TrimSpace(detail.Gateway)
+	if gateway == "" {
+		gateway = ipv4String(network + 1)
+	}
+	domain := strings.TrimSpace(detail.Domain)
+	if domain == "" {
+		domain = defaultDomain
+	}
 	return cobblerNetworkPlan{
 		CIDR:      detail.CIDR,
 		Network:   ipv4String(network),
 		Netmask:   net.IP(ipnet.Mask).String(),
-		Gateway:   detail.Gateway,
-		Domain:    detail.Domain,
+		Gateway:   gateway,
+		Domain:    domain,
 		DHCPStart: ipv4String(start),
 		DHCPEnd:   ipv4String(end),
 	}, nil
@@ -127,11 +139,11 @@ func (p *Phase) cobblerTemplateReplacer() (*strings.Replacer, error) {
 	if p.cfg.Nodes.Jumpstart.MACInternal == "" || p.cfg.Nodes.Jumpstart.MACMain == "" {
 		return nil, fmt.Errorf("nodes.jumpstart.mac_internal/mac_main are required to scope DHCP to the lab interfaces")
 	}
-	internal, err := planCobblerNetwork(p.cfg.Network.Internal)
+	internal, err := planCobblerNetwork(p.cfg.Network.Internal, "internal.local")
 	if err != nil {
 		return nil, fmt.Errorf("internal network: %w", err)
 	}
-	main, err := planCobblerNetwork(p.cfg.Network.Main)
+	main, err := planCobblerNetwork(p.cfg.Network.Main, "main.local")
 	if err != nil {
 		return nil, fmt.Errorf("main network: %w", err)
 	}

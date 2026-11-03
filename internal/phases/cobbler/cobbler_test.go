@@ -258,15 +258,28 @@ func TestRenderedTemplatesUseTheConfiguredNetwork(t *testing.T) {
 }
 
 func TestPlanCobblerNetworkClampsThePoolToTheSubnet(t *testing.T) {
-	plan, err := planCobblerNetwork(config.NetworkDetail{CIDR: "10.0.0.0/26", Gateway: "10.0.0.1", Domain: "lab.internal"})
+	plan, err := planCobblerNetwork(config.NetworkDetail{CIDR: "10.0.0.0/26", Gateway: "10.0.0.1", Domain: "lab.internal"}, "internal.local")
 	if err != nil {
 		t.Fatalf("planCobblerNetwork: %v", err)
 	}
 	if plan.DHCPStart != "10.0.0.50" || plan.DHCPEnd != "10.0.0.62" {
 		t.Fatalf("pool = %s-%s, want 10.0.0.50-10.0.0.62", plan.DHCPStart, plan.DHCPEnd)
 	}
-	if _, err := planCobblerNetwork(config.NetworkDetail{CIDR: "10.0.0.0/27", Gateway: "10.0.0.1"}); err == nil {
+	if _, err := planCobblerNetwork(config.NetworkDetail{CIDR: "10.0.0.0/27", Gateway: "10.0.0.1"}, "internal.local"); err == nil {
 		t.Fatal("expected a /27 to be rejected as too small for the DHCP pool")
+	}
+}
+
+func TestPlanCobblerNetworkDefaultsOptionalGatewayAndDomain(t *testing.T) {
+	plan, err := planCobblerNetwork(config.NetworkDetail{CIDR: "10.30.0.0/24"}, "lab.internal")
+	if err != nil {
+		t.Fatalf("planCobblerNetwork: %v", err)
+	}
+	if plan.Gateway != "10.30.0.1" {
+		t.Errorf("gateway = %q, want the first host in the subnet", plan.Gateway)
+	}
+	if plan.Domain != "lab.internal" {
+		t.Errorf("domain = %q, want the caller's fallback", plan.Domain)
 	}
 }
 
