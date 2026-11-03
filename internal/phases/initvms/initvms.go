@@ -168,37 +168,46 @@ func (p *Phase) setupNetworks(ctx context.Context) error {
 		tmplPath   string
 		bridge     string
 		domain     string
+		cidr       string
+		gateway    string
 		hostCIDR   string
 		routerCIDR string
 	}
-	// Derive the bridge addresses from the configured CIDRs instead of
-	// hardcoding 192.168.10/20.0/24: the host takes .254 and the router uses the
-	// configured gateway (falling back to .1).
-	linkCIDR := func(gateway, prefix string) string {
-		if gateway != "" {
-			return gateway + "/24"
-		}
-		return prefix + "1/24"
-	}
-	internalPrefix := config.PrefixFromCIDR(p.cfg.Network.Internal.CIDR, "192.168.10.")
-	mainPrefix := config.PrefixFromCIDR(p.cfg.Network.Main.CIDR, "192.168.20.")
 	nets := []netDef{
 		{
-			name:       "internal",
-			tmplPath:   "templates/libvirt/internal-net.xml",
-			bridge:     p.cfg.Network.Internal.Bridge,
-			domain:     p.cfg.Network.Internal.Domain,
-			hostCIDR:   internalPrefix + "254/24",
-			routerCIDR: linkCIDR(p.cfg.Network.Internal.Gateway, internalPrefix),
+			name:     "internal",
+			tmplPath: "templates/libvirt/internal-net.xml",
+			bridge:   p.cfg.Network.Internal.Bridge,
+			domain:   p.cfg.Network.Internal.Domain,
+			cidr:     p.cfg.Network.Internal.CIDR,
+			gateway:  p.cfg.Network.Internal.Gateway,
 		},
 		{
-			name:       "main",
-			tmplPath:   "templates/libvirt/main-net.xml",
-			bridge:     p.cfg.Network.Main.Bridge,
-			domain:     p.cfg.Network.Main.Domain,
-			hostCIDR:   mainPrefix + "254/24",
-			routerCIDR: linkCIDR(p.cfg.Network.Main.Gateway, mainPrefix),
+			name:     "main",
+			tmplPath: "templates/libvirt/main-net.xml",
+			bridge:   p.cfg.Network.Main.Bridge,
+			domain:   p.cfg.Network.Main.Domain,
+			cidr:     p.cfg.Network.Main.CIDR,
+			gateway:  p.cfg.Network.Main.Gateway,
 		},
+	}
+
+	// Derive both bridge addresses from each configured CIDR. The host owns the
+	// last usable address and the router owns the configured gateway (or the
+	// first usable address), with the CIDR's real prefix length. The previous
+	// implementation hardcoded /24, which placed both addresses outside a
+	// smaller subnet.
+	for i := range nets {
+		first, last, prefix, err := config.UsableHostRange(nets[i].cidr)
+		if err != nil {
+			return fmt.Errorf("network %s: %w", nets[i].name, err)
+		}
+		nets[i].hostCIDR = fmt.Sprintf("%s/%d", last, prefix)
+		gateway := strings.TrimSpace(nets[i].gateway)
+		if gateway == "" {
+			gateway = first
+		}
+		nets[i].routerCIDR = fmt.Sprintf("%s/%d", gateway, prefix)
 	}
 
 	for _, nd := range nets {
@@ -331,7 +340,8 @@ func verifyNetworkDefinition(name string, content []byte, wantBridge, wantDomain
 	return nil
 }
 
-// configureHostBridge assigns a .254 IP address to a host bridge interface to allow host routing to VMs.
+// configureHostBridge assigns the last usable address of the network to a host
+// bridge interface to allow host routing to VMs.
 func configureHostBridge(ctx context.Context, bridge, targetCIDR, routerCIDR string) error {
 	cmd := exec.CommandContext(ctx, "ip", "-o", "-4", "addr", "show", "dev", bridge)
 	out, err := cmd.CombinedOutput()

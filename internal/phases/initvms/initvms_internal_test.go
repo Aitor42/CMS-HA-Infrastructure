@@ -121,9 +121,11 @@ func TestRenderISOUserDataUsesTheConfiguredDeployUser(t *testing.T) {
 		PubKey:          "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 		MACInternal:     "52:54:00:10:00:01",
 		IPInternal:      "192.168.10.10",
+		InternalPrefix:  24,
 		GatewayInternal: "192.168.10.1",
 		MACMain:         "52:54:00:10:02:0a",
 		IPMain:          "192.168.20.10",
+		MainPrefix:      24,
 	}
 
 	out, err := renderTemplate("templates/autoinstall/user-data.tmpl", data)
@@ -155,9 +157,11 @@ func TestRenderCloudUserData(t *testing.T) {
 		PubKey:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 		MACInternal:         "52:54:00:10:00:01",
 		IPInternal:          "192.168.10.10",
+		InternalPrefix:      24,
 		GatewayInternal:     "192.168.10.1",
 		MACMain:             "52:54:00:10:02:0a",
 		IPMain:              "192.168.20.10",
+		MainPrefix:          24,
 		WANIfaceConfigCloud: "\n  net2:\n    match:\n      macaddress: \"52:54:00:10:00:09\"\n    dhcp4: true",
 	}
 
@@ -278,8 +282,8 @@ func TestClientProvisioningMode(t *testing.T) {
 func TestCloudInterfaces(t *testing.T) {
 	cfg := &config.Config{
 		Network: config.NetworkConfig{
-			Internal: config.NetworkDetail{Gateway: "192.168.10.1"},
-			Main:     config.NetworkDetail{Gateway: "192.168.20.1"},
+			Internal: config.NetworkDetail{CIDR: "192.168.10.0/24", Gateway: "192.168.10.1"},
+			Main:     config.NetworkDetail{CIDR: "192.168.20.0/24", Gateway: "192.168.20.1"},
 		},
 		Nodes: config.NodesConfig{
 			Router:    config.NodeDetail{Name: "router", IP: "192.168.10.1"},
@@ -288,39 +292,48 @@ func TestCloudInterfaces(t *testing.T) {
 	}
 
 	t.Run("internal node", func(t *testing.T) {
-		got := cloudInterfaces(cfg,
+		got, err := cloudInterfaces(cfg,
 			config.NodeDetail{Name: "master1", IP: "192.168.10.11"},
 			[]libvirt.NetworkOpt{{Network: "internal", Mac: "52:54:00:10:01:11"}})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 1 {
 			t.Fatalf("interfaces = %d, want 1", len(got))
 		}
-		want := cloudInterface{Name: "net0", MAC: "52:54:00:10:01:11", IP: "192.168.10.11", Gateway: "192.168.10.1", DNS: "192.168.10.10", Metric: 200}
+		want := cloudInterface{Name: "net0", MAC: "52:54:00:10:01:11", IP: "192.168.10.11", Prefix: 24, Gateway: "192.168.10.1", DNS: "192.168.10.10", Metric: 200}
 		if got[0] != want {
 			t.Errorf("interface = %+v, want %+v", got[0], want)
 		}
 	})
 
 	t.Run("main node", func(t *testing.T) {
-		got := cloudInterfaces(cfg,
+		got, err := cloudInterfaces(cfg,
 			config.NodeDetail{Name: "lb1", IP: "192.168.20.103"},
 			[]libvirt.NetworkOpt{{Network: "main", Mac: "52:54:00:10:02:67"}})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 1 {
 			t.Fatalf("interfaces = %d, want 1", len(got))
 		}
-		want := cloudInterface{Name: "net0", MAC: "52:54:00:10:02:67", IP: "192.168.20.103", Gateway: "192.168.20.1", DNS: "192.168.20.10", Metric: 200}
+		want := cloudInterface{Name: "net0", MAC: "52:54:00:10:02:67", IP: "192.168.20.103", Prefix: 24, Gateway: "192.168.20.1", DNS: "192.168.20.10", Metric: 200}
 		if got[0] != want {
 			t.Errorf("interface = %+v, want %+v", got[0], want)
 		}
 	})
 
 	t.Run("router with WAN", func(t *testing.T) {
-		got := cloudInterfaces(cfg,
+		got, err := cloudInterfaces(cfg,
 			config.NodeDetail{Name: "router", IP: "192.168.10.1"},
 			[]libvirt.NetworkOpt{
 				{Network: "internal", Mac: "52:54:00:10:01:02"},
 				{Network: "main", Mac: "52:54:00:10:02:02"},
 				{Network: "default", Mac: "52:54:00:10:00:02"},
 			})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if len(got) != 3 {
 			t.Fatalf("interfaces = %d, want 3", len(got))
 		}
@@ -334,6 +347,24 @@ func TestCloudInterfaces(t *testing.T) {
 			t.Errorf("WAN interface = %+v, want DHCP with metric 100", got[2])
 		}
 	})
+
+	t.Run("non-/24 networks keep their prefix", func(t *testing.T) {
+		cfg := *cfg
+		cfg.Network.Internal = config.NetworkDetail{CIDR: "192.168.10.0/25", Gateway: "192.168.10.1"}
+		cfg.Network.Main = config.NetworkDetail{CIDR: "192.168.20.0/26", Gateway: "192.168.20.1"}
+		got, err := cloudInterfaces(&cfg,
+			config.NodeDetail{Name: "router", IP: "192.168.10.1"},
+			[]libvirt.NetworkOpt{
+				{Network: "internal", Mac: "52:54:00:10:01:02"},
+				{Network: "main", Mac: "52:54:00:10:02:02"},
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[0].Prefix != 25 || got[1].Prefix != 26 {
+			t.Fatalf("prefixes = %d/%d, want 25/26", got[0].Prefix, got[1].Prefix)
+		}
+	})
 }
 
 func TestRenderCloudNodeUserData(t *testing.T) {
@@ -343,7 +374,7 @@ func TestRenderCloudNodeUserData(t *testing.T) {
 		PasswordHash: "$6$rounds=4096$salt$hash",
 		PubKey:       "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA test@host",
 		Interfaces: []cloudInterface{
-			{Name: "net0", MAC: "52:54:00:10:01:11", IP: "192.168.10.11", Gateway: "192.168.10.1", DNS: "192.168.10.10", Metric: 200},
+			{Name: "net0", MAC: "52:54:00:10:01:11", IP: "192.168.10.11", Prefix: 24, Gateway: "192.168.10.1", DNS: "192.168.10.10", Metric: 200},
 		},
 	}
 
@@ -407,6 +438,61 @@ func TestRenderCloudNodeUserData(t *testing.T) {
 	if len(iface.Routes) != 1 || iface.Routes[0].To != "default" || iface.Routes[0].Via != "192.168.10.1" || iface.Routes[0].Metric != 200 {
 		t.Errorf("net0 routes = %+v, want one default route via 192.168.10.1 metric 200", iface.Routes)
 	}
+}
+
+func TestRenderCloudNetworkConfigKeepsNon24Prefixes(t *testing.T) {
+	t.Run("client node", func(t *testing.T) {
+		data := cloudNodeData{
+			Hostname: "internal-master1",
+			Interfaces: []cloudInterface{
+				{Name: "net0", MAC: "52:54:00:10:01:11", IP: "192.168.10.11", Prefix: 25, Gateway: "192.168.10.1", DNS: "192.168.10.10", Metric: 200},
+			},
+		}
+		out, err := renderTemplate("templates/autoinstall/cloud-node-network-config.tmpl", data)
+		if err != nil {
+			t.Fatalf("renderTemplate: %v", err)
+		}
+		var doc struct {
+			Ethernets map[string]struct {
+				Addresses []string `yaml:"addresses"`
+			} `yaml:"ethernets"`
+		}
+		if err := yaml.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("rendered network-config is not valid YAML: %v\n%s", err, out)
+		}
+		if got := doc.Ethernets["net0"].Addresses; len(got) != 1 || got[0] != "192.168.10.11/25" {
+			t.Errorf("net0 addresses = %v, want [192.168.10.11/25]", got)
+		}
+	})
+
+	t.Run("jumpstart", func(t *testing.T) {
+		data := autoinstallData{
+			MACInternal:    "52:54:00:10:00:01",
+			IPInternal:     "192.168.10.10",
+			InternalPrefix: 25,
+			MACMain:        "52:54:00:10:02:0a",
+			IPMain:         "192.168.20.10",
+			MainPrefix:     26,
+		}
+		out, err := renderTemplate("templates/autoinstall/cloud-network-config.tmpl", data)
+		if err != nil {
+			t.Fatalf("renderTemplate: %v", err)
+		}
+		var doc struct {
+			Ethernets map[string]struct {
+				Addresses []string `yaml:"addresses"`
+			} `yaml:"ethernets"`
+		}
+		if err := yaml.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("rendered network-config is not valid YAML: %v\n%s", err, out)
+		}
+		if got := doc.Ethernets["net0"].Addresses; len(got) != 1 || got[0] != "192.168.10.10/25" {
+			t.Errorf("net0 addresses = %v, want [192.168.10.10/25]", got)
+		}
+		if got := doc.Ethernets["net1"].Addresses; len(got) != 1 || got[0] != "192.168.20.10/26" {
+			t.Errorf("net1 addresses = %v, want [192.168.20.10/26]", got)
+		}
+	})
 }
 
 func TestRenderCloudNodeUserDataShapes(t *testing.T) {

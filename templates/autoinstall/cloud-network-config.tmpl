@@ -4,7 +4,7 @@ ethernets:
     match:
       macaddress: "{{ .MACInternal }}"
     addresses:
-      - {{ .IPInternal }}/24
+      - {{ .IPInternal }}/{{ .InternalPrefix }}
     nameservers:
       addresses:
         - {{ .IPInternal }}
@@ -16,5 +16,5 @@ ethernets:
     match:
       macaddress: "{{ .MACMain }}"
     addresses:
-      - {{ .IPMain }}/24
+      - {{ .IPMain }}/{{ .MainPrefix }}
 {{ if .WANIfaceConfigCloud }}{{ .WANIfaceConfigCloud }}{{ end }}

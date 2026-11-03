@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"os/user"
 	"strings"
 )
@@ -117,19 +116,15 @@ func (c *Config) LBTLSCertLifetimeHours() int {
 	return 2160 // 90 days
 }
 
-// HypervisorIP returns the libvirt host address on the internal network
-// (network base + .254), which is where initvms configures the host bridge.
+// HypervisorIP returns the last usable address on the internal network, which
+// is where initvms configures the host bridge. Deriving it from the CIDR keeps
+// the address inside the subnet for prefixes other than /24.
 func (c *Config) HypervisorIP() string {
-	_, ipnet, err := net.ParseCIDR(c.Network.Internal.CIDR)
+	_, last, _, err := UsableHostRange(c.Network.Internal.CIDR)
 	if err != nil {
 		return ""
 	}
-	ip := ipnet.IP.To4()
-	if ip == nil {
-		return ""
-	}
-	ip[3] = 254
-	return ip.String()
+	return last
 }
 
 // FenceCommands returns the (power-off, state-query) fencing commands. When the

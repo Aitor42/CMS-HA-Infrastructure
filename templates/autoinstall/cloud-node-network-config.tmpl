@@ -8,7 +8,7 @@ ethernets:
       route-metric: {{ .Metric }}
       use-dns: true
 {{ else }}    addresses:
-      - {{ .IP }}/24
+      - {{ .IP }}/{{ .Prefix }}
     nameservers:
       addresses:
         - {{ .DNS }}

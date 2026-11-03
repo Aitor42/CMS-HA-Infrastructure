@@ -21,7 +21,7 @@ autoinstall:
         match:
           macaddress: "{{ .MACInternal }}"
         addresses:
-          - {{ .IPInternal }}/24
+          - {{ .IPInternal }}/{{ .InternalPrefix }}
         nameservers:
           addresses:
             - {{ .IPInternal }}
@@ -33,7 +33,7 @@ autoinstall:
         match:
           macaddress: "{{ .MACMain }}"
         addresses:
-          - {{ .IPMain }}/24
+          - {{ .IPMain }}/{{ .MainPrefix }}
 {{ if .WANIfaceConfig }}{{ .WANIfaceConfig }}{{ end }}
   storage:
     layout:

@@ -24,9 +24,11 @@ type autoinstallData struct {
 	PubKey          string
 	MACInternal     string
 	IPInternal      string
+	InternalPrefix  int
 	GatewayInternal string
 	MACMain         string
 	IPMain          string
+	MainPrefix      int
 	WANIfaceConfig  string
 	// WANIfaceConfigCloud is the same optional WAN stanza for the standalone
 	// NoCloud network-config file, where ethernets sits at the document root.
@@ -51,6 +53,7 @@ type cloudInterface struct {
 	Name    string
 	MAC     string
 	IP      string
+	Prefix  int
 	Gateway string
 	DNS     string
 	DHCP    bool
@@ -106,6 +109,15 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		wanIfaceConfigCloud = fmt.Sprintf("\n  net2:\n    match:\n      macaddress: \"%s\"\n    dhcp4: true\n    dhcp4-overrides:\n      route-metric: 100\n      use-dns: true", p.cfg.Nodes.Jumpstart.MACWAN)
 	}
 
+	_, _, internalPrefix, err := config.UsableHostRange(p.cfg.Network.Internal.CIDR)
+	if err != nil {
+		return fmt.Errorf("network.internal: %w", err)
+	}
+	_, _, mainPrefix, err := config.UsableHostRange(p.cfg.Network.Main.CIDR)
+	if err != nil {
+		return fmt.Errorf("network.main: %w", err)
+	}
+
 	data := autoinstallData{
 		Hostname:            p.cfg.Nodes.Jumpstart.Name,
 		DeployUser:          p.cfg.SSHUser(),
@@ -113,9 +125,11 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		PubKey:              pubKey,
 		MACInternal:         p.cfg.Nodes.Jumpstart.MACInternal,
 		IPInternal:          p.cfg.Nodes.Jumpstart.IP,
+		InternalPrefix:      internalPrefix,
 		GatewayInternal:     p.cfg.Network.Internal.Gateway,
 		MACMain:             p.cfg.Nodes.Jumpstart.MACMain,
 		IPMain:              p.cfg.Nodes.Jumpstart.IPMain,
+		MainPrefix:          mainPrefix,
 		WANIfaceConfig:      wanIfaceConfig,
 		WANIfaceConfigCloud: wanIfaceConfigCloud,
 	}

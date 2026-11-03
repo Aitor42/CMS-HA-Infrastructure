@@ -82,12 +82,16 @@ func (p *Phase) deployCloudClientNodes(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("resolve VM %s: %w", node.Name, err)
 		}
+		ifaces, err := cloudInterfaces(p.cfg, detail, nets)
+		if err != nil {
+			return fmt.Errorf("resolve cloud-init interfaces for %s: %w", detail.Name, err)
+		}
 		data := cloudNodeData{
 			Hostname:     detail.Name,
 			DeployUser:   p.cfg.SSHUser(),
 			PasswordHash: passHash,
 			PubKey:       pubKey,
-			Interfaces:   cloudInterfaces(p.cfg, detail, nets),
+			Interfaces:   ifaces,
 		}
 		seedISO, err := p.createCloudNodeSeed(ctx, detail.Name, data)
 		if err != nil {
@@ -106,7 +110,15 @@ func (p *Phase) deployCloudClientNodes(ctx context.Context) error {
 // stanzas. The cloud image has no DHCP server to lean on before the jumpstart is
 // configured, so lab-facing NICs get fixed addresses; only the WAN uplink uses
 // DHCP.
-func cloudInterfaces(cfg *config.Config, node config.NodeDetail, nets []libvirt.NetworkOpt) []cloudInterface {
+func cloudInterfaces(cfg *config.Config, node config.NodeDetail, nets []libvirt.NetworkOpt) ([]cloudInterface, error) {
+	_, _, internalPrefix, err := config.UsableHostRange(cfg.Network.Internal.CIDR)
+	if err != nil {
+		return nil, fmt.Errorf("network.internal: %w", err)
+	}
+	_, _, mainPrefix, err := config.UsableHostRange(cfg.Network.Main.CIDR)
+	if err != nil {
+		return nil, fmt.Errorf("network.main: %w", err)
+	}
 	ifaces := make([]cloudInterface, 0, len(nets))
 	for i, net := range nets {
 		iface := cloudInterface{
@@ -117,6 +129,7 @@ func cloudInterfaces(cfg *config.Config, node config.NodeDetail, nets []libvirt.
 		switch net.Network {
 		case "internal":
 			iface.IP = node.IP
+			iface.Prefix = internalPrefix
 			if node.Name == cfg.Nodes.Router.Name {
 				iface.IP = cfg.Network.Internal.Gateway
 			}
@@ -129,6 +142,7 @@ func cloudInterfaces(cfg *config.Config, node config.NodeDetail, nets []libvirt.
 			if iface.IP == "" {
 				iface.IP = node.IP
 			}
+			iface.Prefix = mainPrefix
 			if node.Name == cfg.Nodes.Router.Name {
 				iface.IP = cfg.Network.Main.Gateway
 			} else {
@@ -149,7 +163,7 @@ func cloudInterfaces(cfg *config.Config, node config.NodeDetail, nets []libvirt.
 		}
 		ifaces = append(ifaces, iface)
 	}
-	return ifaces
+	return ifaces, nil
 }
 
 func firstNonEmpty(values ...string) string {

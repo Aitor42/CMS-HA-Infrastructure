@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -116,6 +118,33 @@ func PrefixFromCIDR(cidr, fallback string) string {
 		return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
 	}
 	return fallback
+}
+
+// UsableHostRange returns the first and last usable IPv4 host addresses of an
+// IPv4 CIDR, together with its prefix length. The lab derives the hypervisor
+// bridge address and the guest network masks from it, so a non-/24 topology
+// does not silently fall back to the default /24.
+func UsableHostRange(cidr string) (first, last string, prefix int, err error) {
+	_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return "", "", 0, fmt.Errorf("parse CIDR %q: %w", cidr, err)
+	}
+	ip := ipnet.IP.To4()
+	if ip == nil {
+		return "", "", 0, fmt.Errorf("CIDR %q is not IPv4", cidr)
+	}
+	ones, bits := ipnet.Mask.Size()
+	if bits != 32 || ones > 30 {
+		return "", "", 0, fmt.Errorf("CIDR %q has no usable host addresses", cidr)
+	}
+	network := binary.BigEndian.Uint32(ip)
+	mask := binary.BigEndian.Uint32(ipnet.Mask)
+	broadcast := network | ^mask
+	return formatIPv4(network + 1), formatIPv4(broadcast - 1), ones, nil
+}
+
+func formatIPv4(v uint32) string {
+	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
 }
 
 // PrimaryLB returns the first load balancer node (the keepalived MASTER

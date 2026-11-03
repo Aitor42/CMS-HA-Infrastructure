@@ -218,6 +218,49 @@ func TestTrafficAndBackupAccessors(t *testing.T) {
 	}
 }
 
+func TestUsableHostRangeDerivesThePrefixAndLastHost(t *testing.T) {
+	tests := []struct {
+		cidr       string
+		wantFirst  string
+		wantLast   string
+		wantPrefix int
+		wantError  bool
+	}{
+		{cidr: "192.168.10.0/24", wantFirst: "192.168.10.1", wantLast: "192.168.10.254", wantPrefix: 24},
+		{cidr: "192.168.10.0/25", wantFirst: "192.168.10.1", wantLast: "192.168.10.126", wantPrefix: 25},
+		{cidr: "192.168.10.0/26", wantFirst: "192.168.10.1", wantLast: "192.168.10.62", wantPrefix: 26},
+		{cidr: "192.168.10.0/30", wantFirst: "192.168.10.1", wantLast: "192.168.10.2", wantPrefix: 30},
+		{cidr: "192.168.10.0/31", wantError: true},
+		{cidr: "192.168.10.0/32", wantError: true},
+		{cidr: "not-a-cidr", wantError: true},
+		{cidr: "2001:db8::/64", wantError: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.cidr, func(t *testing.T) {
+			first, last, prefix, err := UsableHostRange(tc.cidr)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("UsableHostRange(%q) = %q, %q, %d, want an error", tc.cidr, first, last, prefix)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("UsableHostRange(%q): %v", tc.cidr, err)
+			}
+			if first != tc.wantFirst || last != tc.wantLast || prefix != tc.wantPrefix {
+				t.Fatalf("UsableHostRange(%q) = %q, %q, %d; want %q, %q, %d", tc.cidr, first, last, prefix, tc.wantFirst, tc.wantLast, tc.wantPrefix)
+			}
+		})
+	}
+}
+
+func TestHypervisorIPStaysInsideANon24Subnet(t *testing.T) {
+	c := &Config{Network: NetworkConfig{Internal: NetworkDetail{CIDR: "192.168.10.0/25"}}}
+	if got := c.HypervisorIP(); got != "192.168.10.126" {
+		t.Fatalf("HypervisorIP() = %q, want the last usable address 192.168.10.126", got)
+	}
+}
+
 func TestNodeSpecsAndNetworks(t *testing.T) {
 	c := &Config{
 		Network: NetworkConfig{
