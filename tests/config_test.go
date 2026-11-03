@@ -414,6 +414,15 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate Puppet certname", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[0].FQDN = "shared.internal.local"
+		cfg.Nodes.Masters[1].FQDN = "shared.internal.local"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate Puppet certname") {
+			t.Fatalf("Validate() = %v, want the duplicate certname error", err)
+		}
+	})
+
 	t.Run("invalid raw mac_internal", func(t *testing.T) {
 		cfg := validCfg()
 		cfg.Nodes.Jumpstart.MACInternal = "not-a-mac"

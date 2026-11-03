@@ -315,6 +315,7 @@ func (c *Config) validateNodeFields() error {
 	seenNames := map[string]string{}
 	seenIPs := map[string]string{}
 	seenMACs := map[string]string{}
+	seenCertnames := map[string]string{}
 	for _, n := range c.AllNodes() {
 		if n.Name != "" {
 			if !nodeNamePattern.MatchString(n.Name) {
@@ -324,6 +325,19 @@ func (c *Config) validateNodeFields() error {
 				return fmt.Errorf("duplicate node name %q (already used by %s)", n.Name, prev)
 			}
 			seenNames[n.Name] = n.Name
+		}
+		// Puppet classifies and autosigns by certname, which is the FQDN when
+		// set and the node name otherwise. Two nodes with the same certname
+		// produce duplicate node blocks and an ambiguous catalog.
+		certname := strings.TrimSpace(n.FQDN)
+		if certname == "" {
+			certname = strings.TrimSpace(n.Name)
+		}
+		if certname != "" {
+			if prev, ok := seenCertnames[certname]; ok {
+				return fmt.Errorf("duplicate Puppet certname %q (already used by %s)", certname, prev)
+			}
+			seenCertnames[certname] = n.Name
 		}
 		if n.IP != "" {
 			if ip := net.ParseIP(n.IP); ip == nil || ip.To4() == nil {
