@@ -20,4 +20,6 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   hostPath:
     path: /mnt/data/mariadb
-    type: DirectoryOrCreate
+    # Never create an empty local data directory if storage provisioning failed.
+    # The DRBD watchdog separately verifies the device before advertising it.
+    type: Directory
