@@ -2,8 +2,11 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -335,8 +338,8 @@ func TestDRBDFailoverShutsDownCurrentPrimary(t *testing.T) {
 	}
 	ft := newTester(cfg, domain, run)
 
-	if !ft.testDRBDFailover(t.Context(), FailoverOpts{}) {
-		t.Fatal("testDRBDFailover = false, want true")
+	if result := ft.testDRBDFailover(t.Context(), FailoverOpts{}); result.Status != "PASS" {
+		t.Fatalf("testDRBDFailover = %+v, want PASS", result)
 	}
 	if !domain.hasCall("shutdown:" + m2.Name) {
 		t.Fatalf("calls = %v, want the current Primary %s to be shut down", domain.calls, m2.Name)
@@ -364,8 +367,8 @@ func TestDRBDPowerCutSkipsWhenPairUnavailableUnderSkipRestore(t *testing.T) {
 		return "Primary/Secondary\n", "", 0, nil
 	})
 
-	if !ft.testDRBDPowerCutFailover(t.Context(), FailoverOpts{SkipRestore: true}) {
-		t.Fatal("testDRBDPowerCutFailover = false, want true (SKIP) under --skip-restore")
+	if result := ft.testDRBDPowerCutFailover(t.Context(), FailoverOpts{SkipRestore: true}); result.Status != "SKIP" || result.Reason == "" {
+		t.Fatalf("testDRBDPowerCutFailover = %+v, want SKIP with a reason under --skip-restore", result)
 	}
 	if domain.hasCall("destroy:"+m2.Name) || domain.hasCall("destroy:"+m1.Name) {
 		t.Fatalf("calls = %v, want no power cut when the pair cannot be inspected", domain.calls)
@@ -387,8 +390,8 @@ func TestDRBDPowerCutFailsWhenPairUnavailableWithoutSkipRestore(t *testing.T) {
 		return "Primary/Secondary\n", "", 0, nil
 	})
 
-	if ft.testDRBDPowerCutFailover(t.Context(), FailoverOpts{}) {
-		t.Fatal("testDRBDPowerCutFailover = true, want false when a master is unreachable")
+	if result := ft.testDRBDPowerCutFailover(t.Context(), FailoverOpts{}); result.Status != "FAIL" {
+		t.Fatalf("testDRBDPowerCutFailover = %+v, want FAIL when a master is unreachable", result)
 	}
 }
 
@@ -405,8 +408,8 @@ func TestCMSFailoverFailsWhenRestoreFails(t *testing.T) {
 		return "", "", 1, fmt.Errorf("unexpected command %q", cmd)
 	})
 
-	if ft.testCMSFailover(t.Context(), FailoverOpts{}) {
-		t.Fatal("testCMSFailover = true, want false when the frontend cannot be restored")
+	if result := ft.testCMSFailover(t.Context(), FailoverOpts{}); result.Status != "FAIL" {
+		t.Fatalf("testCMSFailover = %+v, want FAIL when the frontend cannot be restored", result)
 	}
 	if !domain.hasCall("shutdown:" + cms1.Name) {
 		t.Fatalf("calls = %v, want the first frontend to be shut down", domain.calls)
@@ -529,8 +532,8 @@ func TestWorkerFailoverUsesReachableMaster(t *testing.T) {
 	}
 	ft := newTester(cfg, domain, run)
 
-	if !ft.testK3sWorkerFailover(t.Context(), FailoverOpts{SkipRestore: true}) {
-		t.Fatal("testK3sWorkerFailover = false, want true")
+	if result := ft.testK3sWorkerFailover(t.Context(), FailoverOpts{SkipRestore: true}); result.Status != "PASS" {
+		t.Fatalf("testK3sWorkerFailover = %+v, want PASS", result)
 	}
 	if !domain.hasCall("shutdown:" + worker1.Name) {
 		t.Fatalf("calls = %v, want the worker to be shut down", domain.calls)
@@ -594,8 +597,8 @@ func TestLBFailoverRequiresHTTPS(t *testing.T) {
 	t.Run("https passes", func(t *testing.T) {
 		domain := newFakeDomain(lb1.Name, lb2.Name)
 		ft := newTester(cfg, domain, runFor(domain))
-		if !ft.testLBFailover(t.Context(), FailoverOpts{SkipRestore: true}) {
-			t.Fatal("testLBFailover = false, want true when the survivor serves HTTPS")
+		if result := ft.testLBFailover(t.Context(), FailoverOpts{SkipRestore: true}); result.Status != "PASS" {
+			t.Fatalf("testLBFailover = %+v, want PASS when the survivor serves HTTPS", result)
 		}
 		if !domain.hasCall("shutdown:" + lb1.Name) {
 			t.Fatalf("calls = %v, want the VIP holder to be shut down", domain.calls)
@@ -613,8 +616,236 @@ func TestLBFailoverRequiresHTTPS(t *testing.T) {
 			cancel()
 			return false
 		}
-		if ft.testLBFailover(ctx, FailoverOpts{SkipRestore: true}) {
-			t.Fatal("testLBFailover = true, want false when only plain HTTP answers")
+		if result := ft.testLBFailover(ctx, FailoverOpts{SkipRestore: true}); result.Status != "FAIL" {
+			t.Fatalf("testLBFailover = %+v, want FAIL when only plain HTTP answers", result)
+		}
+	})
+}
+
+func readFailoverReport(t *testing.T, path string) failoverReport {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report failoverReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("invalid JSON %q: %v", data, err)
+	}
+	return report
+}
+
+func TestFailoverRunSkipPolicy(t *testing.T) {
+	for _, requireAll := range []bool{false, true} {
+		t.Run(fmt.Sprintf("require-all=%t", requireAll), func(t *testing.T) {
+			// Reuse the tester to prove results do not leak between invocations.
+			ft := newTester(&config.Config{}, newFakeDomain(), func(context.Context, string, string) (string, string, int, error) {
+				t.Fatal("an undersized topology must not execute SSH commands")
+				return "", "", 1, nil
+			})
+			for range 2 {
+				path := filepath.Join(t.TempDir(), "results.json")
+				err := ft.Run(t.Context(), FailoverOpts{RequireAll: requireAll, ResultsFile: path})
+				if (err != nil) != requireAll {
+					t.Fatalf("Run = %v, require-all=%t", err, requireAll)
+				}
+				if requireAll && !strings.Contains(err.Error(), "0 of 5 failover scenarios failed, 5 skipped") {
+					t.Fatalf("strict verdict must distinguish failures from skips: %v", err)
+				}
+				report := readFailoverReport(t, path)
+				if !report.Complete || report.RequireAll != requireAll || len(report.Scenarios) != 5 || (report.Error != "") != requireAll {
+					t.Fatalf("unexpected report: %+v", report)
+				}
+				for _, result := range report.Scenarios {
+					if result.Name == "" || result.Status != "SKIP" || result.Reason == "" || result.DurationSeconds != 0 {
+						t.Fatalf("unexpected skipped scenario: %+v", result)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestFailoverRunMixedVerdicts(t *testing.T) {
+	for _, failRestore := range []bool{false, true} {
+		for _, requireAll := range []bool{false, true} {
+			t.Run(fmt.Sprintf("restore-fails=%t/require-all=%t", failRestore, requireAll), func(t *testing.T) {
+				cfg := failoverConfig()
+				cfg.Nodes.Masters, cfg.Nodes.Workers, cfg.Nodes.LBs = nil, nil, nil
+				domain := newFakeDomain(cfg.Nodes.CMSFrontends[0].Name)
+				if failRestore {
+					domain.startErr = errors.New("cannot restore frontend")
+				}
+				ft := newTester(cfg, domain, func(context.Context, string, string) (string, string, int, error) {
+					return "", "", 0, nil
+				})
+				path := filepath.Join(t.TempDir(), "results.json")
+				err := ft.Run(t.Context(), FailoverOpts{RequireAll: requireAll, ResultsFile: path})
+				if (err != nil) != (failRestore || requireAll) {
+					t.Fatalf("Run = %v", err)
+				}
+				report := readFailoverReport(t, path)
+				wantStatus := "PASS"
+				if failRestore {
+					wantStatus = "FAIL"
+				}
+				if len(report.Scenarios) != 5 || report.Scenarios[2].Status != wantStatus || !report.Complete {
+					t.Fatalf("unexpected report: %+v", report)
+				}
+				if report.Scenarios[2].DurationSeconds <= 0 || !strings.Contains(report.DurationScope, "not CMS RTO") {
+					t.Fatalf("scenario duration must be measured and scoped: %+v", report)
+				}
+				if !domain.hasCall("start:" + cfg.Nodes.CMSFrontends[0].Name) {
+					t.Fatal("strict reporting must not bypass restoration")
+				}
+			})
+		}
+	}
+}
+
+func TestFailoverRunRequireAllPassesFullTopology(t *testing.T) {
+	cfg := failoverConfig()
+	var names []string
+	for _, nodes := range [][]config.NodeDetail{cfg.Nodes.Masters, cfg.Nodes.Workers, cfg.Nodes.CMSFrontends, cfg.Nodes.LBs} {
+		for _, node := range nodes {
+			names = append(names, node.Name)
+		}
+	}
+	domain := newFakeDomain(names...)
+	primary := 0
+	ft := newTester(cfg, domain, func(_ context.Context, host, cmd string) (string, string, int, error) {
+		if domain.states[cfg.Nodes.Masters[primary].Name] == "shut off" {
+			primary = 1 - primary
+		}
+		switch cmd {
+		case "drbdadm role cms_data":
+			if host == cfg.Nodes.Masters[primary].IP {
+				return "Primary/Secondary", "", 0, nil
+			}
+			return "Secondary/Primary", "", 0, nil
+		case mariadbPodQuery:
+			return cfg.Nodes.Masters[primary].Name + " Running True", "", 0, nil
+		case "ip -4 -o addr show":
+			holder := cfg.Nodes.LBs[0]
+			if domain.states[holder.Name] == "shut off" {
+				holder = cfg.Nodes.LBs[1]
+			}
+			if host == holder.IP {
+				return "2: eth0 inet " + cfg.LBVIP() + "/24", "", 0, nil
+			}
+			return "", "", 0, nil
+		case "true", "systemctl is-active --quiet drbd-failover-watchdog", "systemctl is-active --quiet keepalived":
+			return "", "", 0, nil
+		default:
+			t.Fatalf("unexpected SSH command %q on %s", cmd, host)
+			return "", "", 1, nil
+		}
+	})
+	path := filepath.Join(t.TempDir(), "results.json")
+	if err := ft.Run(t.Context(), FailoverOpts{RequireAll: true, ResultsFile: path}); err != nil {
+		t.Fatal(err)
+	}
+	report := readFailoverReport(t, path)
+	if !report.Complete || len(report.Scenarios) != 5 || report.Error != "" || report.SkipRestore {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	for _, result := range report.Scenarios {
+		if result.Status != "PASS" || result.DurationSeconds <= 0 {
+			t.Fatalf("unexpected result: %+v", result)
+		}
+	}
+	for name, state := range domain.states {
+		if state != "running" {
+			t.Fatalf("%s left in state %s", name, state)
+		}
+	}
+}
+
+func TestFailoverRunRequireAllRejectsSkipRestoreSkips(t *testing.T) {
+	cfg := failoverConfig()
+	cfg.Nodes.CMSFrontends, cfg.Nodes.Workers, cfg.Nodes.LBs = nil, nil, nil
+	ft := newTester(cfg, newFakeDomain(), func(context.Context, string, string) (string, string, int, error) {
+		return "", "unreachable", 255, errors.New("unreachable")
+	})
+	path := filepath.Join(t.TempDir(), "results.json")
+	err := ft.Run(t.Context(), FailoverOpts{SkipRestore: true, RequireAll: true, ResultsFile: path})
+	if err == nil || !strings.Contains(err.Error(), "5 skipped") {
+		t.Fatalf("Run = %v, want strict skip failure", err)
+	}
+	report := readFailoverReport(t, path)
+	for _, result := range report.Scenarios[:2] {
+		if result.Status != "SKIP" || !strings.Contains(result.Reason, "--skip-restore") {
+			t.Fatalf("dynamic skip lost its reason: %+v", result)
+		}
+	}
+}
+
+func TestFailoverRunCancellationReport(t *testing.T) {
+	for _, cancelBeforeRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("before-run=%t", cancelBeforeRun), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			cfg := failoverConfig()
+			cfg.Nodes.Masters, cfg.Nodes.Workers, cfg.Nodes.LBs = nil, nil, nil
+			domain := newFakeDomain(cfg.Nodes.CMSFrontends[0].Name)
+			ft := newTester(cfg, domain, nil)
+			ft.reachable = func(context.Context, string, string) bool {
+				cancel()
+				return false
+			}
+			if cancelBeforeRun {
+				cancel()
+			}
+			path := filepath.Join(t.TempDir(), "results.json")
+			err := ft.Run(ctx, FailoverOpts{SkipRestore: true, RequireAll: true, ResultsFile: path})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run = %v, want context.Canceled", err)
+			}
+			report := readFailoverReport(t, path)
+			wantResults := 3
+			if cancelBeforeRun {
+				wantResults = 0
+				if len(domain.calls) != 0 {
+					t.Fatalf("cancelled run mutated domains: %v", domain.calls)
+				}
+			}
+			if report.Complete || report.Error == "" || len(report.Scenarios) != wantResults {
+				t.Fatalf("cancelled run must not look complete: %+v", report)
+			}
+		})
+	}
+}
+
+func TestFailoverRunResultsFileErrors(t *testing.T) {
+	t.Run("unwritable parent prevents disruption", func(t *testing.T) {
+		cfg := failoverConfig()
+		domain := newFakeDomain()
+		ft := newTester(cfg, domain, func(context.Context, string, string) (string, string, int, error) {
+			t.Fatal("results preflight must precede SSH")
+			return "", "", 1, nil
+		})
+		path := filepath.Join(t.TempDir(), "missing", "results.json")
+		if err := ft.Run(t.Context(), FailoverOpts{ResultsFile: path}); err == nil || !strings.Contains(err.Error(), "create failover results") {
+			t.Fatalf("Run = %v, want results preflight error", err)
+		}
+		if len(domain.calls) != 0 {
+			t.Fatalf("results preflight mutated domains: %v", domain.calls)
+		}
+	})
+	t.Run("publish failure preserves verdict and removes temporary file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "directory")
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ft := newTester(&config.Config{}, newFakeDomain(), nil)
+		err := ft.Run(t.Context(), FailoverOpts{RequireAll: true, ResultsFile: path})
+		if err == nil || !strings.Contains(err.Error(), "5 skipped") || !strings.Contains(err.Error(), "write failover results") {
+			t.Fatalf("Run = %v, want both verdict and publish errors", err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("temporary results not cleaned up: %v, %v", entries, err)
 		}
 	})
 }

@@ -2,8 +2,11 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +21,26 @@ import (
 // FailoverOpts options for failover testing.
 type FailoverOpts struct {
 	SkipRestore bool
+	RequireAll  bool
+	ResultsFile string
+}
+
+// Durations cover the whole scenario, including preflight and node restoration,
+// not the CMS outage interval. SKIP is evidence of missing coverage, not PASS.
+type failoverResult struct {
+	Name            string  `json:"name"`
+	Status          string  `json:"status"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	Reason          string  `json:"reason,omitempty"`
+}
+
+type failoverReport struct {
+	RequireAll    bool             `json:"require_all"`
+	SkipRestore   bool             `json:"skip_restore"`
+	DurationScope string           `json:"duration_scope"`
+	Complete      bool             `json:"complete"`
+	Error         string           `json:"error,omitempty"`
+	Scenarios     []failoverResult `json:"scenarios"`
 }
 
 // shutdownGracePeriod is how long a guest is given to honour the ACPI power
@@ -94,49 +117,67 @@ func (f *FailoverTester) lbReachableHTTPS(ctx context.Context, host string) bool
 }
 
 // Run executes the failover scenarios.
-func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) error {
+func (f *FailoverTester) Run(ctx context.Context, opts FailoverOpts) (runErr error) {
 	timer := logging.PhaseStart("Failover Chaos Engineering Tests")
 	defer timer.End()
 
-	// Every scenario's verdict is propagated: a scenario that reports FAIL must
-	// fail this command, otherwise the chaos gate is decorative and a broken
-	// cluster still exits zero. A scenario skipped for a small topology returns
-	// true (see printSkipped), so it is never counted as a failure.
-	failed := 0
-	if !f.testDRBDFailover(ctx, opts) {
-		failed++
+	report := failoverReport{
+		RequireAll: opts.RequireAll, SkipRestore: opts.SkipRestore,
+		DurationScope: "whole scenario including preflight and restoration; not CMS RTO",
+		Scenarios:     make([]failoverResult, 0, 5),
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	if opts.ResultsFile != "" {
+		// Check writability before disrupting any node. Publish atomically so a
+		// reader never sees half a JSON document, including on cancellation.
+		file, err := os.CreateTemp(filepath.Dir(opts.ResultsFile), ".failover-*.json")
+		if err != nil {
+			return fmt.Errorf("create failover results: %w", err)
+		}
+		defer func() {
+			defer os.Remove(file.Name())
+			if runErr != nil {
+				report.Error = runErr.Error()
+			}
+			encoder := json.NewEncoder(file)
+			encoder.SetIndent("", "  ")
+			err := encoder.Encode(report)
+			err = errors.Join(err, file.Close())
+			if err == nil {
+				err = os.Rename(file.Name(), opts.ResultsFile)
+			}
+			if err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("write failover results: %w", err))
+			}
+		}()
 	}
-	if !f.testDRBDPowerCutFailover(ctx, opts) {
-		failed++
+
+	scenarios := []func(context.Context, FailoverOpts) failoverResult{
+		f.testDRBDFailover,
+		f.testDRBDPowerCutFailover,
+		f.testCMSFailover,
+		f.testK3sWorkerFailover,
+		f.testLBFailover,
 	}
-	if err := ctx.Err(); err != nil {
-		return err
+	failed, skipped := 0, 0
+	for _, scenario := range scenarios {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		result := scenario(ctx, opts)
+		report.Scenarios = append(report.Scenarios, result)
+		switch result.Status {
+		case "FAIL":
+			failed++
+		case "SKIP":
+			skipped++
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
-	if !f.testCMSFailover(ctx, opts) {
-		failed++
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !f.testK3sWorkerFailover(ctx, opts) {
-		failed++
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !f.testLBFailover(ctx, opts) {
-		failed++
-	}
-	// Distinguish "all scenarios ran" from "interrupted halfway through" so
-	// callers never mistake a cancelled run for a successful one.
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if failed > 0 {
-		return fmt.Errorf("%d of 5 failover scenarios failed", failed)
+	report.Complete = true
+	if failed > 0 || (opts.RequireAll && skipped > 0) {
+		return fmt.Errorf("%d of %d failover scenarios failed, %d skipped (require-all=%t)", failed, len(scenarios), skipped, opts.RequireAll)
 	}
 	return nil
 }
@@ -212,15 +253,13 @@ func (f *FailoverTester) forceOff(ctx context.Context, name string) error {
 	return nil
 }
 
-func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts) bool {
+func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts) failoverResult {
 	logging.Info("Scenario 1: DRBD Master Failover")
 	start := time.Now()
 	pass := true
 
 	if len(f.cfg.Nodes.Masters) < 2 {
-		logging.Warn("Skipping DRBD failover test: requires at least 2 master nodes")
-		f.printSkipped("DRBD Master Failover")
-		return true
+		return f.printSkipped("DRBD Master Failover", "requires at least 2 master nodes")
 	}
 
 	// Fail over the node that actually holds the Primary role, not Masters[0].
@@ -229,14 +268,11 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	primary, standby, err := f.drbdPrimary(ctx)
 	if err != nil {
 		if errors.Is(err, errDRBDPairUnavailable) && opts.SkipRestore {
-			logging.Warn("Skipping DRBD failover test: --skip-restore left a master down (%v)", err)
-			f.printSkipped("DRBD Master Failover")
-			return true
+			return f.printSkipped("DRBD Master Failover", fmt.Sprintf("--skip-restore left a master down (%v)", err))
 		}
 		logging.Error("cannot determine the DRBD Primary before the test: %v", err)
 		f.logFailoverDiagnostics(ctx, "DRBD role could not be established before the failover")
-		f.printSummary("DRBD Master Failover", false, time.Since(start))
-		return false
+		return f.printSummary("DRBD Master Failover", false, time.Since(start))
 	}
 
 	// The watchdog on the survivor is what promotes it, and MariaDB must be
@@ -245,15 +281,13 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	if err := f.requireDRBDPreflight(ctx, primary, standby); err != nil {
 		logging.Error("%v", err)
 		f.logFailoverDiagnostics(ctx, "DRBD preflight failed before the failover")
-		f.printSummary("DRBD Master Failover", false, time.Since(start))
-		return false
+		return f.printSummary("DRBD Master Failover", false, time.Since(start))
 	}
 
 	logging.Info("Shutting down %s, the current DRBD Primary", primary.Name)
 	if err := f.shutdownForTest(ctx, primary.Name); err != nil {
-		f.printSummary("DRBD Master Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return false
+		return f.printSummary("DRBD Master Failover", false, time.Since(start))
 	}
 	// Wait until standby has promoted DRBD and MariaDB is Running and Ready
 	// *on standby*. Matching the pod by name only would also match the pod
@@ -303,8 +337,7 @@ func (f *FailoverTester) testDRBDFailover(ctx context.Context, opts FailoverOpts
 	}
 
 	duration := time.Since(start)
-	f.printSummary("DRBD Master Failover", pass, duration)
-	return pass
+	return f.printSummary("DRBD Master Failover", pass, duration)
 }
 
 // drbdPrimary reports which master currently holds the Primary role and which
@@ -421,48 +454,40 @@ func nodeMatches(identity string, node config.NodeDetail) bool {
 // leave two writers — the peer takes over while the dead node is down, and the
 // dead node comes back thinking it is still primary. drbd-cms-boot.service must
 // stand it down before k3s starts; this scenario asserts exactly that.
-func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts FailoverOpts) bool {
+func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts FailoverOpts) failoverResult {
 	logging.Info("Scenario 2: DRBD Master Power Cut")
 	start := time.Now()
 	pass := true
 
 	if len(f.cfg.Nodes.Masters) < 2 {
-		logging.Warn("Skipping DRBD power-cut test: requires at least 2 master nodes")
-		f.printSkipped("DRBD Master Power Cut")
-		return true
+		return f.printSkipped("DRBD Master Power Cut", "requires at least 2 master nodes")
 	}
 
 	primary, standby, err := f.drbdPrimary(ctx)
 	if err != nil {
 		if errors.Is(err, errDRBDPairUnavailable) && opts.SkipRestore {
-			logging.Warn("Skipping DRBD power-cut test: --skip-restore left a master down (%v)", err)
-			f.printSkipped("DRBD Master Power Cut")
-			return true
+			return f.printSkipped("DRBD Master Power Cut", fmt.Sprintf("--skip-restore left a master down (%v)", err))
 		}
 		logging.Error("%v", err)
-		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
-		return false
+		return f.printSummary("DRBD Master Power Cut", false, time.Since(start))
 	}
 
 	if err := f.requireDRBDPreflight(ctx, primary, standby); err != nil {
 		logging.Error("%v", err)
 		f.logFailoverDiagnostics(ctx, "DRBD preflight failed before the power cut")
-		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
-		return false
+		return f.printSummary("DRBD Master Power Cut", false, time.Since(start))
 	}
 
 	if err := f.libvirt.Destroy(ctx, primary.Name); err != nil {
 		logging.Error("failed to power off %s: %v", primary.Name, err)
-		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
-		return false
+		return f.printSummary("DRBD Master Power Cut", false, time.Since(start))
 	}
 	if !retry.Wait(ctx, 30*time.Second, 2*time.Second, func() bool {
 		state, derr := f.libvirt.DomainState(ctx, primary.Name)
 		return derr == nil && state == "shut off"
 	}) {
 		logging.Error("%s did not reach \"shut off\" after the power cut", primary.Name)
-		f.printSummary("DRBD Master Power Cut", false, time.Since(start))
-		return false
+		return f.printSummary("DRBD Master Power Cut", false, time.Since(start))
 	}
 
 	// The survivor has to fence the dead domain (the fence helper exits 0 when
@@ -504,27 +529,23 @@ func (f *FailoverTester) testDRBDPowerCutFailover(ctx context.Context, opts Fail
 	}
 
 	duration := time.Since(start)
-	f.printSummary("DRBD Master Power Cut", pass, duration)
-	return pass
+	return f.printSummary("DRBD Master Power Cut", pass, duration)
 }
 
-func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts) bool {
+func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts) failoverResult {
 	logging.Info("Scenario 3: CMS Frontend Failover")
 	start := time.Now()
 	pass := true
 
 	if len(f.cfg.Nodes.CMSFrontends) < 2 {
-		logging.Warn("Skipping CMS failover test: requires at least 2 frontend nodes")
-		f.printSkipped("CMS Frontend Failover")
-		return true
+		return f.printSkipped("CMS Frontend Failover", "requires at least 2 frontend nodes")
 	}
 
 	cms1 := f.cfg.Nodes.CMSFrontends[0]
 
 	if err := f.shutdownForTest(ctx, cms1.Name); err != nil {
-		f.printSummary("CMS Frontend Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return false
+		return f.printSummary("CMS Frontend Failover", false, time.Since(start))
 	}
 	// Verify HTTP / HTTPS reachability (routes to cms2, via the VIP). The window
 	// covers nginx noticing the dead backend and the surviving frontend serving
@@ -546,19 +567,16 @@ func (f *FailoverTester) testCMSFailover(ctx context.Context, opts FailoverOpts)
 	}
 
 	duration := time.Since(start)
-	f.printSummary("CMS Frontend Failover", pass, duration)
-	return pass
+	return f.printSummary("CMS Frontend Failover", pass, duration)
 }
 
-func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts FailoverOpts) bool {
+func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts FailoverOpts) failoverResult {
 	logging.Info("Scenario 4: K3s Worker Failover")
 	start := time.Now()
 	pass := true
 
 	if len(f.cfg.Nodes.Workers) < 2 || len(f.cfg.Nodes.Masters) < 2 {
-		logging.Warn("Skipping Worker failover test: requires at least 2 workers and 2 masters")
-		f.printSkipped("K3s Worker Failover")
-		return true
+		return f.printSkipped("K3s Worker Failover", "requires at least 2 workers and 2 masters")
 	}
 
 	worker1 := f.cfg.Nodes.Workers[0]
@@ -568,14 +586,12 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	master, err := f.reachableMaster(ctx)
 	if err != nil {
 		logging.Error("cannot run the worker failover test: %v", err)
-		f.printSummary("K3s Worker Failover", false, time.Since(start))
-		return false
+		return f.printSummary("K3s Worker Failover", false, time.Since(start))
 	}
 
 	if err := f.shutdownForTest(ctx, worker1.Name); err != nil {
-		f.printSummary("K3s Worker Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return false
+		return f.printSummary("K3s Worker Failover", false, time.Since(start))
 	}
 
 	// Nothing is expected to *migrate*: the only stateful workload (mariadb-0)
@@ -612,30 +628,25 @@ func (f *FailoverTester) testK3sWorkerFailover(ctx context.Context, opts Failove
 	}
 
 	duration := time.Since(start)
-	f.printSummary("K3s Worker Failover", pass, duration)
-	return pass
+	return f.printSummary("K3s Worker Failover", pass, duration)
 }
 
 // testLBFailover stops the balancer that currently owns the keepalived VIP and
 // asserts that the survivor takes it over. The earlier scenarios only prove
 // that both balancers answer individually; none of them proves the floating
 // address moves, which is the whole point of having two of them.
-func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) bool {
+func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) failoverResult {
 	logging.Info("Scenario 5: Load Balancer VIP Failover")
 	start := time.Now()
 	pass := true
 
 	if len(f.cfg.Nodes.LBs) < 2 {
-		logging.Warn("Skipping LB failover test: requires at least 2 balancer nodes")
-		f.printSkipped("Load Balancer VIP Failover")
-		return true
+		return f.printSkipped("Load Balancer VIP Failover", "requires at least 2 balancer nodes")
 	}
 
 	vip := f.cfg.LBVIP()
 	if vip == "" {
-		logging.Warn("Skipping LB failover test: network.main.vip is not configured")
-		f.printSkipped("Load Balancer VIP Failover")
-		return true
+		return f.printSkipped("Load Balancer VIP Failover", "network.main.vip is not configured")
 	}
 
 	holders, reachable, total := f.vipOwnership(ctx, vip)
@@ -647,8 +658,7 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 		logging.Warn("Expected exactly one balancer to hold the VIP %s before the test, found %d (reachable %d/%d)",
 			vip, holders, reachable, total)
 		f.logLBState(ctx, "VIP ownership is not 1-of-2 before the LB failover")
-		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
-		return false
+		return f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
 	}
 	var holder *config.NodeDetail
 	for i := range f.cfg.Nodes.LBs {
@@ -659,9 +669,7 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 		}
 	}
 	if holder == nil {
-		logging.Warn("Skipping LB failover test: the VIP holder could not be identified")
-		f.printSkipped("Load Balancer VIP Failover")
-		return true
+		return f.printSkipped("Load Balancer VIP Failover", "the VIP holder could not be identified")
 	}
 	var survivor *config.NodeDetail
 	for i := range f.cfg.Nodes.LBs {
@@ -672,24 +680,20 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 		}
 	}
 	if survivor == nil {
-		logging.Warn("Skipping LB failover test: no second balancer with an address")
-		f.printSkipped("Load Balancer VIP Failover")
-		return true
+		return f.printSkipped("Load Balancer VIP Failover", "no second balancer with an address")
 	}
 	// Never stop the VIP holder if the survivor is not ready to take over: the
 	// test would turn a degraded cluster into a full outage.
 	if _, _, code, err := f.ssh.RunCommand(ctx, survivor.IP, "systemctl is-active --quiet keepalived"); err != nil || code != 0 {
 		logging.Warn("%s cannot take over the VIP (keepalived is not active or the host is unreachable)", survivor.Name)
 		f.logLBState(ctx, "the surviving balancer is not ready before the LB failover")
-		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
-		return false
+		return f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
 	}
 
 	logging.Info("Stopping %s, which currently owns %s", holder.Name, vip)
 	if err := f.shutdownForTest(ctx, holder.Name); err != nil {
-		f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
 		logging.Error("%v", err)
-		return false
+		return f.printSummary("Load Balancer VIP Failover", false, time.Since(start))
 	}
 
 	// The survivor must both acquire the address and serve the CMS through it
@@ -732,8 +736,7 @@ func (f *FailoverTester) testLBFailover(ctx context.Context, opts FailoverOpts) 
 	}
 
 	duration := time.Since(start)
-	f.printSummary("Load Balancer VIP Failover", pass, duration)
-	return pass
+	return f.printSummary("Load Balancer VIP Failover", pass, duration)
 }
 
 // lbHoldsVIP reports whether host currently has the floating address.
@@ -855,7 +858,7 @@ func (f *FailoverTester) logFailoverDiagnostics(ctx context.Context, reason stri
 	logging.Warn("%s (diagnostics unavailable: no master accepted a command)", reason)
 }
 
-func (f *FailoverTester) printSummary(name string, pass bool, duration time.Duration) {
+func (f *FailoverTester) printSummary(name string, pass bool, duration time.Duration) failoverResult {
 	status := "FAIL"
 	if pass {
 		status = "PASS"
@@ -866,12 +869,13 @@ func (f *FailoverTester) printSummary(name string, pass bool, duration time.Dura
 	} else {
 		logging.Error("%s", msg)
 	}
+	return failoverResult{Name: name, Status: status, DurationSeconds: duration.Seconds()}
 }
 
-// printSkipped reports a scenario that did not run. It must never be counted
-// as FAIL: that would pollute the summary with failures that did not occur.
-func (f *FailoverTester) printSkipped(name string) {
-	logging.Warn("Scenario: %-25s | Status: %-4s | Duration: %s", name, "SKIP", "0s")
+// A skipped scenario stays SKIP even when --require-all makes the run fail.
+func (f *FailoverTester) printSkipped(name, reason string) failoverResult {
+	logging.Warn("Scenario: %-25s | Status: %-4s | Duration: %s | Reason: %s", name, "SKIP", "0s", reason)
+	return failoverResult{Name: name, Status: "SKIP", Reason: reason}
 }
 
 // restoreNode powers a node that a scenario shut down back on and waits until

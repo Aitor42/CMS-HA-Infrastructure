@@ -90,8 +90,18 @@ if ! virsh version >/dev/null 2>&1; then
 fi
 echo "  ✔ virsh, docker, /dev/kvm and $CONFIG are available"
 
-log "Building cms-ha"
-make build
+if [ "$RESUME" -eq 1 ]; then
+  # Rebuilding injects a new build timestamp and changes the executable hash.
+  # Preserve the exact executable associated with the checkpoint.
+  if [ ! -f "$STATE_FILE" ] || [ ! -x ./cms-ha ]; then
+    fail "resume requires the original cms-ha executable and existing $STATE_FILE; inspect the lab before starting a new run"
+    exit 1
+  fi
+  log "Reusing the original cms-ha executable for checkpoint compatibility"
+else
+  log "Building cms-ha"
+  make build
+fi
 
 EXIT_CODE=0
 
@@ -181,8 +191,11 @@ fi
 # ── Chaos: DRBD failover ───────────────────────────────────────────────────
 if [ "$EXIT_CODE" -eq 0 ] && [ "$SKIP_CHAOS" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   log "Running the DRBD failover chaos exercise"
+  # Full acceptance must exercise every scenario: SKIP is missing coverage.
   # stderr carries the FAIL verdict (logging.Error), so it must be captured too.
-  if ./cms-ha -c "$CONFIG" test failover 2>&1 | tee "$ARTIFACTS_DIR/failover.log"; then
+  if ./cms-ha -c "$CONFIG" test failover --require-all \
+      --results-file "$ARTIFACTS_DIR/failover.json" \
+      2>&1 | tee "$ARTIFACTS_DIR/failover.log"; then
     log "Failover exercise passed"
   else
     fail "failover exercise failed"

@@ -31,12 +31,20 @@ func init() {
 
 			ft := utils.NewFailoverTester(cfg, pool, lv)
 			skipRestore, _ := cmd.Flags().GetBool("skip-restore")
-			opts := utils.FailoverOpts{SkipRestore: skipRestore}
+			requireAll, _ := cmd.Flags().GetBool("require-all")
+			resultsFile, _ := cmd.Flags().GetString("results-file")
+			opts := utils.FailoverOpts{
+				SkipRestore: skipRestore,
+				RequireAll:  requireAll,
+				ResultsFile: resultsFile,
+			}
 
 			return ft.Run(cmd.Context(), opts)
 		},
 	}
 	failoverCmd.Flags().Bool("skip-restore", false, "Skip restore after failover")
+	failoverCmd.Flags().Bool("require-all", false, "Fail if any failover scenario is skipped")
+	failoverCmd.Flags().String("results-file", "", "Write per-scenario JSON results (durations include preflight and restoration, not CMS RTO)")
 	testCmd.AddCommand(failoverCmd)
 
 	drillsCmd := &cobra.Command{
