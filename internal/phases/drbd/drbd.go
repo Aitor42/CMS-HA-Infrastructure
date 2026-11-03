@@ -507,7 +507,10 @@ func (p *Phase) setupFencing(ctx context.Context, pair []config.NodeDetail) erro
 			return fmt.Errorf("invalid fencing domain %q", node.Name)
 		}
 	}
-	offCmd, stateCmd := p.cfg.FenceCommands()
+	offCmd, stateCmd, err := p.cfg.FenceCommandsChecked()
+	if err != nil {
+		return err
+	}
 	custom := p.cfg.DRBD.FenceCommand != ""
 
 	fenceScript, confTmpl, err := p.loadFenceTemplates()

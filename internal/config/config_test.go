@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -367,6 +369,17 @@ func TestHostAddressAndMACValidation(t *testing.T) {
 		if ValidMAC(mac) {
 			t.Fatalf("ValidMAC(%q) = true", mac)
 		}
+	}
+}
+
+func TestFenceCommandsCheckedReportsAccountLookupFailure(t *testing.T) {
+	original := currentUser
+	currentUser = func() (*user.User, error) { return nil, errors.New("no OS account") }
+	t.Cleanup(func() { currentUser = original })
+
+	c := &Config{Network: NetworkConfig{Internal: NetworkDetail{CIDR: "192.168.10.0/24"}}}
+	if _, _, err := c.FenceCommandsChecked(); err == nil || !strings.Contains(err.Error(), "no OS account") {
+		t.Fatalf("FenceCommandsChecked() error = %v, want the account lookup failure", err)
 	}
 }
 

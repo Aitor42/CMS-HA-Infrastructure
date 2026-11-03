@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+// currentUser is a variable so tests can exercise the lookup-failure path.
+var currentUser = user.Current
+
 // JumpstartImageMode returns the configured jumpstart install path, defaulting
 // to "iso" so existing configurations keep the deliverable behaviour.
 func (c *Config) JumpstartImageMode() string {
@@ -130,23 +133,32 @@ func (c *Config) HypervisorIP() string {
 // FenceCommands returns the (power-off, state-query) fencing commands. When the
 // config leaves them empty it derives an SSH+virsh command against the
 // hypervisor as the current OS account; the literal "{domain}" placeholder is kept
-// for the caller to substitute.
+// for the caller to substitute. Callers that can surface an error should use
+// FenceCommandsChecked.
 func (c *Config) FenceCommands() (off, state string) {
+	off, state, _ = c.FenceCommandsChecked()
+	return off, state
+}
+
+// FenceCommandsChecked is FenceCommands with the OS account lookup error
+// surfaced. A derived command with an empty user would silently fail at
+// failover time, when it is too late to notice.
+func (c *Config) FenceCommandsChecked() (off, state string, err error) {
 	if c.DRBD.FenceCommand != "" && c.DRBD.FenceStateCommand != "" {
-		return c.DRBD.FenceCommand, c.DRBD.FenceStateCommand
+		return c.DRBD.FenceCommand, c.DRBD.FenceStateCommand, nil
 	}
 
 	host := c.HypervisorIP()
-	account, _ := user.Current()
-	username := ""
-	if account != nil {
-		username = account.Username
+	account, err := currentUser()
+	if err != nil {
+		return "", "", fmt.Errorf("resolve the local fencing account: %w", err)
 	}
+	username := account.Username
 	base := fmt.Sprintf(
 		"ssh -T -a -x -i /etc/drbd-fence/fence_key -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none -o ClearAllForwardings=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/drbd-fence/known_hosts -o GlobalKnownHostsFile=/etc/drbd-fence/known_hosts -o UpdateHostKeys=no -o HostKeyAlias=%s -o LogLevel=ERROR -o ConnectTimeout=5 %s@%s",
 		host, username, host,
 	)
-	return base + " virsh destroy {domain}", base + " virsh domstate {domain}"
+	return base + " virsh destroy {domain}", base + " virsh domstate {domain}", nil
 }
 
 // K6Image returns the pinned k6 container image.
