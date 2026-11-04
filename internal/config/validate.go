@@ -457,6 +457,28 @@ var macPattern = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 // shape the deploy interpolates into remote commands (awk filters).
 func ValidMAC(s string) bool { return macPattern.MatchString(s) }
 
+// RequiredSecret is a configuration value a phase embeds in a remote file or
+// command, together with the field name used in error messages.
+type RequiredSecret struct {
+	Name  string
+	Value string
+}
+
+// RequireSecrets checks that every required secret is present and free of line
+// breaks. Newlines would corrupt env files, DRBD configuration or shell
+// heredocs, so phases share one check instead of repeating it.
+func RequireSecrets(secrets ...RequiredSecret) error {
+	for _, s := range secrets {
+		if s.Value == "" {
+			return fmt.Errorf("%s must be set in config.yaml", s.Name)
+		}
+		if strings.ContainsAny(s.Value, "\r\n") {
+			return fmt.Errorf("%s cannot contain line breaks", s.Name)
+		}
+	}
+	return nil
+}
+
 // stepVersionPattern matches a plain release version ("0.31.0", optionally
 // prefixed with "v"), the only shape safe to interpolate into the release URL.
 var stepVersionPattern = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){1,3}$`)

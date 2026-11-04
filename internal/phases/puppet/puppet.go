@@ -52,17 +52,12 @@ func (p *Phase) Description() string { return catalog.Puppet.Description }
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
-	if p.cfg.Database.Password == "" || p.cfg.Database.ExporterPassword == "" || p.cfg.WordPress.AdminPassword == "" {
-		return fmt.Errorf("database.password, database.exporter_password, and wordpress.admin_password must be set in config.yaml")
-	}
-	for name, secret := range map[string]string{
-		"database.password":          p.cfg.Database.Password,
-		"database.exporter_password": p.cfg.Database.ExporterPassword,
-		"wordpress.admin_password":   p.cfg.WordPress.AdminPassword,
-	} {
-		if strings.ContainsAny(secret, "\r\n") {
-			return fmt.Errorf("%s cannot contain line breaks", name)
-		}
+	if err := config.RequireSecrets(
+		config.RequiredSecret{Name: "database.password", Value: p.cfg.Database.Password},
+		config.RequiredSecret{Name: "database.exporter_password", Value: p.cfg.Database.ExporterPassword},
+		config.RequiredSecret{Name: "wordpress.admin_password", Value: p.cfg.WordPress.AdminPassword},
+	); err != nil {
+		return err
 	}
 
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
@@ -324,8 +319,8 @@ func (p *Phase) uploadPuppetCode(ctx context.Context, jumpstartIP string) error 
 	return nil
 }
 
-// writeGeneratedPuppetData renders the node classifier and Hiera data from the
-// configured topology.
+// writeGeneratedPuppetData renders the node classifier, Hiera data and
+// Prometheus scrape configuration from the configured topology.
 func (p *Phase) writeGeneratedPuppetData(ctx context.Context, jumpstartIP, remoteCodeDir string) error {
 	if _, stderr, code, err := p.pool.RunCommand(ctx, jumpstartIP, "mkdir -p "+remoteCodeDir+"/data "+remoteCodeDir+"/modules/role/files/prometheus"); err != nil || code != 0 {
 		return fmt.Errorf("create generated data directories (exit %d): %v %s", code, err, strings.TrimSpace(stderr))

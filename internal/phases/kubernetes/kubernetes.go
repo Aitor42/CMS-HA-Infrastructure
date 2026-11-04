@@ -138,18 +138,12 @@ func (p *Phase) validateConfig() error {
 	if len(p.cfg.Nodes.Masters) < 3 {
 		return fmt.Errorf("k3s HA requires at least 3 master nodes for etcd quorum (got %d)", len(p.cfg.Nodes.Masters))
 	}
-	if p.cfg.Database.Password == "" || p.cfg.Database.RootPassword == "" || p.cfg.Database.ExporterPassword == "" || p.cfg.WordPress.AdminPassword == "" {
-		return fmt.Errorf("database.password, database.root_password, database.exporter_password, and wordpress.admin_password must be set in config.yaml; cms-ha encrypts them automatically")
-	}
-	for name, secret := range map[string]string{
-		"database.password": p.cfg.Database.Password, "database.root_password": p.cfg.Database.RootPassword,
-		"database.exporter_password": p.cfg.Database.ExporterPassword, "wordpress.admin_password": p.cfg.WordPress.AdminPassword,
-	} {
-		if strings.ContainsAny(secret, "\r\n") {
-			return fmt.Errorf("%s cannot contain line breaks", name)
-		}
-	}
-	return nil
+	return config.RequireSecrets(
+		config.RequiredSecret{Name: "database.password", Value: p.cfg.Database.Password},
+		config.RequiredSecret{Name: "database.root_password", Value: p.cfg.Database.RootPassword},
+		config.RequiredSecret{Name: "database.exporter_password", Value: p.cfg.Database.ExporterPassword},
+		config.RequiredSecret{Name: "wordpress.admin_password", Value: p.cfg.WordPress.AdminPassword},
+	)
 }
 
 // bootstrapControlPlane initialises the first server, waits for its API, reads

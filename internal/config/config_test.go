@@ -372,6 +372,31 @@ func TestHostAddressAndMACValidation(t *testing.T) {
 	}
 }
 
+func TestRequireSecrets(t *testing.T) {
+	if err := RequireSecrets(
+		RequiredSecret{Name: "database.password", Value: "secret"},
+		RequiredSecret{Name: "wordpress.admin_password", Value: "admin"},
+	); err != nil {
+		t.Fatalf("RequireSecrets() = %v, want success", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		secret RequiredSecret
+		want   string
+	}{
+		{"missing", RequiredSecret{Name: "database.password"}, "database.password must be set in config.yaml"},
+		{"newline", RequiredSecret{Name: "database.password", Value: "a\nb"}, "cannot contain line breaks"},
+		{"carriage return", RequiredSecret{Name: "wordpress.admin_password", Value: "a\rb"}, "cannot contain line breaks"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := RequireSecrets(tc.secret)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("RequireSecrets(%v) = %v, want %q", tc.secret, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestFenceCommandsCheckedReportsAccountLookupFailure(t *testing.T) {
 	original := currentUser
 	currentUser = func() (*user.User, error) { return nil, errors.New("no OS account") }
