@@ -56,7 +56,7 @@ it; without sudo, the default ACL is what keeps the PXE path working.
 *   **Configuration validation** runs on every `cms-ha` invocation before any network or VM operation. The load aborts with a precise message (naming the offending node) when:
     - `network.internal.cidr` / `network.main.cidr` are not valid CIDRs;
     - any node IP is not a valid IPv4 address, FQDN contains characters outside letters/digits/dots/hyphens, or a MAC address is malformed — these fields are interpolated into SSH commands, Cobbler registrations and `awk` filters;
-    - the hotdesk IP range would overflow (base octet + count must stay ≤ 254, e.g. 40 hotdesks from octet 250 is rejected before generating `192.168.20.256`);
+    - the hotdesk IP range would overflow the main subnet (the base offset plus the count must land inside `network.main.cidr`'s usable hosts, e.g. 40 hotdesks from offset 250 in a `/24` are rejected before generating `192.168.20.256`);
     - `vm.storage_dir` is missing, fewer than 3 master nodes (or an even number) are configured (etcd quorum), the LB IP is unset, or there is no CMS frontend.
 *   **`NUM_HOTDESKS`** overrides the hotdesk count dynamically; an invalid value is ignored with a `WARN` instead of silently altering the topology.
 

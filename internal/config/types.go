@@ -107,7 +107,7 @@ type HotdesksConf struct {
 	RAMFinalMB   int `yaml:"ram_final_mb"`
 	VCPUs        int `yaml:"vcpus"`
 	DiskGB       int `yaml:"disk_gb"`
-	BaseIPOctet  int `yaml:"base_ip_octet"`
+	BaseIPOctet  int `yaml:"base_ip_octet"` // offset from the main network base for the first hotdesk (default 201)
 }
 
 // DatabaseConfig holds the MariaDB credentials and database name.
