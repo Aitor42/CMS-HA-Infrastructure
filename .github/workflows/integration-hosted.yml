@@ -482,18 +482,40 @@ jobs:
           ./cms-ha -c "$CONFIG" phase init-vms --jumpstart-only \
             --jumpstart-image "$EFFECTIVE_JUMPSTART_IMAGE" \
             | tee "$ARTIFACTS_DIR/00-init-jumpstart.log"
-          ./cms-ha -c "$CONFIG" phase setup-cobbler \
-            | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
-          ./cms-ha -c "$CONFIG" phase register-nodes \
-            | tee "$ARTIFACTS_DIR/02-register-nodes.log"
 
           if [ "$FAST_PROVISIONING" = "true" ]; then
+            # Cobbler is not on the cloud-image path: the clients boot from the
+            # image and cloud-init never asks the PXE server for a definition.
+            # The two steps are independent, so run them together and let the
+            # ~4m40s Cobbler install overlap the VM creation instead of
+            # preceding it. `register-nodes` still waits for Cobbler because it
+            # writes the system records the verification gate reads.
+            ./cms-ha -c "$CONFIG" phase setup-cobbler \
+              | tee "$ARTIFACTS_DIR/01-setup-cobbler.log" &
+            COBBLER_PID=$!
             # One qcow2 overlay plus one cloud-init seed per client. The phase
             # starts every guest at its runtime RAM, so the whole topology fits
             # the runner without the installer batches.
             ./cms-ha -c "$CONFIG" phase init-vms --nodes-only --fast-provisioning \
-              | tee "$ARTIFACTS_DIR/03-cloud-clients.log"
+              | tee "$ARTIFACTS_DIR/03-cloud-clients.log" &
+            CLIENTS_PID=$!
+
+            CLIENTS_RC=0
+            COBBLER_RC=0
+            wait "$CLIENTS_PID" || CLIENTS_RC=$?
+            wait "$COBBLER_PID" || COBBLER_RC=$?
+            if [ "$CLIENTS_RC" -ne 0 ] || [ "$COBBLER_RC" -ne 0 ]; then
+              echo "::error::fast provisioning failed (cloud clients exit $CLIENTS_RC, cobbler exit $COBBLER_RC)"
+              exit 1
+            fi
+            ./cms-ha -c "$CONFIG" phase register-nodes \
+              | tee "$ARTIFACTS_DIR/02-register-nodes.log"
           else
+            ./cms-ha -c "$CONFIG" phase setup-cobbler \
+              | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
+            ./cms-ha -c "$CONFIG" phase register-nodes \
+              | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+
             # Probes, not part of the deployment: the client installers resolve
             # through the jumpstart's named and fetch their authorised keys from
             # its Apache, so both are checked here, with the lab up and before the

@@ -919,7 +919,61 @@ func isPuppetSSLResetError(stdout, stderr string) bool {
 	return false
 }
 
+// catalogRank returns the role -> scheduling rank map for the first catalog.
+// Frontends install WordPress, PHP and Apache; the monitor installs Prometheus,
+// Grafana and Alertmanager. Starting the heaviest nodes last (the configured
+// order puts frontends near the end) made their runtime the tail of the phase
+// even though the concurrency window kept freeing slots earlier.
+// Longest-processing-time-first is the standard makespan heuristic and does not
+// change the concurrency limit itself.
+func (p *Phase) catalogRank() map[string]int {
+	ranks := map[string]int{}
+	mark := func(specs []config.NodeDetail, rank int) {
+		for _, n := range specs {
+			if n.IP == "" {
+				continue
+			}
+			if current, ok := ranks[n.IP]; !ok || rank < current {
+				ranks[n.IP] = rank
+			}
+		}
+	}
+	mark(p.cfg.Nodes.CMSFrontends, 0)
+	mark([]config.NodeDetail{p.cfg.Nodes.Monitor}, 1)
+	mark(p.cfg.Nodes.Masters, 2)
+	mark([]config.NodeDetail{p.cfg.Nodes.Storage}, 3)
+	mark(p.cfg.Nodes.Workers, 4)
+	mark(p.cfg.Nodes.LBs, 5)
+	mark([]config.NodeDetail{p.cfg.Nodes.Router}, 6)
+	return ranks
+}
+
+// orderCatalogNodes returns a copy sorted heaviest-first, stable for equal
+// ranks so the configured order is still the tie-breaker. Nodes without a known
+// role (hotdesks and future additions) run last; a wrong guess only changes
+// order, never correctness.
+func (p *Phase) orderCatalogNodes(nodes []config.NodeSpec) []config.NodeSpec {
+	const unknownRank = 7
+	ranks := p.catalogRank()
+	rankOf := func(spec config.NodeSpec) int {
+		if rank, ok := ranks[spec.IP]; ok {
+			return rank
+		}
+		return unknownRank
+	}
+
+	ordered := make([]config.NodeSpec, len(nodes))
+	copy(ordered, nodes)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return rankOf(ordered[i]) < rankOf(ordered[j])
+	})
+	return ordered
+}
+
 func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) error {
+	if len(nodes) == 0 {
+		return nil
+	}
 	var errs []string
 	var mu sync.Mutex
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
@@ -931,52 +985,61 @@ func (p *Phase) runFirstCatalog(ctx context.Context, nodes []config.NodeSpec) er
 		concurrency = len(nodes)
 	}
 
+	ordered := p.orderCatalogNodes(nodes)
 	logging.Info("Running first catalog in parallel across %d nodes (concurrency limit: %d, source: %s)...", len(nodes), concurrency, source)
 
-	sem := make(chan struct{}, concurrency)
+	// A fixed worker pool consumes the sorted slice, so the first `concurrency`
+	// nodes to start are deterministically the heaviest ones. The previous
+	// semaphore-per-goroutine version left that choice to the scheduler.
+	jobs := make(chan config.NodeSpec)
 	var wg sync.WaitGroup
 
-	for _, n := range nodes {
-		node := n
-		wg.Add(1)
-		go func(spec config.NodeSpec) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+	runNode := func(spec config.NodeSpec) {
+		logging.Info("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP)
 
-			logging.Info("Applying Puppet catalog on %s (%s)...", spec.Name, spec.IP)
+		nodeCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		stdout, stderr, code, err := p.pool.RunCommand(nodeCtx, spec.IP, cmd)
 
-			nodeCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-			defer cancel()
-			stdout, stderr, code, err := p.pool.RunCommand(nodeCtx, spec.IP, cmd)
-
-			// Self-healing: remove the stale client certificate and its server
-			// record, then retry once. This covers both a private-key mismatch
-			// and the signature/verify failures left by a partial CA rotation.
-			if code != 0 && isPuppetSSLResetError(stdout, stderr) {
-				logging.Warn("Stale Puppet SSL state detected on %s (%s). Performing self-healing reset...", spec.Name, spec.FQDN)
-				if spec.FQDN != "" {
-					cleanCmd := fmt.Sprintf("puppetserver ca clean --certname %s", shell.Quote(spec.FQDN))
-					if _, cleanStderr, cleanCode, cleanErr := p.pool.RunCommand(nodeCtx, jumpstartIP, cleanCmd); cleanErr != nil || cleanCode != 0 {
-						logging.Warn("Could not clean Puppet certificate for %s on jumpstart (exit %d): %v %s", spec.FQDN, cleanCode, cleanErr, logging.Tail(cleanStderr, 5))
-					}
+		// Self-healing: remove the stale client certificate and its server
+		// record, then retry once. This covers both a private-key mismatch
+		// and the signature/verify failures left by a partial CA rotation.
+		if code != 0 && isPuppetSSLResetError(stdout, stderr) {
+			logging.Warn("Stale Puppet SSL state detected on %s (%s). Performing self-healing reset...", spec.Name, spec.FQDN)
+			if spec.FQDN != "" {
+				cleanCmd := fmt.Sprintf("puppetserver ca clean --certname %s", shell.Quote(spec.FQDN))
+				if _, cleanStderr, cleanCode, cleanErr := p.pool.RunCommand(nodeCtx, jumpstartIP, cleanCmd); cleanErr != nil || cleanCode != 0 {
+					logging.Warn("Could not clean Puppet certificate for %s on jumpstart (exit %d): %v %s", spec.FQDN, cleanCode, cleanErr, logging.Tail(cleanStderr, 5))
 				}
-				if _, resetStderr, resetCode, resetErr := p.pool.RunCommand(nodeCtx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl"); resetErr != nil || resetCode != 0 {
-					logging.Warn("Could not remove stale Puppet SSL directory on %s (exit %d): %v %s", spec.IP, resetCode, resetErr, logging.Tail(resetStderr, 5))
-				}
-				stdout, stderr, code, err = p.pool.RunCommand(nodeCtx, spec.IP, cmd)
 			}
+			if _, resetStderr, resetCode, resetErr := p.pool.RunCommand(nodeCtx, spec.IP, "rm -rf /etc/puppetlabs/puppet/ssl /etc/puppet/ssl"); resetErr != nil || resetCode != 0 {
+				logging.Warn("Could not remove stale Puppet SSL directory on %s (exit %d): %v %s", spec.IP, resetCode, resetErr, logging.Tail(resetStderr, 5))
+			}
+			stdout, stderr, code, err = p.pool.RunCommand(nodeCtx, spec.IP, cmd)
+		}
 
-			if err != nil || code != 0 {
-				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s (%s): exit %d: %v\nSTDOUT: %s\nSTDERR: %s", spec.Name, spec.IP, code, err, strings.TrimSpace(stdout), strings.TrimSpace(stderr)))
-				mu.Unlock()
-			} else {
-				logging.Success("Node %s converged successfully", spec.Name)
-			}
-		}(node)
+		if err != nil || code != 0 {
+			mu.Lock()
+			errs = append(errs, fmt.Sprintf("%s (%s): exit %d: %v\nSTDOUT: %s\nSTDERR: %s", spec.Name, spec.IP, code, err, strings.TrimSpace(stdout), strings.TrimSpace(stderr)))
+			mu.Unlock()
+		} else {
+			logging.Success("Node %s converged successfully", spec.Name)
+		}
 	}
 
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for spec := range jobs {
+				runNode(spec)
+			}
+		}()
+	}
+	for _, spec := range ordered {
+		jobs <- spec
+	}
+	close(jobs)
 	wg.Wait()
 
 	if len(errs) > 0 {

@@ -18,6 +18,86 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TestOrderCatalogNodesStartsHeaviestRolesFirst pins the longest-processing-
+// time-first order: the frontends and the monitor do the most package work, so
+// starting them first lets the concurrency window drain evenly instead of
+// leaving their runtime as the tail.
+func TestOrderCatalogNodesStartsHeaviestRolesFirst(t *testing.T) {
+	cfg := puppetTestConfig()
+	p := &Phase{cfg: cfg}
+
+	var nodes []config.NodeSpec
+	for _, n := range cfg.AllNodes() {
+		if n.IP != "" && n.IP != cfg.Nodes.Jumpstart.IP {
+			nodes = append(nodes, n)
+		}
+	}
+	ordered := p.orderCatalogNodes(nodes)
+	if len(ordered) != len(nodes) {
+		t.Fatalf("ordered nodes = %d, want %d", len(ordered), len(nodes))
+	}
+
+	wantHead := []string{
+		"10.20.0.101", // CMS frontend: WordPress, PHP and Apache
+		"10.10.0.16",  // monitor: Prometheus, Grafana, Alertmanager
+		"10.10.0.11",  // masters
+		"10.10.0.12",
+		"10.10.0.13",
+	}
+	for i, want := range wantHead {
+		if ordered[i].IP != want {
+			t.Errorf("ordered[%d] = %s (%s), want %s", i, ordered[i].IP, ordered[i].Name, want)
+		}
+	}
+
+	// Reordering must not drop, duplicate or rewrite the nodes.
+	seen := make(map[string]bool, len(ordered))
+	for _, n := range ordered {
+		if seen[n.IP] {
+			t.Errorf("duplicate node %s in ordered catalog", n.IP)
+		}
+		seen[n.IP] = true
+	}
+	if !seen["10.10.0.1"] || !seen["10.20.0.103"] {
+		t.Errorf("router or LB node missing after reordering: %v", ordered)
+	}
+}
+
+func TestRunFirstCatalogUsesTheOrderedSchedule(t *testing.T) {
+	t.Setenv("PUPPET_CONCURRENCY", "1")
+	cfg := puppetTestConfig()
+	p := &Phase{cfg: cfg, pool: &testutil.FakeExecutor{}}
+
+	var nodes []config.NodeSpec
+	for _, n := range cfg.AllNodes() {
+		if n.IP != "" && n.IP != cfg.Nodes.Jumpstart.IP {
+			nodes = append(nodes, n)
+		}
+	}
+	var started []string
+	fake := p.pool.(*testutil.FakeExecutor)
+	fake.RunFunc = func(_ context.Context, host, cmd string) (string, string, int, error) {
+		if strings.Contains(cmd, "puppet agent -t") {
+			started = append(started, host)
+		}
+		return "", "", 0, nil
+	}
+
+	if err := p.runFirstCatalog(context.Background(), nodes); err != nil {
+		t.Fatalf("runFirstCatalog() = %v", err)
+	}
+
+	want := p.orderCatalogNodes(nodes)
+	if len(started) != len(want) {
+		t.Fatalf("catalog ran on %d nodes, want %d: %v", len(started), len(want), started)
+	}
+	for i := range want {
+		if started[i] != want[i].IP {
+			t.Errorf("catalog start order[%d] = %s, want %s", i, started[i], want[i].IP)
+		}
+	}
+}
+
 // TestInstallServerAndAgentsRunsConcurrently pins the overlap that keeps the
 // ~70s server install off the deploy critical path. The fake rendezvous makes
 // a sequential implementation time out instead of silently passing: the server

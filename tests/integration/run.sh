@@ -66,6 +66,49 @@ done
 log()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 fail() { printf '\n\033[1;31mFAILED: %s\033[0m\n' "$*" >&2; }
 
+# ── Timing summary ─────────────────────────────────────────────────────────
+# timings.json is the machine-readable record. Render the same data in the job
+# log and, on GitHub Actions, in the workflow summary, so a reviewer can compare
+# two runs without downloading the artifact. Best-effort: a missing parser or
+# report must never fail the integration gate.
+timings_summary() {
+  [ -f "$TIMINGS_FILE" ] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$TIMINGS_FILE" <<'PY' || true
+import json
+import os
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    doc = json.load(handle)
+
+phases = [p for p in doc.get("phases", []) if p.get("status") in ("ok", "failed")]
+phases.sort(key=lambda p: p.get("duration_ms", 0), reverse=True)
+total = doc.get("total_ms", 0) / 1000.0
+
+lines = [
+    f"Deployment total: **{total:.1f}s** ({doc.get('status', 'unknown')}), "
+    f"run `{doc.get('run_id', 'unknown')}`",
+    "",
+    "| Phase | Status | Duration |",
+    "|---|---|---|",
+]
+for phase in phases:
+    lines.append(
+        f"| {phase.get('phase', '?')} | {phase.get('status', '?')} | "
+        f"{phase.get('duration_ms', 0) / 1000.0:.1f}s |"
+    )
+text = "\n".join(lines) + "\n"
+print(text)
+
+summary = os.environ.get("GITHUB_STEP_SUMMARY")
+if summary:
+    with open(summary, "a", encoding="utf-8") as handle:
+        handle.write("## cms-ha deployment timings\n\n")
+        handle.write(text)
+PY
+}
+
 mkdir -p "$ARTIFACTS_DIR"
 
 # ── Preflight ──────────────────────────────────────────────────────────────
@@ -202,6 +245,10 @@ if [ "$EXIT_CODE" -eq 0 ] && [ "$SKIP_CHAOS" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; th
     EXIT_CODE=1
   fi
 fi
+
+# The deploy timings are final by now; render them in the log and the job
+# summary before the verdict, so a failed run still publishes them.
+timings_summary
 
 if [ "$EXIT_CODE" -eq 0 ]; then
   log "Integration test PASSED"
