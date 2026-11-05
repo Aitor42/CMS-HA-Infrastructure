@@ -9,12 +9,59 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
+
+// TestInstallServerAndAgentsRunsConcurrently pins the overlap that keeps the
+// ~70s server install off the deploy critical path. The fake rendezvous makes
+// a sequential implementation time out instead of silently passing: the server
+// command waits for the agent command to start and vice versa.
+func TestInstallServerAndAgentsRunsConcurrently(t *testing.T) {
+	serverStarted := make(chan struct{})
+	agentStarted := make(chan struct{})
+	var serverOnce, agentOnce sync.Once
+
+	fake := &testutil.FakeExecutor{}
+	fake.RunFunc = func(_ context.Context, _, cmd string) (string, string, int, error) {
+		switch {
+		case strings.Contains(cmd, "puppetserver"):
+			serverOnce.Do(func() { close(serverStarted) })
+			select {
+			case <-agentStarted:
+			case <-time.After(2 * time.Second):
+				return "", "server command ran without an agent install in flight", 1, nil
+			}
+		case strings.Contains(cmd, "certname ="):
+			agentOnce.Do(func() { close(agentStarted) })
+			select {
+			case <-serverStarted:
+			case <-time.After(2 * time.Second):
+				return "", "agent install ran without the server install in flight", 1, nil
+			}
+		}
+		return "", "", 0, nil
+	}
+
+	p := &Phase{cfg: puppetTestConfig(), pool: fake}
+	nodes := []config.NodeSpec{{Name: "web1", IP: "10.20.0.101", FQDN: "web1.lab.main"}}
+	if err := p.installServerAndAgents(context.Background(), "10.10.0.10", nodes); err != nil {
+		t.Fatalf("installServerAndAgents() = %v", err)
+	}
+
+	for _, ch := range []chan struct{}{serverStarted, agentStarted} {
+		select {
+		case <-ch:
+		default:
+			t.Fatal("one of the two installs never ran")
+		}
+	}
+}
 
 func TestCatalogConcurrencyResolution(t *testing.T) {
 	t.Setenv("PUPPET_CONCURRENCY", "")
@@ -307,6 +354,7 @@ func TestGeneratedPrometheusConfigUsesTheConfiguredTopology(t *testing.T) {
 		"apache":             {"10.20.0.101:9117"},
 		"mysql":              {"10.10.0.11:9104"},
 		"k3s_kubelet":        {"10.10.0.11:10250", "10.10.0.12:10250", "10.10.0.13:10250", "10.10.0.14:10250"},
+		"kube-apiserver":     {"10.10.0.11:6443", "10.10.0.12:6443", "10.10.0.13:6443"},
 		"etcd":               {"10.10.0.11:2381", "10.10.0.12:2381", "10.10.0.13:2381"},
 		"blackbox":           {"https://10.20.0.100/"},
 		"blackbox-frontends": {"10.20.0.101:80"},

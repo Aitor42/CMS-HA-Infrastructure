@@ -201,10 +201,10 @@ func buildArgs(image string, r k6Run) []string {
 			"-e", "K6_PROMETHEUS_RW_SERVER_URL="+r.rwURL,
 			// Remote write has no histogram support by default: k6 exports a
 			// gauge per requested trend statistic and defaults to p(99) only.
-			// The HA dashboard plots p95, and the profile's own thresholds are
-			// p(95)/p(99), so ask for both instead of letting the panel stay
-			// empty.
-			"-e", "K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99)",
+			// The HA dashboard plots the three percentiles the reliability
+			// report quotes (p50/p95/p99), so ask for all of them instead of
+			// letting the median panel stay empty.
+			"-e", "K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99)",
 		)
 	}
 

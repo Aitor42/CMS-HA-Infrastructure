@@ -13,7 +13,7 @@
 ### Load profile (`cms-ha traffic`)
 
 `cms-ha traffic` runs a k6 profile (`templates/traffic/cms-smoke.js`) inside a
-pinned `grafana/k6` container and reports RPS, p95/p99 and error rate. With
+pinned `grafana/k6` container and reports RPS, p50/p95/p99 and error rate. With
 `traffic.prometheus_rw_url` set in `config.yaml`, the metrics stream into
 Prometheus and appear on the HA Overview dashboard during the run.
 

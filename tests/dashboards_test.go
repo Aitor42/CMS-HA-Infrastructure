@@ -88,9 +88,10 @@ func TestDashboards_K6PanelsQueryExportedSeries(t *testing.T) {
 	}
 
 	// Exported by k6 0.55 with `--out experimental-prometheus-rw` and
-	// K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99).
+	// K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99).
 	exported := map[string]bool{
 		"k6_http_reqs_total":       true,
+		"k6_http_req_duration_p50": true,
 		"k6_http_req_duration_p95": true,
 		"k6_http_req_duration_p99": true,
 	}

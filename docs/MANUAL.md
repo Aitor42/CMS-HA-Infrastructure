@@ -214,7 +214,9 @@ retain its old checkpoint, then select the earliest phase that must run and a
 `assumed_phases`, not verified `completed_phases`; the suffix must succeed again.
 A later `--resume` skips both lists. Checkpoints are execution records, not live
 health checks; inspect the environment and run `verify` separately. Do not edit
-identity hashes or mark phases completed to bypass these checks.
+identity hashes or mark phases completed to bypass these checks. A checkpoint
+that cannot be written fails the deployment instead of letting it succeed with
+no recorded progress.
 
 **Orchestration in short:**
 1. The jumpstart node converges first, so Puppet Server, DNS, Cobbler, DHCP and TFTP are up before any client runs.
@@ -402,7 +404,7 @@ The `internal-monitor` node centralises metrics collection and visualisation:
 
 **Alert rules (19).** Availability (nodes, MariaDB/Nginx/Apache exporters, HTTP 5xx), resource pressure (disk/memory), backup/restore health, and the high-availability set: `EtcdNoQuorum` (fewer than two of the three etcd members reachable), `DRBDPeerDown`, `DRBDSplitBrain`, `DRBDNoPrimary` and `KeepalivedState` (the VIP must be held by exactly one balancer). DRBD and keepalived metrics are published through node_exporter's textfile collector, so no extra exporter is required; two systemd timers write the `.prom` files every minute (`cms-drbd-metrics.timer` on `internal-master1/2`, `cms-keepalived-metrics.timer` on both balancers). `cms-ha verify` fails if Prometheus has no `cms_drbd_connected` or `cms_keepalived_vip_present` series, because a stopped publisher leaves the corresponding panels blank and the `DRBDPeerDown`/`KeepalivedState` alerts silent without tripping any other probe.
 
-**Load testing.** `./cms-ha traffic` runs a k6 profile in a pinned `grafana/k6` container against the VIP or an internal frontend and reports RPS, p95/p99 and error rate. With `traffic.prometheus_rw_url` set in `config.yaml`, those metrics are streamed into Prometheus so they appear on the HA Overview dashboard during the test; `role::monitor` starts Prometheus with `--web.enable-remote-write-receiver` so the endpoint accepts them. k6's remote-write output has no histograms by default: each trend becomes one gauge per requested statistic (`k6_http_req_duration_p95`), which is why the phase requests `K6_PROMETHEUS_RW_TREND_STATS=p(95),p(99)` and the panels query those gauges rather than `_sum`/`_count` series that only exist for native histograms. Once the run is over, the phase evaluates every panel query of every shipped dashboard against Prometheus and fails if one returns no series — the same answer the browser renders as "No data". The integration driver runs the profile after verify when it is called with `--with-traffic`.
+**Load testing.** `./cms-ha traffic` runs a k6 profile in a pinned `grafana/k6` container against the VIP or an internal frontend and reports RPS, p95/p99 and error rate. With `traffic.prometheus_rw_url` set in `config.yaml`, those metrics are streamed into Prometheus so they appear on the HA Overview dashboard during the test; `role::monitor` starts Prometheus with `--web.enable-remote-write-receiver` so the endpoint accepts them. k6's remote-write output has no histograms by default: each trend becomes one gauge per requested statistic (`k6_http_req_duration_p50`, `_p95`, `_p99`), which is why the phase requests `K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99)` and the panels query those gauges rather than `_sum`/`_count` series that only exist for native histograms. Once the run is over, the phase evaluates every panel query of every shipped dashboard against Prometheus and fails if one returns no series — the same answer the browser renders as "No data". The integration driver runs the profile after verify when it is called with `--with-traffic`.
 
 ### Critical Monitored Metrics
 *   **Infrastructure**: CPU usage (`node_cpu_seconds_total`), available memory (`node_memory_MemAvailable_bytes`), disk usage (`node_filesystem_avail_bytes`), and network traffic (`node_network_receive_bytes_total`).
@@ -620,6 +622,14 @@ local uploads. Apache requires/binds to the mount and runs
 hard NFS share can block I/O rather than stop Apache. The single storage VM is
 still an availability dependency, not redundant NFS.
 
+The MariaDB PV uses `hostPath.type: Directory`, not `DirectoryOrCreate`, so the
+directory must already exist. This removes automatic creation but does not
+replace the DRBD mount checks or provide CSI-managed storage. The PV source is
+immutable: applying `Directory` to an existing PV created with
+`DirectoryOrCreate` may be rejected. Do not delete a live PV/PVC blindly;
+inventory its reclaim policy and bindings, stop writers, preserve the data, and
+use a reviewed volume recreation/rebinding procedure during maintenance.
+
 After convergence, inspect `exportfs -s` and `ufw status` on storage; on each
 frontend use `findmnt -rn -M /var/www/html/wp-content/uploads -o
 SOURCE,FSTYPE,OPTIONS,FSROOT` and
@@ -682,6 +692,11 @@ The integration pipeline enables it with `--with-drills` after the traffic test.
 The MariaDB data directory (`/mnt/data/mariadb`) lives directly on the replicated DRBD device (`/dev/drbd0`) and is mounted on the active Primary node, so replication is synchronous. The MariaDB ConfigMap disables InnoDB's native AIO, which is not reliable on DRBD+qcow2 volumes (see section 8.3d).
 
 If `internal-master1` goes down completely, the MariaDB pod on it becomes unreachable and the DRBD watchdog on `internal-master2` takes over automatically: it fences the failed domain, promotes DRBD, mounts the replicated volume, moves the `drbd-status=primary` label and force-deletes the zombie pod so the StatefulSet recreates it on the surviving master. Nothing needs to be done by hand, and the pod cannot simply be deleted gracefully: while the old node is unreachable the pod object stays in `Terminating` and the StatefulSet will not create a replacement.
+
+The watchdog verifies the mounted block device, ext4 filesystem root and
+writable mode before advertising the local primary. If the Kubernetes API is
+unreachable, it cannot guarantee stopping the MariaDB StatefulSet; test that
+failure mode before production use.
 
 If that automated path ever fails, the manual fallback is:
 ```bash

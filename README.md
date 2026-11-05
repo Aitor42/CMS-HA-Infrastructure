@@ -320,7 +320,7 @@ Each phase is invoked through the unified Go CLI (`cms-ha`). The numbers follow 
 | **08** | `cms-ha phase setup-monitoring` | `internal-monitor` + all | Prometheus, Grafana, alert rules, blackbox probes & node exporters |
 | **09** | `cms-ha phase setup-ufw` | `ufw-router` + all nodes | Perimeter routing, dynamic WAN NAT & live UFW verification (node rules are Puppet-owned) |
 | **10** | `cms-ha phase setup-ca` | `jumpstart` + all nodes | Smallstep PKI (step-ca) & cluster-wide TLS trust |
-| **—** | `cms-ha traffic` | Workstations & LB | Post-deploy k6 load/smoke profile (RPS, p95/p99, error rate); every Grafana panel query is then checked for data |
+| **—** | `cms-ha traffic` | Workstations & LB | Post-deploy k6 load/smoke profile (RPS, p50/p95/p99, error rate); every Grafana panel query is then checked for data |
 
 ---
 
@@ -489,7 +489,8 @@ HTTP load/smoke generation is delegated to [k6](https://k6.io/), run from a
 pinned `grafana/k6` container on the hypervisor (docker/podman required). The
 profile lives in `templates/traffic/cms-smoke.js` and exercises the WordPress
 surface (home, search, REST API, feeds, login) with pass/fail thresholds on the
-error rate and p95/p99 latency.
+error rate and p95/p99 latency. It reports p50, p95 and p99, and the HA
+dashboard plots all three.
 
 ```bash
 # External (through the keepalived VIP) — the default

@@ -65,9 +65,15 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("jumpstart IP is empty")
 	}
 
-	logging.Info("Installing Puppet Server on Jumpstart...")
-	if err := p.installPuppetServer(ctx, jumpstartIP); err != nil {
-		return fmt.Errorf("install puppet server: %w", err)
+	agentNodes := p.getAgentNodes()
+
+	// The server install and the agent installs are independent: an agent only
+	// needs its package and puppet.conf, not a reachable server. Running them
+	// together keeps the server install off the critical path. The autosign
+	// policy is still written before the first agent requests a catalog.
+	logging.Info("Installing Puppet Server on Jumpstart and Puppet Agent on %d client nodes...", len(agentNodes))
+	if err := p.installServerAndAgents(ctx, jumpstartIP, agentNodes); err != nil {
+		return err
 	}
 
 	logging.Info("Uploading Puppet code (manifests + modules)...")
@@ -85,8 +91,6 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("puppet agent failed on jumpstart %s: %v\n%s", jumpstartIP, err, logging.Tail(stderr, 10))
 	}
 
-	agentNodes := p.getAgentNodes()
-
 	// Autosign only the FQDNs this configuration is about to bring up. A
 	// wildcard (*.internal.local) would let any host that can reach the
 	// Puppet server obtain a catalog; exact names keep the trust boundary at
@@ -95,10 +99,6 @@ func (p *Phase) Run(ctx context.Context) error {
 		return fmt.Errorf("write exact Puppet autosign policy: %w", err)
 	}
 
-	logging.Info("Installing Puppet Agent on all client nodes...")
-	if err := p.installAgents(ctx, agentNodes); err != nil {
-		return fmt.Errorf("install puppet agents: %w", err)
-	}
 	if err := p.installRuntimeSecretFiles(ctx); err != nil {
 		return fmt.Errorf("install runtime credentials for CMS and database exporter: %w", err)
 	}
@@ -198,6 +198,37 @@ func (p *Phase) installRuntimeSecretFiles(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// installServerAndAgents installs the Puppet server and every client agent
+// concurrently. Agent installation only writes the package and puppet.conf, so
+// it does not depend on a running server; overlapping the two saves the whole
+// server install (apt, service start and CA bootstrap) from the deploy time.
+// Both errors are reported, but the server error wins because a missing server
+// makes the later catalog fail for every node.
+func (p *Phase) installServerAndAgents(ctx context.Context, jumpstartIP string, nodes []config.NodeSpec) error {
+	var wg sync.WaitGroup
+	var serverErr, agentsErr error
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if err := p.installPuppetServer(ctx, jumpstartIP); err != nil {
+			serverErr = fmt.Errorf("install puppet server: %w", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := p.installAgents(ctx, nodes); err != nil {
+			agentsErr = fmt.Errorf("install puppet agents: %w", err)
+		}
+	}()
+	wg.Wait()
+
+	if serverErr != nil {
+		return serverErr
+	}
+	return agentsErr
 }
 
 func (p *Phase) installPuppetServer(ctx context.Context, jumpstartIP string) error {
@@ -604,6 +635,21 @@ func (p *Phase) generatedPrometheusConfig() ([]byte, error) {
 			TLSConfig:       &prometheusTLSConfig{InsecureSkipVerify: true},
 			MetricsPath:     "/metrics",
 			StaticConfigs:   []prometheusTargetGroup{{Targets: kubeletTargets}},
+		})
+	}
+	// The aggregated API server exposes its request histogram on the same
+	// endpoint the kubelet uses for authentication, so the existing read-only
+	// Prometheus ServiceAccount token (nonResourceURLs: /metrics) can scrape
+	// it. Without this job the dashboard cannot show apiserver latency and a
+	// slow control plane stays invisible until a request times out.
+	if apiserverTargets := targetsFromDetails(p.cfg.Nodes.Masters, 6443); len(apiserverTargets) > 0 {
+		scrape = append(scrape, prometheusScrapeConfig{
+			JobName:         "kube-apiserver",
+			Scheme:          "https",
+			BearerTokenFile: "/etc/prometheus/k3s.token",
+			TLSConfig:       &prometheusTLSConfig{InsecureSkipVerify: true},
+			MetricsPath:     "/metrics",
+			StaticConfigs:   []prometheusTargetGroup{{Targets: apiserverTargets}},
 		})
 	}
 	add("etcd", targetsFromDetails(p.cfg.Nodes.Masters, 2381))

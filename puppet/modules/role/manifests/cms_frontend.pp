@@ -30,6 +30,7 @@ class role::cms_frontend {
     'php-xml',
     'php-mbstring',
     'libapache2-mod-php',
+    'php-opcache',
     'wget',
     'tar',
     'curl',
@@ -110,6 +111,41 @@ class role::cms_frontend {
       # parsed, which is where the bug lives.
       session.upload_progress.enabled = Off
       | PHPINIHARDENING
+  }
+
+  # ---------------------------------------------------------------------------
+  # PHP PERFORMANCE — OPcache for the WordPress frontends
+  #
+  # mod_php recompiles every requested PHP file on each request unless OPcache
+  # is enabled. WordPress loads dozens of files per page, so the compile step
+  # is the largest fixed CPU cost of the smoke profile and shows up directly in
+  # p50/p95. validate_timestamps stays on (2s revalidation) so a WP-CLI update
+  # is picked up without restarting Apache; turning it off would require a
+  # service reload after every code change.
+  # ---------------------------------------------------------------------------
+  file { '/etc/php/8.3/apache2/conf.d/99-cms-ha-opcache.ini':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    require => [
+      Package['php-opcache'],
+      File['/etc/php/8.3/apache2/conf.d'],
+    ],
+    notify  => Service['apache2'],
+    content => @("PHPINIOPCACHE")
+      ; CMS-HA - OPcache tuning for WordPress under mod_php.
+      ; This file sorts after the package's 10-opcache.ini, which already
+      ; loads the extension, so it only overrides values.
+      opcache.enable = On
+      opcache.enable_cli = Off
+      opcache.memory_consumption = 128
+      opcache.interned_strings_buffer = 16
+      opcache.max_accelerated_files = 20000
+      opcache.validate_timestamps = On
+      opcache.revalidate_freq = 2
+      opcache.save_comments = On
+      | PHPINIOPCACHE
   }
 
   # The same mitigations at the web server, where they cannot be undone by

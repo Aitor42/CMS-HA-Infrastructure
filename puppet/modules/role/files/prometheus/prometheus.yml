@@ -79,6 +79,24 @@ scrape_configs:
           - '192.168.10.14:10250'  # internal-worker2 kubelet
     metrics_path: /metrics
 
+  # ── Kubernetes API server latency (p50/p95/p99 source) ─────────────────────
+  # The same read-only ServiceAccount token is accepted by the aggregated API
+  # server (the RBAC grants nonResourceURLs: /metrics). apiserver_request_
+  # duration_seconds is the histogram the HA dashboard turns into percentiles;
+  # scraping every master means one failed control plane does not hide the
+  # latency of the remaining quorum.
+  - job_name: 'kube-apiserver'
+    scheme: https
+    bearer_token_file: /etc/prometheus/k3s.token
+    tls_config:
+      insecure_skip_verify: true
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - '192.168.10.11:6443'  # internal-master1
+          - '192.168.10.12:6443'  # internal-master2
+          - '192.168.10.16:6443'  # internal-master3
+
   # ── etcd metrics (quorum visibility) ───────────────────────────────────────
   # K3s exposes the embedded etcd metrics on the supervisor port 2381 of every
   # server. Used by the EtcdNoQuorum alert: fewer than two reachable members of
