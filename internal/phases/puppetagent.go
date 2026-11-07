@@ -3,7 +3,6 @@ package phases
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -55,38 +54,4 @@ func RunPuppetAgentCmd(ctx context.Context, pool ssh.Executor, host, label, cmd 
 		return stdout, stderr, nil
 	}
 	return stdout, stderr, fmt.Errorf("puppet agent failed on %s %s (exit code %d): %v", label, host, code, runErr)
-}
-
-// RunPuppetAgent runs the canonical agent convergence on one host.
-func RunPuppetAgent(ctx context.Context, pool ssh.Executor, host, label string) (string, string, error) {
-	return RunPuppetAgentCmd(ctx, pool, host, label, PuppetAgentCommand(""))
-}
-
-// RunPuppetAgentParallel converges hosts concurrently and aggregates every
-// failure (SSH-level error or unexpected exit code) into one descriptive
-// error; tolerant callers decide whether to warn or abort.
-func RunPuppetAgentParallel(ctx context.Context, pool ssh.Executor, hosts []string) error {
-	var targets []string
-	for _, h := range hosts {
-		if h != "" {
-			targets = append(targets, h)
-		}
-	}
-	if len(targets) == 0 {
-		return nil
-	}
-
-	var failures []string
-	for _, r := range pool.RunParallel(ctx, targets, PuppetAgentCommand("")) {
-		switch {
-		case r.Err != nil:
-			failures = append(failures, fmt.Sprintf("%s: %v", r.Host, r.Err))
-		case r.ExitCode != 0 && r.ExitCode != 2:
-			failures = append(failures, fmt.Sprintf("%s: exit code %d", r.Host, r.ExitCode))
-		}
-	}
-	if len(failures) == 0 {
-		return nil
-	}
-	return fmt.Errorf("puppet agent failed on %d/%d nodes:\n%s", len(failures), len(targets), strings.Join(failures, "\n"))
 }

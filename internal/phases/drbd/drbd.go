@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -21,7 +22,6 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	cryptossh "golang.org/x/crypto/ssh"
-	"golang.org/x/sys/unix"
 )
 
 // replicationWait is a variable so tests can exercise the failure path without
@@ -734,9 +734,9 @@ func fenceSafePath(path string, directory, private bool) error {
 	if err != nil {
 		return err
 	}
-	stat := &unix.Stat_t{}
-	if err := unix.Lstat(path, stat); err != nil {
-		return err
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cannot read ownership for fencing path: %s", path)
 	}
 	uid := uint32(os.Getuid())
 	unsafeMode := info.Mode().Perm()&0022 != 0
