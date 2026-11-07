@@ -180,7 +180,10 @@ func TestFenceProvisionPersistsPinAndDeploysIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	off, state := p.cfg.FenceCommands()
+	off, state, err := p.cfg.FenceCommandsChecked()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := p.deployFenceArtifacts(t.Context(), p.cfg.Nodes.Masters, script, tmpl, key, pins, "1", off, state); err != nil {
 		t.Fatal(err)
 	}

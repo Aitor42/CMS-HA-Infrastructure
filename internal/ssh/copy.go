@@ -45,9 +45,25 @@ func (p *Pool) WithSFTP(ctx context.Context, host string, fn func(sftpClient *sf
 // withSFTPClient dials (retrying once on a stale connection) and runs fn with a
 // fresh SFTP session.
 func (p *Pool) withSFTPClient(ctx context.Context, host string, fn func(sftpClient *sftp.Client) error) error {
-	client, err := p.getClient(host)
+	sftpClient, err := p.newSFTPClient(ctx, host)
 	if err != nil {
 		return err
+	}
+	defer sftpClient.Close()
+
+	return fn(sftpClient)
+}
+
+// newSFTPClient dials and opens an SFTP session, retrying once with a fresh
+// connection when the cached SSH client is stale. The caller closes the result.
+func (p *Pool) newSFTPClient(ctx context.Context, host string) (*sftp.Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	client, err := p.getClient(host)
+	if err != nil {
+		return nil, err
 	}
 
 	sftpClient, err := sftp.NewClient(client)
@@ -56,20 +72,14 @@ func (p *Pool) withSFTPClient(ctx context.Context, host string, fn func(sftpClie
 		p.invalidateClient(host)
 		client, err = p.getClient(host)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		sftpClient, err = sftp.NewClient(client)
 		if err != nil {
-			return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
+			return nil, fmt.Errorf("failed to create sftp client on %s: %w", host, err)
 		}
 	}
-	defer sftpClient.Close()
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	return fn(sftpClient)
+	return sftpClient, nil
 }
 
 func copyFileWithSFTP(ctx context.Context, sftpClient *sftp.Client, localPath, remotePath string, mode os.FileMode) error {

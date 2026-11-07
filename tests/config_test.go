@@ -673,7 +673,10 @@ func TestConfig_HypervisorIPAndFenceCommands(t *testing.T) {
 	}
 
 	t.Run("derived fencing commands target the hypervisor", func(t *testing.T) {
-		off, state := cfg.FenceCommands()
+		off, state, err := cfg.FenceCommandsChecked()
+		if err != nil {
+			t.Fatalf("FenceCommandsChecked() error = %v", err)
+		}
 		for _, cmd := range []string{off, state} {
 			if !strings.Contains(cmd, "192.168.10.254") {
 				t.Errorf("derived fence command %q must target the hypervisor address", cmd)
@@ -693,7 +696,10 @@ func TestConfig_HypervisorIPAndFenceCommands(t *testing.T) {
 	t.Run("custom commands are returned verbatim", func(t *testing.T) {
 		cfg.DRBD.FenceCommand = "fence-off {domain}"
 		cfg.DRBD.FenceStateCommand = "fence-state {domain}"
-		off, state := cfg.FenceCommands()
+		off, state, err := cfg.FenceCommandsChecked()
+		if err != nil {
+			t.Fatalf("FenceCommandsChecked() error = %v", err)
+		}
 		if off != "fence-off {domain}" || state != "fence-state {domain}" {
 			t.Errorf("custom commands not returned verbatim: %q / %q", off, state)
 		}

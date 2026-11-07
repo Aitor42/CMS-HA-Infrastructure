@@ -340,7 +340,7 @@ security: ## Strict security scan (SECURITY_STRICT=0 permits missing local tools
 		echo "  ℹ govulncheck not installed — skipping (go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
 	fi
 	@if command -v gitleaks >/dev/null 2>&1; then \
-		gitleaks detect --source . --no-git --config .gitleaks.toml --redact --no-banner --exit-code 1; \
+		gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1; \
 	else \
 		echo "  ℹ gitleaks not installed — skipping (install v8.30.1 from GitHub releases)"; \
 	fi

@@ -10,6 +10,13 @@ a single `SHA256SUMS` file. Syft attaches an SBOM for each archive, and Cosign
 signs the checksum file with a short-lived keyless certificate (OIDC from
 GitHub Actions). No long-lived signing key is stored in the repository.
 
+> **Status on `ci/hosted-runner-lab` (2026-11-05).** The workflow exists in the
+> tree but has not run yet: the existing tags (`v1.0.0`, `v1.1.0`, `v2.1`)
+> predate it and there are no release runs. The same applies to the PXE/Cobbler
+> path: the only self-hosted integration run is cancelled. Validate both with a
+> pre-release tag before the first stable release; a merged workflow is not
+> evidence that its gate passes.
+
 ## Cut a release
 
 1. Review the target commit on `main` and record the applicable measurements

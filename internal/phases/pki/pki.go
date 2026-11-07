@@ -320,8 +320,14 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	}
 	// Wipe the CA-host copies as soon as they have been read: the key must only
 	// live on the balancers, including when the validation below rejects it.
+	// The cleanup must outlive a cancelled deploy, otherwise the private key is
+	// left behind on the jumpstart when the caller gives up mid-phase.
 	defer func() {
-		_, _, _, _ = p.pool.RunCommand(ctx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key")
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if _, _, _, err := p.pool.RunCommand(cleanupCtx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key"); err != nil {
+			logging.Warn("Failed to remove the load-balancer key material from %s: %v", jumpIP, err)
+		}
 	}()
 
 	// Never install a certificate the balancer cannot actually serve. step-ca

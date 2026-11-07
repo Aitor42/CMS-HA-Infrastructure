@@ -74,7 +74,10 @@ func TestFencingSecurityForcedHelper(t *testing.T) {
 
 func TestFencingSecurityPinnedSSHCommands(t *testing.T) {
 	cfg := &config.Config{Network: config.NetworkConfig{Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"}}}
-	off, state := cfg.FenceCommands()
+	off, state, err := cfg.FenceCommandsChecked()
+	if err != nil {
+		t.Fatalf("FenceCommandsChecked() error = %v", err)
+	}
 	for _, command := range []string{off, state} {
 		for _, want := range []string{"StrictHostKeyChecking=yes", "UserKnownHostsFile=/etc/drbd-fence/known_hosts", "GlobalKnownHostsFile=/etc/drbd-fence/known_hosts", "HostKeyAlias=192.168.10.254", "BatchMode=yes", "IdentitiesOnly=yes", "IdentityAgent=none", "ClearAllForwardings=yes", "UpdateHostKeys=no"} {
 			if !strings.Contains(command, want) {

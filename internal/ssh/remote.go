@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
-	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -27,29 +26,11 @@ func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, e
 		return []byte(out), nil
 	}
 
-	client, err := p.getClient(host)
+	sftpClient, err := p.newSFTPClient(ctx, host)
 	if err != nil {
 		return nil, err
-	}
-
-	sftpClient, err := sftp.NewClient(client)
-	if err != nil {
-		p.retryCount.Add(1)
-		p.invalidateClient(host)
-		client, err = p.getClient(host)
-		if err != nil {
-			return nil, err
-		}
-		sftpClient, err = sftp.NewClient(client)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create sftp client on %s: %w", host, err)
-		}
 	}
 	defer sftpClient.Close()
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 
 	file, err := sftpClient.Open(remotePath)
 	if err != nil {

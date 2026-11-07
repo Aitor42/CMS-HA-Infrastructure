@@ -2,7 +2,8 @@
 #
 # This is the topology the `Integration (KVM lab, hosted)` workflow deploys on a
 # standard GitHub-hosted runner (4 vCPU / 15 GiB RAM / ~86 GB disk with nested
-# KVM). It is byte-for-byte `config.yaml` except for three things:
+# KVM). It keeps the same topology as `config.yaml`; only the sizing, pacing
+# and secret fields listed below differ:
 #
 #   * `nodes.hotdesks.count` is 0 instead of 3. The three client workstations
 #     cost ~2.3 GB of RAM and 30 GB of disk, and the runner has to share its
@@ -20,6 +21,13 @@
 #     limit is compressed in RAM instead of thrashing the disk.
 #     `ram_final_mb` — what each node actually runs on, k3s included — is the
 #     same as in `config.yaml` and is never touched.
+#   * `deploy.stagger_delay` is 0s (5s in `config.yaml`),
+#     `deploy.puppet_concurrency` is 6 (auto in `config.yaml`, which derives 4
+#     on a 4 vCPU host), `deploy.install_batch_size` is 4 (0, meaning the
+#     documented batches, in `config.yaml`) and `deploy.node_install_timeout`
+#     is 25m (15m in `config.yaml`). The phases run against separate guests and
+#     the runner has only four vCPUs for the whole lab, so these values trade
+#     the reference host's pacing for the runner's.
 
 #   * the secret fields are left empty on purpose. The workflow fills them with
 #     freshly generated values into a throwaway `config.ci.local.yaml` (which is
@@ -261,9 +269,9 @@ deploy:
   # not need it.
   stagger_delay: 0s
   # Puppet catalogs are mostly guest-side work (apt, files, services). The
-  # measured initial catalog took 376s for ~1,255s of work at concurrency 4;
-  # 6 packs the same work into fewer waves without saturating the 4 vCPU
-  # puppetserver. Override per run with PUPPET_CONCURRENCY.
+  # measured first catalog took 376s for 1,953s of per-node work at concurrency
+  # 6, with the three heaviest nodes setting the floor. Override per run with
+  # PUPPET_CONCURRENCY.
   puppet_concurrency: 6
   # A hosted runner has 4 vCPU for the whole lab. Each installer saturates
   # about one vCPU, so a batch of five pays two rounds of ~8 minutes while the

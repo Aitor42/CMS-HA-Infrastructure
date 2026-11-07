@@ -411,7 +411,10 @@ func TestFenceCommandsCheckedReportsAccountLookupFailure(t *testing.T) {
 func TestFenceCommands(t *testing.T) {
 	t.Setenv("USER", "untrusted-environment-user")
 	c := &Config{Network: NetworkConfig{Internal: NetworkDetail{CIDR: "192.168.10.0/24"}}}
-	off, state := c.FenceCommands()
+	off, state, err := c.FenceCommandsChecked()
+	if err != nil {
+		t.Fatalf("FenceCommandsChecked() error = %v", err)
+	}
 	for _, command := range []string{off, state} {
 		for _, required := range []string{"StrictHostKeyChecking=yes", "UserKnownHostsFile=/etc/drbd-fence/known_hosts", "BatchMode=yes", "IdentitiesOnly=yes", "@192.168.10.254"} {
 			if !strings.Contains(command, required) {
@@ -430,8 +433,8 @@ func TestFenceCommands(t *testing.T) {
 
 	c.DRBD.FenceCommand = "poweroff {domain}"
 	c.DRBD.FenceStateCommand = "status {domain}"
-	if gotOff, gotState := c.FenceCommands(); gotOff != "poweroff {domain}" || gotState != "status {domain}" {
-		t.Fatalf("configured fence commands = %q, %q", gotOff, gotState)
+	if gotOff, gotState, err := c.FenceCommandsChecked(); err != nil || gotOff != "poweroff {domain}" || gotState != "status {domain}" {
+		t.Fatalf("configured fence commands = %q, %q (err %v)", gotOff, gotState, err)
 	}
 }
 

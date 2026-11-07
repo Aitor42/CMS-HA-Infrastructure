@@ -33,7 +33,7 @@ func TestDocumentationTracksPinnedVersions(t *testing.T) {
 	}
 
 	monitor := read("puppet/modules/role/manifests/monitor.pp")
-	grafana := regexp.MustCompile(`(?s)package\s*\{\s*'grafana'\s*:\s*ensure\s*=>\s*'([^']+)'`).FindStringSubmatch(monitor)
+	grafana := regexp.MustCompile(`(?m)^\s*\$grafana_version\s*=\s*'([^']+)'`).FindStringSubmatch(monitor)
 	if len(grafana) != 2 {
 		t.Fatal("could not parse the pinned Grafana package version")
 	}

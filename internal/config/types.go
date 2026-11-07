@@ -201,7 +201,7 @@ type DRBDConfig struct {
 	// FenceCommand powers off the peer. FenceStateCommand queries its state.
 	// Both are shell snippets in which the literal {domain} is replaced with
 	// the peer's libvirt domain name. Leave empty to auto-derive an SSH+virsh
-	// command against the hypervisor (FenceCommands does this).
+	// command against the hypervisor (FenceCommandsChecked does this).
 	FenceCommand      string `yaml:"fence_command"`
 	FenceStateCommand string `yaml:"fence_state_command"`
 }

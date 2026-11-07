@@ -14,8 +14,8 @@ func testConfig() *config.Config {
 	cfg := &config.Config{}
 	cfg.Network.Internal.CIDR = "192.168.10.0/24"
 	cfg.Backup.Engine = "garage"
-	cfg.Backup.AccessKey = "access"
-	cfg.Backup.SecretKey = "secret"
+	cfg.Backup.AccessKey = "test-access-key"
+	cfg.Backup.SecretKey = "test-secret-key"
 	return cfg
 }
 
@@ -164,8 +164,8 @@ func TestWriteGarageEnvIsPrivateAndLineSafe(t *testing.T) {
 		t.Fatalf("failed to read the env file: %v", err)
 	}
 	for _, want := range []string{
-		"GARAGE_DEFAULT_ACCESS_KEY=access",
-		"GARAGE_DEFAULT_SECRET_KEY=secret",
+		"GARAGE_DEFAULT_ACCESS_KEY=test-access-key",
+		"GARAGE_DEFAULT_SECRET_KEY=test-secret-key",
 		"GARAGE_DEFAULT_BUCKET=cms-backups",
 	} {
 		if !strings.Contains(string(content), want) {
@@ -205,7 +205,7 @@ func TestEnsureBucketGrantsAccessAndFailsWhenItCannot(t *testing.T) {
 	}
 	// Garage names the default key exactly after GARAGE_DEFAULT_ACCESS_KEY;
 	// "default" is not a key it ever creates.
-	if !strings.Contains(log, "--key access") {
+	if !strings.Contains(log, "--key test-access-key") {
 		t.Errorf("ensureBucket did not grant the configured access key:\n%s", log)
 	}
 	if strings.Contains(log, "--key default") {

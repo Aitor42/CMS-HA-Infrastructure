@@ -156,9 +156,14 @@ class role::monitor {
     notify  => Exec['grafana-apt-update'],
   }
 
+  # Refresh the Grafana index whenever the installed version is not the pinned
+  # one. Checking only that the package is present made a pin change install
+  # from a stale index (or fail because the version was not in it yet).
+  $grafana_version = '13.2.4'
+
   exec { 'grafana-apt-update':
     command => '/usr/bin/apt-get update',
-    unless  => '/usr/bin/dpkg -s grafana >/dev/null 2>&1',
+    unless  => "/bin/bash -c 'v=\$(/usr/bin/dpkg-query -W grafana 2>/dev/null | /usr/bin/cut -f2); [ \"\$v\" = \"${grafana_version}\" ]'",
     require => File['/etc/apt/sources.list.d/grafana.list'],
   }
 
@@ -166,7 +171,7 @@ class role::monitor {
   # channel, and an unpinned package makes deploys non-reproducible. Update
   # this version together with docs/SOFTWARE_BASELINE.md.
   package { 'grafana':
-    ensure  => '13.2.4',
+    ensure  => $grafana_version,
     require => Exec['grafana-apt-update'],
   }
 

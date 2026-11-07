@@ -600,11 +600,11 @@ The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pul
 | Shell Lint | ShellCheck + `bash -n` | All `.sh` scripts |
 | YAML Lint | yamllint | Kubernetes manifests, monitoring configs |
 | K8s Validation | Kustomize + kubeconform | Non-empty rendered manifests against v1.29 schemas; invalid, errored or skipped resources fail |
-| Puppet Lint | puppet-lint | All `.pp` manifests |
+| Puppet Lint | puppet-lint + `puppet parser validate` | All `.pp` manifests |
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
 | Security Scan | gosec + govulncheck + Gitleaks + Trivy | Go SAST, dependency CVEs, committed secrets, secrets/misconfig |
 | Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + 5 failover scenarios (manual dispatch) |
-| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (nightly cloud, release PXE, manual dispatch) |
+| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (push to `main`, nightly cloud, release PXE, manual dispatch) |
 | Release | CI + ISO/PXE integration + GoReleaser + Syft + Cosign | Tag `v*`: CI and full PXE gate on the tagged SHA before publication; archives, checksums, SBOMs and keyless signature (see `docs/RELEASING.md`) |
 
 ---

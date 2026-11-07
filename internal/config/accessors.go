@@ -130,19 +130,12 @@ func (c *Config) HypervisorIP() string {
 	return last
 }
 
-// FenceCommands returns the (power-off, state-query) fencing commands. When the
-// config leaves them empty it derives an SSH+virsh command against the
+// FenceCommandsChecked returns the (power-off, state-query) fencing commands.
+// When the config leaves them empty it derives an SSH+virsh command against the
 // hypervisor as the current OS account; the literal "{domain}" placeholder is kept
-// for the caller to substitute. Callers that can surface an error should use
-// FenceCommandsChecked.
-func (c *Config) FenceCommands() (off, state string) {
-	off, state, _ = c.FenceCommandsChecked()
-	return off, state
-}
-
-// FenceCommandsChecked is FenceCommands with the OS account lookup error
-// surfaced. A derived command with an empty user would silently fail at
-// failover time, when it is too late to notice.
+// for the caller to substitute. The OS account lookup error is surfaced: a
+// derived command with an empty user would silently fail at failover time, when
+// it is too late to notice.
 func (c *Config) FenceCommandsChecked() (off, state string, err error) {
 	if c.DRBD.FenceCommand != "" && c.DRBD.FenceStateCommand != "" {
 		return c.DRBD.FenceCommand, c.DRBD.FenceStateCommand, nil

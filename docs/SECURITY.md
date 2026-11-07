@@ -75,7 +75,7 @@ runs:
 |------|-------|------|
 | **gosec** | Go SAST (HIGH severity, MEDIUM confidence) | **Blocking** — build fails on any HIGH finding |
 | **govulncheck** | Reachable vulnerabilities in dependencies | **Blocking** |
-| **Gitleaks** | Current working-tree files (`--no-git`, `.gitleaks.toml`); not Git history | **Blocking** — any finding |
+| **Gitleaks** | Full Git history and working tree (`.gitleaks.toml`) | **Blocking** — any finding |
 | **Trivy** (`vuln,secret`) | Filesystem CVEs and leaked secrets; vulnerabilities without a fix are excluded by `--ignore-unfixed` | **Blocking** — HIGH/CRITICAL |
 | **Trivy** (`misconfig`) | Kubernetes manifest posture | Report only (see *Accepted risks*) |
 
@@ -278,8 +278,16 @@ operator workstation; the old key is the only way to recover the old config.
 `gitleaks` runs in CI and can be run locally with the same configuration:
 
 ```bash
-gitleaks detect --source . --no-git --config .gitleaks.toml --redact --exit-code 1
+gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1
 ```
+
+The scan covers Git history, not only the working tree. `.gitleaks.toml` keeps
+three narrowly scoped allowlists for findings that cannot be fixed by editing
+the current tree: the old Grafana diagnostic that passed a password in `curl`
+argv, a test fixture with placeholder Garage keys, and the MariaDB lab Secret
+removed in `2701369`. The last one was a real lab credential: the values are not
+in the current tree or configuration, but they must be treated as compromised
+and never reused. A new secret anywhere else still fails the gate.
 
 ### Puppet certificate signing
 

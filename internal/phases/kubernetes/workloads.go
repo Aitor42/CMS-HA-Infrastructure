@@ -123,7 +123,12 @@ func (p *Phase) applyGeneratedManifests(ctx context.Context, master1 config.Node
 	if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", secretPath), "apply MariaDB Secret"); err != nil {
 		return err
 	}
-	_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", secretPath))
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	_, _, _, rmErr := p.pool.RunCommand(cleanupCtx, master1.IP, fmt.Sprintf("rm -f %s", secretPath))
+	cancel()
+	if rmErr != nil {
+		return fmt.Errorf("failed to remove generated MariaDB Secret manifest %s: %w", secretPath, rmErr)
+	}
 
 	if backupsOn {
 		if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupConfigPath), "apply backup ConfigMap"); err != nil {
@@ -132,7 +137,12 @@ func (p *Phase) applyGeneratedManifests(ctx context.Context, master1 config.Node
 		if err := runCheckedRetry(ctx, p.pool, master1.IP, fmt.Sprintf("kubectl apply -f %s", backupSecretPath), "apply backup Secret"); err != nil {
 			return err
 		}
-		_, _, _, _ = p.pool.RunCommand(ctx, master1.IP, fmt.Sprintf("rm -f %s", backupSecretPath))
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		_, _, _, rmErr := p.pool.RunCommand(cleanupCtx, master1.IP, fmt.Sprintf("rm -f %s", backupSecretPath))
+		cancel()
+		if rmErr != nil {
+			return fmt.Errorf("failed to remove generated backup Secret manifest %s: %w", backupSecretPath, rmErr)
+		}
 	}
 	return nil
 }

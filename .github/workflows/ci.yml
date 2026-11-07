@@ -22,6 +22,7 @@ env:
   ANSIBLE_CORE_VERSION: "2.21.5"
   ANSIBLE_LINT_VERSION: "26.10.1"
   PUPPET_LINT_VERSION: "5.1.1"
+  PUPPET_VERSION: "8.10.0"
   ACTIONLINT_VERSION: "v1.7.12"
   GITLEAKS_VERSION: "8.30.1"
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
@@ -240,6 +241,9 @@ jobs:
       - name: Install puppet-lint
         run: gem install puppet-lint --version "${PUPPET_LINT_VERSION}"
 
+      - name: Install Puppet (parser)
+        run: gem install puppet --version "${PUPPET_VERSION}" --no-document
+
       - name: Lint Puppet manifests
         run: |
           find puppet/ -name "*.pp" -exec puppet-lint \
@@ -247,6 +251,10 @@ jobs:
             --no-documentation-check \
             --no-autoloader_layout-check \
             {} +
+
+      - name: Validate Puppet syntax
+        run: |
+          find puppet/ -name "*.pp" -print0 | xargs -0 -n1 puppet parser validate
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 6. Ansible Validation (ansible-lint + playbook syntax check)
@@ -270,6 +278,13 @@ jobs:
           pip install \
             "ansible-core==${ANSIBLE_CORE_VERSION}" \
             "ansible-lint==${ANSIBLE_LINT_VERSION}"
+
+      - name: Require exact collection versions
+        run: |
+          if grep -nE '^[[:space:]]*version:[[:space:]]*"?[^"]*[><=~^*]' ansible/requirements.yml; then
+            echo "::error::ansible/requirements.yml must pin exact collection versions"
+            exit 1
+          fi
 
       - name: Install required collections
         run: ansible-galaxy collection install -r ansible/requirements.yml
@@ -304,6 +319,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          # gitleaks scans Git history; a shallow clone would hide it.
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
@@ -340,7 +357,7 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar xz -C /usr/local/bin -f /tmp/gitleaks.tar.gz gitleaks
-          gitleaks detect --source . --no-git --config .gitleaks.toml --redact --no-banner --exit-code 1
+          gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1
 
       - name: Trivy — dependencies & secrets (BLOCKING on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
