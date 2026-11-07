@@ -1,6 +1,6 @@
 module github.com/Aitor42/CMS-HA-Infrastructure
 
-go 1.26.0
+go 1.26.10
 
 require (
 	filippo.io/age v1.3.1

@@ -53,7 +53,7 @@ func backoffInterval(cfg Config, attempt int) time.Duration {
 	return interval
 }
 
-// Do executes fn and retries it until it returns nil or the limits in cfg are reached.
+// Do executes fn until it succeeds or the retry limits in cfg are reached.
 func Do(ctx context.Context, cfg Config, fn func() error) error {
 	return DoContext(ctx, cfg, func(context.Context) error { return fn() })
 }
@@ -96,14 +96,13 @@ func DoContext(ctx context.Context, cfg Config, fn func(context.Context) error) 
 			timer.Stop()
 			return fmt.Errorf("retry context cancelled: %w (last error: %v)", ctx.Err(), lastErr)
 		case <-timer.C:
-			// backoff elapsed; retry the operation
 		}
 	}
 
 	return fmt.Errorf("max attempts (%d) reached: %w", cfg.MaxAttempts, lastErr)
 }
 
-// Poll executes fn and retries until fn returns (true, nil) or the limits in cfg are reached.
+// Poll executes fn until it reports success or the retry limits in cfg are reached.
 func Poll(ctx context.Context, cfg Config, fn func() (bool, error)) error {
 	return PollContext(ctx, cfg, func(context.Context) (bool, error) { return fn() })
 }
@@ -146,9 +145,29 @@ func PollContext(ctx context.Context, cfg Config, fn func(context.Context) (bool
 			timer.Stop()
 			return fmt.Errorf("poll context cancelled: %w", ctx.Err())
 		case <-timer.C:
-			// backoff elapsed; re-check the condition
 		}
 	}
 
 	return fmt.Errorf("poll max attempts (%d) reached without success", cfg.MaxAttempts)
+}
+
+// Wait polls fn until it returns true, ctx is cancelled or timeout elapses.
+// It is the boolean variant of Poll for callers that only need to know whether
+// the condition was observed, such as failover and drill scenarios.
+//
+// The attempt count reproduces a deadline loop: the first probe runs at once,
+// then one probe per interval, plus one final probe that may land just past the
+// deadline.
+func Wait(ctx context.Context, timeout, interval time.Duration, fn func() bool) bool {
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	attempts := int(timeout/interval) + 2
+	if attempts < 1 {
+		attempts = 1
+	}
+	err := PollContext(ctx, Config{MaxAttempts: attempts, Interval: interval}, func(context.Context) (bool, error) {
+		return fn(), nil
+	})
+	return err == nil
 }

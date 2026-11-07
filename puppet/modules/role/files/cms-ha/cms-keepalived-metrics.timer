@@ -1,0 +1,11 @@
+[Unit]
+Description=Publish keepalived VIP ownership to node_exporter every minute
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=1min
+AccuracySec=1s
+Unit=cms-keepalived-metrics.service
+
+[Install]
+WantedBy=timers.target

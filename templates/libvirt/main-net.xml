@@ -1,5 +1,5 @@
 <network>
   <name>main</name>
-  <bridge name='virbr-main' stp='on' delay='0'/>
-  <domain name='main.local'/>
+  <bridge name='{{BRIDGE}}' stp='on' delay='0'/>
+  <domain name='{{DOMAIN}}'/>
 </network>

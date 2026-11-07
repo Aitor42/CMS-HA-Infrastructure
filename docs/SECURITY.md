@@ -75,19 +75,100 @@ runs:
 |------|-------|------|
 | **gosec** | Go SAST (HIGH severity, MEDIUM confidence) | **Blocking** — build fails on any HIGH finding |
 | **govulncheck** | Reachable vulnerabilities in dependencies | **Blocking** |
-| **Trivy** (`vuln,secret`) | Filesystem CVEs and leaked secrets | **Blocking** — HIGH/CRITICAL |
+| **Gitleaks** | Full Git history and working tree (`.gitleaks.toml`) | **Blocking** — any finding |
+| **Trivy** (`vuln,secret`) | Filesystem CVEs and leaked secrets; vulnerabilities without a fix are excluded by `--ignore-unfixed` | **Blocking** — HIGH/CRITICAL |
 | **Trivy** (`misconfig`) | Kubernetes manifest posture | Report only (see *Accepted risks*) |
 
-gosec results are also uploaded as SARIF to GitHub code scanning.
+gosec results are also uploaded as SARIF to GitHub code scanning. These
+filesystem/dependency checks do not scan the live guest OS or prove that all
+deployed container images are vulnerability-free.
 
-Dependency fixes are applied when the scans find reachable issues, e.g.
-`golang.org/x/crypto` was bumped to **v0.56.0** to clear
-GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`). `go.mod` therefore
-requires Go **1.26**.
+`make security` requires every scanner by default and propagates blocking
+failures. `SECURITY_STRICT=0` permits missing tools for local exploration only;
+a partial scan is not a clean security result. Neither mode makes Kubernetes
+misconfiguration findings blocking.
+
+### CI supply chain
+
+- Workflows default to `permissions: contents: read`. The security job uses
+  `security-events: write` for SARIF; release publication separately grants
+  `contents: write` and `id-token: write` for publishing and keyless signing.
+  Checkout does not persist `GITHUB_TOKEN` in the repository's Git config
+  (`persist-credentials: false`).
+- Every action is pinned to a **commit SHA**, not a mutable tag. Dependabot
+  (`.github/dependabot.yml`) updates both Go modules and the pinned Actions
+  weekly.
+- Hosted integration artifacts are retained for **30 days**; self-hosted
+  integration artifacts for **7 days**. They include diagnostics and guest
+  console captures: sanitize them before sharing and archive release evidence
+  separately if it must outlive that retention period.
+- The hosted runner grants `/dev/kvm` and the libvirt socket to the runner user
+  with **ACLs** where the filesystem supports them (owner/group-scoped
+  fallback otherwise); it no longer makes either world-writable
+  (`chmod 0666/0777`). Diagnostics SSH probes verify the pinned host keys
+  instead of disabling host-key checking.
+
+Dependencies are kept current: `golang.org/x/crypto` is pinned at **v0.56.0**
+or newer, which clears GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`).
+`go.mod` requires Go **1.26**.
 
 ---
 
-## 4. Accepted risks
+## 4. PHP runtime patching (CVE-2026-109618 / CVE-2026-109619)
+
+On **2026-10-21** the PHP project published two unauthenticated remote code
+executions in the PHP core, tracked as **CVE-2026-109618** (memory corruption
+when an out-of-memory bailout interrupts a request) and **CVE-2026-109619**
+(stale global state left behind by a fatal error). The pair is known as
+*"php2shell"* and is rated **CVSS 9.2**. Every PHP that answers web requests
+is affected — PHP-FPM, Apache with `mod_php`, `php-cgi`, FrankenPHP and
+LiteSpeed — and the PHP team considers **`mod_php` the highest-risk setup**,
+because a single unauthenticated request can trigger the bug before any
+application code runs.
+
+The CMS frontends are exactly that setup: Apache 2.4 with `mod_php` serving
+WordPress, reachable through the nginx VIP.
+
+### The fix
+
+| Layer | What it does |
+|-------|--------------|
+| **Package (the fix)** | `role::cms_frontend` pins `php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3` to **≥ 8.3.6-0ubuntu0.24.04.13**, the Ubuntu Noble revision that carries `CVE-2026-109618_109619.patch`. Ubuntu backports the upstream patch instead of bumping the upstream version, so a patched node still answers `PHP 8.3.6`: the Debian revision is what tells the two apart. A guarded `apt-get update` (skipped once every pinned package satisfies the floor) makes the patched release visible before the packages are resolved. |
+| **PHP ini** | `/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini` sets `session.upload_progress.enabled = Off`. The Apache SAPI reads it at startup, so it is in place *before* the request is parsed — the PHP team asks for exactly this, and not for `ini_set()` (too late) nor for a `.user.ini` (per request). It closes the session path CVE-2026-109619 was confirmed with. |
+| **Apache** | `/etc/apache2/conf-enabled/php-hardening.conf` sets `php_admin_value memory_limit 128M`, `php_admin_flag session.upload_progress.enabled Off`, `post_max_size 32M`, `upload_max_filesize 16M` and `LimitRequestBody 33554432`. Prefork concurrency is limited to four workers in `mpm_prefork.conf`. These are resource safeguards, not substitutes for patched packages. |
+| **nginx** | `client_max_body_size 32m` bounds the request body at the proxy. Request size does not bound PHP execution memory: decoding, application work and concurrency can amplify consumption. |
+
+The package upgrade remains mandatory. Finite memory/concurrency limits and
+request-body limits protect lab resources; they must not be described as a
+replacement for the security patch or a total-memory guarantee.
+
+### Proving it
+
+`cms-ha verify` asks every frontend for the installed revision of
+`php8.3-cli`, `php8.3-common` and `libapache2-mod-php8.3`, for whether Apache
+loads `mod_php`, and for the mitigations, and **fails the phase** when any
+pinned package is older than the floor or a mitigation is missing
+(`internal/verify/verify_functional.go`, `checkPHPSecurityPatch`). Checking the
+Apache SAPI as well as the CLI matters: a patched CLI alone would leave
+`mod_php` serving the vulnerable library. The version comparison is delegated
+to `dpkg --compare-versions` on the node itself, so the answer follows
+Debian's own version rules.
+
+### Keeping it patched
+
+The floor lives in three places that have to move together when the next PHP
+security update lands (`TestPHPPatchFloorIsInSyncWithPuppet` fails if the
+Puppet and Go copies drift):
+
+| Where | What to change |
+|-------|----------------|
+| `puppet/modules/role/manifests/cms_frontend.pp` | `$php_patched_version` |
+| `internal/verify/verify_functional.go` | `phpPatchedPackage` |
+| `docs/SOFTWARE_BASELINE.md` | the *PHP Engine* row |
+
+---
+
+## 5. Accepted risks
 
 These are known and tracked; each is either a deliberate trade-off or a
 follow-up that needs a live cluster to validate safely.
@@ -96,21 +177,56 @@ follow-up that needs a live cluster to validate safely.
    *No direct root access*). Mitigated by the dedicated account, key-only auth,
    disabled root logins and sudo logging.
 2. **Kubernetes `misconfig` HIGH findings (Trivy `KSV-0014`, `KSV-0118`)** on
-   the MariaDB StatefulSet and the backup/restore CronJobs. The official
-   `mariadb` image needs a **writable root filesystem** and a **root
-   entrypoint** (it chowns the datadir and then drops to `mysql`), so
-   `readOnlyRootFilesystem: true` / `runAsNonRoot: true` cannot be added
+   the MariaDB StatefulSet, the database-init Job and the backup/restore
+   CronJobs. The official `mariadb` image needs a **writable root filesystem**
+   and a **root entrypoint** (it chowns the datadir and then drops to `mysql`),
+   so `readOnlyRootFilesystem: true` / `runAsNonRoot: true` cannot be added
    safely without a live cluster to validate the datadir ownership and the
-   emptyDir mounts. The scan stays **enabled and visible** (report-only) so the
-   debt is not hidden; hardening is a follow-up to be done against real
-   hardware.
-3. **fence SSH key** on the DRBD masters targets the hypervisor's **operator
-   account** (not root) and is scoped to `virsh` lifecycle calls; it is a
-   separate trust path from the VM deploy account.
+   emptyDir mounts. The upload/restore containers also write a root-owned
+   node-exporter textfile, so they run as root by design. The scan stays
+   **enabled and visible** (report-only) so the debt is not hidden; hardening
+   is a follow-up to be done against real hardware. Trivy also scans
+   `kubernetes/overlays/lab/mariadb-labels.patch.yaml` as if it were a complete
+   StatefulSet; that `KSV-0118` is a partial-file false positive, because the
+   real security context would be inherited from the base manifest the patch
+   overlays.
+3. **Prometheus RBAC is deliberately minimal.** The ClusterRole grants only
+   `get` on `nodes/metrics` plus the `/metrics` non-resource URL. It does not
+   grant `nodes/proxy`, pod/service/endpoint discovery or any write access:
+   Prometheus uses static targets and talks to the kubelet directly on `:10250`.
+4. **Fencing trust path.** The automatic path authenticates as the current OS
+   account on the hypervisor. Its dedicated key has a forced command and
+   forwarding/PTY restrictions; only exact `destroy`/`domstate` requests for
+   the two DRBD peers are allowed (not the third quorum-only master). Host keys are pinned from trusted local
+   sshd public keys, distributed to the masters and checked strictly. Existing
+   sudo rights are still required; a dedicated account and narrow sudo policy
+   remain recommended deployment-specific hardening. Custom commands are not
+   covered by the automatic restrictions. See the [fencing migration procedure](MANUAL.md#71-master-1-failure-drbdk3s-primary).
+5. **Resource limits are not a complete DoS defense.** PHP is limited to 128M
+   per request and Apache prefork to four workers. Native allocations, other
+   services and workload behavior still need measurement. Package patching is
+   required regardless of those limits; HTTP body size does not bound memory.
+6. **VM disk images are mode `0600` and rely on libvirt dynamic ownership.**
+   The deploy account and the qemu account are different users. The init-vms
+   preflight reads `/etc/libvirt/qemu.conf` and fails if `dynamic_ownership` is
+   explicitly disabled; libvirt then chowns each disk to qemu when the domain
+   starts, without world-readable or world-writable files. The init-vms
+   preflight also applies a default ACL scoped to the qemu account on
+   `vm.storage_dir`, so disks created by `virt-install` inherit the same
+   protection. A multi-user host that cannot use dynamic ownership must
+   replace this with an ACL scoped to the qemu account.
+7. **K3s still uses the upstream `https://get.k3s.io` setup script.** The
+   binary itself is now pinned to `v1.29.9+k3s1`, downloaded directly from the
+   release, verified against a SHA-256 in the repository, and installed before
+   the script runs; `INSTALL_K3S_SKIP_DOWNLOAD=true` prevents the script from
+   resolving a different patch. The remaining risk is the setup script itself
+   (systemd unit, symlinks and uninstall metadata), which is fetched over TLS
+   and executed as root; replacing it with a vendored unit is a follow-up that
+   needs a live upgrade test.
 
 ---
 
-## 5. Configuring
+## 6. Configuring
 
 ```yaml
 ssh:
@@ -124,18 +240,73 @@ the Ansible inventory (`ansible_user` + `ansible_become`) and the SSH pool.
 
 ---
 
-## 6. Secrets management (SOPS / ExternalSecrets)
+## 7. Secrets management (SOPS / ExternalSecrets)
 
 SOPS and the ExternalSecrets operator were evaluated but are **not adopted** in
 the current design:
 
 - **Host secrets** (`config.yaml` service passwords, `backup.secret_key`) are
   `age`-encrypted on first load, with the identity kept outside the repository.
+  The private key must be `0600`; `cms-ha` refuses to use a key that is readable
+  by group or other.
 - **In-cluster secrets** (MariaDB credentials, `backup-secret`) are generated by
   the `kubernetes` phase from the decrypted `config.yaml` and applied only to
   the cluster — they are never committed.
+- **Grafana's admin password** is generated on the first deployment by the
+  monitoring phase (256 bits, URL-safe) and written to
+  `/etc/grafana/grafana-admin.env` on the monitor node (root:grafana, 0640).
+  Later runs reuse that value instead of rotating it, so the password the
+  operator stored keeps working. The monitoring phase also runs
+  `grafana cli admin reset-admin-password`, so the default `admin/admin` does
+  not survive a deployment or a re-run. Setting
+  `monitoring.grafana_admin_password` in `config.yaml` overrides the generated
+  value and is encrypted by `cms-ha secrets encrypt`.
 - **Certificates** are issued by the internal step-ca and distributed by the
   orchestrator; no long-lived private material lives in the repository.
+
+### Rotating the age identity
+
+`cms-ha secrets rotate` re-encrypts every secret field with a new age identity:
+
+```bash
+# Generate a new keypair and install it at ~/.config/cms-ha/age.key
+cms-ha secrets rotate
+
+# Or use an existing private key (for example, from a team key store)
+cms-ha secrets rotate --new-key /secure/team.age.key
+```
+
+The command writes `config.yaml.bak-<timestamp>` before touching the config and
+keeps the previous default key as `age.key.bak-<timestamp>`. A failed decrypt
+aborts before the config is replaced. This rotates **encryption at rest**, not
+the service passwords themselves: rotate MariaDB, WordPress and CA credentials
+with their own procedures (see `docs/MANUAL.md`), then re-run the affected
+phases. Keep the timestamped backups until the new key is verified on every
+operator workstation; the old key is the only way to recover the old config.
+
+`gitleaks` runs in CI and can be run locally with the same configuration:
+
+```bash
+gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1
+```
+
+The scan covers Git history, not only the working tree. `.gitleaks.toml` keeps
+three narrowly scoped allowlists for findings that cannot be fixed by editing
+the current tree: the old Grafana diagnostic that passed a password in `curl`
+argv, a test fixture with placeholder Garage keys, and the MariaDB lab Secret
+removed in `2701369`. The last one was a real lab credential: the values are not
+in the current tree or configuration, but they must be treated as compromised
+and never reused. A new secret anywhere else still fails the gate.
+
+### Puppet certificate signing
+
+The Puppet server does **not** autosign the whole `*.internal.local` and
+`*.main.local` domains. The phase writes `/etc/puppetlabs/puppet/autosign.conf`
+with the exact FQDNs from the configured topology immediately before the agents
+request certificates. A host that is not in the configuration cannot obtain a
+signed catalog, even if it can reach the server. `templates/puppet/autosign.conf`
+is wildcard-free as well; it requires explicit signing if anyone uses that
+legacy template.
 
 Introducing SOPS (git-level encryption) or ExternalSecrets (vault-driven) would
 add an operator dependency without removing the files we already keep out of

@@ -3,21 +3,27 @@ package tests
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
 func TestTemplates_EmbeddedNetworkXML(t *testing.T) {
+	// The bridge and domain are rendered from config.yaml at deploy time, so
+	// the embedded files keep placeholders; a hardcoded value here would make
+	// network.*.bridge and network.*.domain silently ineffective.
 	nets := []struct {
 		file   string
 		bridge string
 		domain string
 	}{
-		{"templates/libvirt/internal-net.xml", "virbr-int", "internal.local"},
-		{"templates/libvirt/main-net.xml", "virbr-main", "main.local"},
+		{"templates/libvirt/internal-net.xml", "{{BRIDGE}}", "{{DOMAIN}}"},
+		{"templates/libvirt/main-net.xml", "{{BRIDGE}}", "{{DOMAIN}}"},
 	}
 
 	for _, n := range nets {
@@ -31,10 +37,10 @@ func TestTemplates_EmbeddedNetworkXML(t *testing.T) {
 				t.Errorf("template %s must enable STP (stp='on') for loop prevention", n.file)
 			}
 			if !strings.Contains(content, fmt.Sprintf("bridge name='%s'", n.bridge)) {
-				t.Errorf("template %s missing expected bridge %s", n.file, n.bridge)
+				t.Errorf("template %s missing the bridge placeholder", n.file)
 			}
 			if !strings.Contains(content, fmt.Sprintf("domain name='%s'", n.domain)) {
-				t.Errorf("template %s missing expected domain %s", n.file, n.domain)
+				t.Errorf("template %s missing the domain placeholder", n.file)
 			}
 		})
 	}
@@ -62,6 +68,56 @@ func TestTemplates_EmbeddedCobblerAutoinstall(t *testing.T) {
 		if !strings.Contains(content, sec) {
 			t.Errorf("autoinstall template missing required directive: %s", sec)
 		}
+	}
+}
+
+func TestTemplates_CobblerRendersTheConfiguredNetwork(t *testing.T) {
+	// These files are rendered by internal/phases/cobbler before upload. A
+	// hardcoded lab address here would make network.*.cidr/gateway/domain in
+	// config.yaml silently ineffective on the PXE path.
+	files := map[string][]string{
+		"templates/cobbler/dhcp.template": {
+			"{{internal_network}}",
+			"{{internal_netmask}}",
+			"{{internal_gateway}}",
+			"{{internal_domain}}",
+			"{{internal_dhcp_start}}",
+			"{{internal_dhcp_end}}",
+			"{{jumpstart_ip}}",
+			"{{main_network}}",
+			"{{jumpstart_ip_main}}",
+		},
+		"templates/cobbler/settings-patch.py": {"{{jumpstart_ip}}"},
+		"templates/cobbler/ubuntu-24.04-autoinstall.yaml": {
+			"{{jumpstart_ip}}",
+			"{{jumpstart_ip_main}}",
+			"{{deploy_user}}",
+		},
+	}
+	for file, wants := range files {
+		data, err := cms.TemplatesFS.ReadFile(file)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", file, err)
+		}
+		content := string(data)
+		for _, want := range wants {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s is missing the %s placeholder", file, want)
+			}
+		}
+		for _, unwanted := range []string{"192.168.10.10", "192.168.20.10", "192.168.10.0/24", "192.168.20.0/24", "/target/home/ubuntu"} {
+			if strings.Contains(content, unwanted) {
+				t.Errorf("%s hardcodes the default lab value %s", file, unwanted)
+			}
+		}
+	}
+
+	named, err := cms.TemplatesFS.ReadFile("templates/cobbler/named.template")
+	if err != nil {
+		t.Fatalf("failed to read named.template: %v", err)
+	}
+	if strings.Contains(string(named), "172.20.32.3") {
+		t.Error("named.template must not forward to the hosted runner's private resolver")
 	}
 }
 
@@ -148,6 +204,45 @@ func TestTemplates_EmbeddedMonitoringConfigs(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("alert-rules.yml reads the metrics the exporters expose", func(t *testing.T) {
+		data, err := cms.TemplatesFS.ReadFile("templates/monitoring/alert-rules.yml")
+		if err != nil {
+			t.Fatalf("failed to read alert-rules.yml: %v", err)
+		}
+		rules := string(data)
+
+		// `up{job=...}` is the scrape health of the exporter, not of the
+		// service it monitors: nginx_up/mysql_up/apache_up stay 1 while the
+		// daemon is down. Assert the service metric is part of each alert.
+		for _, want := range []string{
+			"mysql_up == 0 or up{job=\"mysql\"} == 0",
+			"nginx_up == 0 or up{job=\"nginx\"} == 0",
+			"apache_up == 0 or up{job=\"apache\"} == 0",
+		} {
+			if !strings.Contains(rules, want) {
+				t.Errorf("alert-rules.yml does not check the service health metric: %q", want)
+			}
+		}
+
+		// blackbox exports probe_duration_seconds as a gauge (there is no
+		// _bucket series), and covers the frontend probes with a second job.
+		if strings.Contains(rules, "probe_duration_seconds_bucket") {
+			t.Error("alert-rules.yml uses the nonexistent probe_duration_seconds_bucket series")
+		}
+		if !strings.Contains(rules, `probe_duration_seconds{job=~"blackbox.*"}`) {
+			t.Error("ProbeLatencyHigh does not cover every blackbox job")
+		}
+		if !strings.Contains(rules, `probe_success{job=~"blackbox.*"}`) {
+			t.Error("BlackboxProbeFailed does not cover every blackbox job")
+		}
+		if !strings.Contains(rules, "probe_http_status_code") {
+			t.Error("the 5xx alert must use a status code the exporters actually expose")
+		}
+		if strings.Contains(rules, `nginx_http_requests_total{status`) {
+			t.Error("nginx_http_requests_total has no status label; the 5xx rate cannot be derived from it")
+		}
+	})
 }
 
 func TestTemplates_NoDuplicatedMonitoringConfig(t *testing.T) {
@@ -187,11 +282,293 @@ func TestTemplates_EmbeddedNginxConfig(t *testing.T) {
 	}
 }
 
+func TestTemplates_NginxConfigCopiesAreIdentical(t *testing.T) {
+	// templates/nginx/cms-lb.conf is embedded in the binary but only the
+	// Puppet fileserver copy is deployed. Keeping two hand-maintained copies
+	// meant an edit to the embedded one silently did nothing; fail loudly when
+	// they drift instead of relying on review.
+	embedded, err := cms.TemplatesFS.ReadFile("templates/nginx/cms-lb.conf")
+	if err != nil {
+		t.Fatalf("failed to read embedded cms-lb.conf: %v", err)
+	}
+	deployed, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/nginx/cms-lb.conf"))
+	if err != nil {
+		t.Fatalf("failed to read deployed cms-lb.conf: %v", err)
+	}
+	if string(embedded) != string(deployed) {
+		t.Error("templates/nginx/cms-lb.conf and the Puppet cms-lb.conf have drifted; the deployed copy is the one that matters")
+	}
+}
+
+// puppetStringParam returns the default of a `String $name = '...'` class
+// parameter from a Puppet manifest.
+func puppetStringParam(t *testing.T, manifest, name string) string {
+	t.Helper()
+	prefix := "String $" + name
+	for _, line := range strings.Split(manifest, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		_, value, ok := strings.Cut(line, "=")
+		if !ok {
+			t.Fatalf("cannot parse Puppet parameter %s from %q", name, line)
+		}
+		value = strings.TrimSpace(value)
+		value = strings.TrimSuffix(value, ",")
+		if len(value) < 2 || value[0] != '\'' || value[len(value)-1] != '\'' {
+			t.Fatalf("Puppet parameter %s is not a single-quoted string: %q", name, value)
+		}
+		return value[1 : len(value)-1]
+	}
+	t.Fatalf("Puppet parameter %s not found", name)
+	return ""
+}
+
+// TestTemplates_PuppetRolesReadTopologyFromHiera keeps the manifests free of
+// the default lab's addresses and account. The phase generates site.pp and
+// data/common.yaml from config.yaml; a role that hardcodes a CIDR, the deploy
+// user or a node address would silently keep the default topology on a custom
+// deployment (and, for the deploy user, undo the ssh.user fix).
+func TestTemplates_PuppetRolesReadTopologyFromHiera(t *testing.T) {
+	hiera, err := os.ReadFile(repoFile(t, "puppet/hiera.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read puppet/hiera.yaml: %v", err)
+	}
+	for _, want := range []string{"version: 5", "datadir: data", "path: \"common.yaml\""} {
+		if !strings.Contains(string(hiera), want) {
+			t.Errorf("puppet/hiera.yaml is missing %q", want)
+		}
+	}
+
+	raw, err := os.ReadFile(repoFile(t, "puppet/data/common.yaml"))
+	if err != nil {
+		t.Fatalf("failed to read puppet/data/common.yaml: %v", err)
+	}
+	var data map[string]string
+	if err := yaml.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("puppet/data/common.yaml is not valid YAML: %v", err)
+	}
+	for _, key := range []string{
+		"cms_ha::deploy_user",
+		"cms_ha::jumpstart_ip",
+		"cms_ha::jumpstart_ip_main",
+		"cms_ha::internal_cidr",
+		"cms_ha::main_cidr",
+		"cms_ha::main_vip",
+		"cms_ha::monitor_ip",
+		"cms_ha::storage_ip",
+		"cms_ha::hosts_content",
+	} {
+		if data[key] == "" {
+			t.Errorf("puppet/data/common.yaml is missing %s", key)
+		}
+	}
+
+	lookups := map[string][]string{
+		"base.pp":         {"cms_ha::deploy_user", "cms_ha::jumpstart_ip", "cms_ha::monitor_ip", "cms_ha::hosts_content"},
+		"jumpstart.pp":    {"cms_ha::internal_cidr", "cms_ha::main_cidr", "cms_ha::jumpstart_ip", "cms_ha::jumpstart_ip_main"},
+		"router.pp":       {"cms_ha::internal_cidr", "cms_ha::main_cidr", "cms_ha::main_vip", "cms_ha::monitor_ip"},
+		"storage.pp":      {"cms_ha::main_cidr"},
+		"cms_frontend.pp": {"cms_ha::storage_ip", "cms_ha::monitor_ip"},
+		"monitor.pp":      {"cms_ha::internal_cidr"},
+		"k3s_master.pp":   {"cms_ha::internal_cidr", "cms_ha::monitor_ip"},
+		"k3s_worker.pp":   {"cms_ha::internal_cidr"},
+		"loadbalancer.pp": {"cms_ha::main_cidr", "cms_ha::monitor_ip"},
+	}
+	for file, keys := range lookups {
+		content := string(mustRead(t, "puppet/modules/role/manifests/"+file))
+		for _, key := range keys {
+			if !strings.Contains(content, "lookup('"+key+"'") {
+				t.Errorf("%s does not read %s from Hiera", file, key)
+			}
+		}
+	}
+
+	forbidden := map[string][]string{
+		"base.pp": {
+			"Defaults:ubuntu",
+			"server 192.168.10.10",
+			"192.168.10.20   internal-monitor",
+		},
+		"jumpstart.pp":    {"allow in on enp1s0", "allow in on enp2s0", "allow from 192.168.10.0/24"},
+		"router.pp":       {"from 192.168.20.0/24 to any", "to 192.168.20.100 port", "from 192.168.10.20"},
+		"storage.pp":      {"/srv/nfs/wp-uploads 192.168.20.0/24", "from 192.168.20.0/24 to any"},
+		"cms_frontend.pp": {"device  => '192.168.10.15:", "from 192.168.10.20 to any port 9117"},
+		"monitor.pp":      {"from 192.168.10.0/24"},
+		"k3s_master.pp":   {"from 192.168.10.0/24", "from 192.168.10.20"},
+		"k3s_worker.pp":   {"from 192.168.10.0/24"},
+		"loadbalancer.pp": {
+			"$lb_is_master = $facts['networking']['hostname']",
+			"${vip}/24",
+			"from 192.168.10.20 to any port 9113",
+			"from 192.168.20.0/24 proto vrrp",
+		},
+	}
+	for file, needles := range forbidden {
+		content := string(mustRead(t, "puppet/modules/role/manifests/"+file))
+		for _, needle := range needles {
+			if strings.Contains(content, needle) {
+				t.Errorf("%s still hardcodes %q instead of reading the generated topology", file, needle)
+			}
+		}
+	}
+
+	// The keepalived MASTER must follow the configured LB order, not the
+	// default "main-lb1" hostname.
+	lb := string(mustRead(t, "puppet/modules/role/manifests/loadbalancer.pp"))
+	for _, want := range []string{"Boolean $is_master", "$lb_is_master = $is_master"} {
+		if !strings.Contains(lb, want) {
+			t.Errorf("loadbalancer.pp is missing %q", want)
+		}
+	}
+}
+
+func mustRead(t *testing.T, rel string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(repoFile(t, rel))
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", rel, err)
+	}
+	return data
+}
+
+func TestTemplates_NginxConfigMatchesLabConfig(t *testing.T) {
+	// The vhost, upstream pool and keepalived addresses are duplicated in
+	// Puppet because it has no access to config.yaml. Pin the copies to both
+	// shipped configurations so a topology edit cannot leave nginx proxying to
+	// an address that no longer exists.
+	conf, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/nginx/cms-lb.conf"))
+	if err != nil {
+		t.Fatalf("failed to read cms-lb.conf: %v", err)
+	}
+	manifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/loadbalancer.pp"))
+	if err != nil {
+		t.Fatalf("failed to read loadbalancer.pp: %v", err)
+	}
+	pp := string(manifest)
+
+	for _, path := range []string{"config.yaml", "config.ci.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			cfg, err := config.Load(repoFile(t, path))
+			if err != nil {
+				t.Fatalf("load %s: %v", path, err)
+			}
+			if len(cfg.Nodes.CMSFrontends) == 0 || len(cfg.Nodes.LBs) < 2 {
+				t.Fatalf("%s does not define the expected frontends/balancers", path)
+			}
+			vhost := cfg.TrafficVHost()
+			for _, cmsNode := range cfg.Nodes.CMSFrontends {
+				if !strings.Contains(string(conf), "server "+cmsNode.IP+" ") {
+					t.Errorf("cms-lb.conf has no upstream for %s (%s)", cmsNode.Name, cmsNode.IP)
+				}
+			}
+			if !strings.Contains(string(conf), "server_name "+vhost+";") {
+				t.Errorf("cms-lb.conf does not serve the configured vhost %q", vhost)
+			}
+
+			want := map[string]string{
+				"cms_vhost": vhost,
+				"vip":       cfg.LBVIP(),
+				"master_ip": cfg.Nodes.LBs[0].IP,
+				"backup_ip": cfg.Nodes.LBs[1].IP,
+			}
+			for name, value := range want {
+				if got := puppetStringParam(t, pp, name); got != value {
+					t.Errorf("role::loadbalancer $%s = %q, want %q from %s", name, got, value, path)
+				}
+			}
+		})
+	}
+
+	// The bootstrap certificate is what nginx serves before the PKI phase, so
+	// it must cover the same names as the CA-issued certificate; otherwise the
+	// nginx phase's HTTPS probe would be the only thing that ever noticed.
+	if !strings.Contains(pp, "subjectAltName=DNS:${cms_vhost},IP:${vip},IP:${master_ip},IP:${backup_ip}") {
+		t.Error("the bootstrap certificate does not include the vhost, VIP and balancer SANs")
+	}
+}
+
+func TestTemplates_KeepalivedMetricsUsesTheConfiguredVIP(t *testing.T) {
+	service, err := os.ReadFile(repoFile(t, "puppet/modules/role/files/cms-ha/cms-keepalived-metrics.service"))
+	if err != nil {
+		t.Fatalf("failed to read cms-keepalived-metrics.service: %v", err)
+	}
+	unit := string(service)
+	if strings.Contains(unit, "192.168.20.100") {
+		t.Error("cms-keepalived-metrics.service still hardcodes the VIP; it must come from /etc/default/cms-keepalived-metrics")
+	}
+	for _, want := range []string{
+		"EnvironmentFile=/etc/default/cms-keepalived-metrics",
+		"ExecStart=/usr/local/bin/cms-keepalived-metrics.sh",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("cms-keepalived-metrics.service is missing %q", want)
+		}
+	}
+}
+
+func TestTemplates_KeepalivedMetricsFailsClosedWithoutVIP(t *testing.T) {
+	script := repoFile(t, "puppet/modules/role/files/cms-ha/cms-keepalived-metrics.sh")
+	data, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatalf("failed to read cms-keepalived-metrics.sh: %v", err)
+	}
+	if strings.Contains(string(data), "192.168.20.100") {
+		t.Error("cms-keepalived-metrics.sh still has a hardcoded VIP fallback; a stale address would publish a permanent 'nobody is MASTER'")
+	}
+
+	// A missing CMS_VIP must fail loudly. Falling back to a built-in address
+	// would hide a broken /etc/default file behind a plausible metric.
+	cmd := exec.Command("bash", script)
+	cmd.Env = keepalivedMetricsEnv(t, "")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("script exited 0 without a VIP; output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "CMS_VIP") {
+		t.Errorf("script error does not mention CMS_VIP: %s", out)
+	}
+
+	// With an explicit VIP the publisher writes the textfile series and marks
+	// the address as absent when this host does not hold it.
+	dir := t.TempDir()
+	cmd = exec.Command("bash", script, "192.0.2.1")
+	cmd.Env = keepalivedMetricsEnv(t, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("script failed with a VIP: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "cms_keepalived.prom"))
+	if err != nil {
+		t.Fatalf("metrics textfile was not written: %v", err)
+	}
+	if !strings.Contains(string(body), "cms_keepalived_vip_present 0") {
+		t.Errorf("metrics do not report the VIP as absent on this host:\n%s", body)
+	}
+}
+
+// keepalivedMetricsEnv returns the current environment without any inherited
+// CMS_VIP/CMS_TEXTFILE_DIR, so the script under test only sees what the test
+// sets.
+func keepalivedMetricsEnv(t *testing.T, textfileDir string) []string {
+	t.Helper()
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CMS_VIP=") || strings.HasPrefix(kv, "CMS_TEXTFILE_DIR=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	if textfileDir != "" {
+		env = append(env, "CMS_TEXTFILE_DIR="+textfileDir)
+	}
+	return env
+}
+
 func TestTemplates_CasperHelperSingleSource(t *testing.T) {
 	// The helper that forces casper's NFS-over-TCP mount must exist as a single
 	// canonical copy (templates/cobbler/, embedded in the binary and uploaded by
-	// the Go phase). The legacy shell script has to consume that same file; a
-	// second copy under scripts/ had already drifted from it.
+	// the Go phase). The removed v1 suite had a second copy that drifted from it.
 	data, err := cms.TemplatesFS.ReadFile("templates/cobbler/casper_initrd_tcp.sh")
 	if err != nil {
 		t.Fatalf("failed to read embedded casper helper: %v", err)
@@ -201,19 +578,5 @@ func TestTemplates_CasperHelperSingleSource(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "070701") {
 		t.Error("casper helper is missing its cpio parser")
-	}
-
-	legacy, err := os.ReadFile("../scripts/01_setup_cobbler.sh")
-	if err != nil {
-		t.Fatalf("failed to read legacy cobbler script: %v", err)
-	}
-	if !strings.Contains(string(legacy), "templates/cobbler/casper_initrd_tcp.sh") {
-		t.Error("legacy cobbler script must reference the canonical casper helper")
-	}
-	if strings.Contains(string(legacy), "utils/casper_initrd_tcp.sh") {
-		t.Error("legacy cobbler script must not reference a duplicated casper helper")
-	}
-	if _, err := os.Stat("../scripts/utils/casper_initrd_tcp.sh"); err == nil {
-		t.Error("scripts/utils/casper_initrd_tcp.sh must not exist: templates/cobbler/ is the single source")
 	}
 }

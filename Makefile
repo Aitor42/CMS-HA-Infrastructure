@@ -6,7 +6,7 @@
 # the infrastructure. Run `make help` to see all available commands.
 #
 # Prerequisites:
-#   - Go 1.22+ installed
+#   - Go 1.26+ installed
 #   - KVM/QEMU + libvirt installed on the host
 #   - SSH key at ~/.ssh/id_ed25519_gar
 #   - Ubuntu 24.04 Server ISO (for initial deployment only)
@@ -18,10 +18,24 @@ SHELL := /bin/bash
 BINARY      := cms-ha
 GO          := go
 GOFLAGS     := -trimpath
-LDFLAGS     := -s -w -X main.version=$(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT      ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+BUILD_DATE  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS     := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(BUILD_DATE)
 GOOS        := linux
 GOARCH      := amd64
 BUILD_DIR   := .
+# The README promises a statically linked binary. Pure-Go builds avoid the
+# libc/libresolv dependency the default CGO build introduces, at no size cost
+# (measured: 12.19 MB dynamic vs 12.15 MB static). Override with
+# `make build CGO_ENABLED=1` if a future dependency needs cgo.
+CGO_ENABLED ?= 0
+# Missing scanners fail closed by default; set to 0 only for best-effort local use.
+SECURITY_STRICT ?= 1
+
+# Keep the compiler cache warm across build/vet/test/staticcheck: mixing flag
+# sets invalidated it and turned a 0.35s cached build into an 8.7s rebuild.
+export GOFLAGS
 
 # ── Project paths ────────────────────────────────────────────────────────────
 PROJECT_DIR   := $(shell pwd)
@@ -30,27 +44,58 @@ ANSIBLE_DIR   := $(PROJECT_DIR)/ansible
 
 # ── Configurable variables ───────────────────────────────────────────────────
 CONFIG      ?= config.yaml
+# Aggregate coverage gate. Keep this conservative until the phase packages
+# have local tests; the number is raised as coverage improves.
+COVERAGE_MIN ?= 40.0
+# Changed-line gate: refactors move code, so keep this below the global floor
+# and let the tool skip lines that have no coverage block (comments/blanks).
+DIFF_COVERAGE_MIN ?= 40.0
+BASE ?= origin/main
 
 # ══════════════════════════════════════════════════════════════════════════════
 # BUILD
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: build
-build: ## Build the cms-ha binary (linux/amd64)
+build: ## Build the cms-ha binary (linux/amd64, static by default)
 	@echo "▶ Building $(BINARY)..."
-	GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/cms-ha/
+	GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/cms-ha/
 	@echo "✔ Built $(BUILD_DIR)/$(BINARY)"
 
 .PHONY: build-check
 build-check: ## Verify all packages compile
 	@echo "▶ Checking compilation..."
-	$(GO) build ./...
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build ./...
 	@echo "✔ All packages compile successfully"
 
 .PHONY: test
-test: ## Run Go unit tests
-	@echo "▶ Running tests..."
-	$(GO) test -v -race ./...
+test: ## Run Go unit tests with the cgo-backed race detector
+	@echo "▶ Running tests with race detection (cgo enabled)..."
+	CGO_ENABLED=1 $(GO) test -race ./...
+
+.PHONY: test-cover
+test-cover: ## Run Go tests with cross-package coverage (coverage.out)
+	@echo "▶ Running tests with coverage..."
+	$(GO) test -coverpkg=./... -coverprofile=coverage.out ./...
+	@$(GO) tool cover -func=coverage.out | tail -1
+
+.PHONY: coverage-check
+coverage-check: test-cover ## Fail if aggregate coverage is below COVERAGE_MIN
+	@total=$$($(GO) tool cover -func=coverage.out | tail -1 | awk '{print $$3}' | tr -d '%'); \
+	awk -v total="$$total" -v min="$(COVERAGE_MIN)" 'BEGIN { \
+		if (total < min) { printf "✖ coverage %.1f%% is below the %.1f%% minimum\n", total, min; exit 1 } \
+		printf "✔ coverage %.1f%% (minimum %.1f%%)\n", total, min \
+	}'
+
+.PHONY: coverage-diff
+coverage-diff: ## Enforce coverage on changed Go lines (requires coverage.out)
+	@test -f coverage.out || { echo "✖ coverage.out missing; run make test-cover first"; exit 1; }
+	@echo "▶ Checking changed-line coverage against $(BASE)..."
+	$(GO) run ./tools/diffcoverage -base "$(BASE)" -profile coverage.out -min "$(DIFF_COVERAGE_MIN)"
+
+.PHONY: schema
+schema: ## Regenerate schema/config.schema.json from internal/config
+	$(GO) run ./tools/configschema
 
 .PHONY: clean
 clean: ## Remove build artifacts
@@ -72,6 +117,11 @@ deploy: build ## Full deployment (PXE provisioning + all phases)
 deploy-resume: build ## Resume deployment with pre-installed VMs (phases 01-08)
 	@echo "▶ Resuming deployment (skipping VM creation)..."
 	./$(BINARY) -c $(CONFIG) deploy --skip-vm-create
+
+.PHONY: deploy-fast
+deploy-fast: build ## Full deploy from cloud images (opt-in, not the PXE gate)
+	@echo "▶ Starting fast cloud-image deployment..."
+	./$(BINARY) -c $(CONFIG) deploy --fast-provisioning
 
 .PHONY: deploy-dry-run
 deploy-dry-run: build ## Dry-run deployment (no commands executed)
@@ -160,13 +210,28 @@ test-failover-norestore: build ## Run failover tests without restoring
 	@echo "▶ Running failover tests (skip-restore mode)..."
 	./$(BINARY) -c $(CONFIG) test failover --skip-restore
 
+.PHONY: test-drills
+test-drills: build ## Run the operational drills (backup/restore, TLS renewal, alert hygiene)
+	@echo "▶ Running operational drills..."
+	./$(BINARY) -c $(CONFIG) test drills
+
 .PHONY: integration
 integration: build ## End-to-end integration test on a real KVM host (deploy + verify + failover)
 	@echo "▶ Running end-to-end integration test..."
 	tests/integration/run.sh
 
+.PHONY: integration-traffic
+integration-traffic: build ## Integration test including the k6 load profile (TRAFFIC_DURATION=45 TRAFFIC_VUS=3)
+	@echo "▶ Running end-to-end integration test with the k6 load profile..."
+	tests/integration/run.sh --with-traffic
+
+.PHONY: integration-drills
+integration-drills: build ## Integration test including traffic and the operational drills
+	@echo "▶ Running end-to-end integration test with traffic and drills..."
+	tests/integration/run.sh --with-traffic --with-drills
+
 .PHONY: integration-resume
-integration-resume: build ## Resume the end-to-end integration test from the deploy checkpoint
+integration-resume: ## Resume with the original binary and compatible deploy checkpoint
 	@echo "▶ Resuming end-to-end integration test..."
 	tests/integration/run.sh --resume
 
@@ -184,7 +249,7 @@ traffic-external: build ## Run external traffic test
 # ══════════════════════════════════════════════════════════════════════════════
 
 .PHONY: lint
-lint: lint-go lint-shell lint-yaml lint-puppet lint-k8s lint-ansible ## Run all linters
+lint: lint-go lint-shell lint-yaml lint-actions lint-puppet lint-k8s lint-ansible ## Run all linters
 
 .PHONY: lint-go
 lint-go: ## Lint Go code (go vet + staticcheck)
@@ -204,6 +269,15 @@ lint-shell: ## Lint shell scripts (ShellCheck + bash -n syntax)
 		find . -name "*.sh" -not -path "./.git/*" -exec shellcheck -S warning -e SC2029,SC2087,SC2034,SC2155,SC2054,SC2046 {} +; \
 	else \
 		echo "  ℹ ShellCheck not installed — skipping"; \
+	fi
+
+.PHONY: lint-actions
+lint-actions: ## Lint GitHub Actions workflows (actionlint)
+	@echo "▶ Checking GitHub Actions workflows..."
+	@if command -v actionlint >/dev/null 2>&1; then \
+		actionlint; \
+	else \
+		echo "  ℹ actionlint not installed — skipping"; \
 	fi
 
 .PHONY: lint-yaml
@@ -229,25 +303,31 @@ lint-puppet: ## Lint Puppet manifests (puppet-lint)
 	fi
 
 .PHONY: lint-k8s
-lint-k8s: ## Validate Kubernetes manifests (kustomize render + kubeconform)
-	@echo "▶ Validating Kubernetes manifests..."
-	@if command -v kustomize >/dev/null 2>&1; then \
-		kustomize build $(K8S_DIR)/overlays/lab >/dev/null && \
-		kustomize build $(K8S_DIR)/backups >/dev/null && \
-		kustomize build $(K8S_DIR)/jobs >/dev/null && \
-		echo "  ✓ kustomize roots render"; \
-	else \
-		echo "  ℹ kustomize not installed — skipping render check"; \
-	fi
-	@if command -v kubeconform >/dev/null 2>&1; then \
-		kubeconform -strict -summary -skip Kustomization -ignore-filename-pattern '\.patch\.yaml$$' -kubernetes-version 1.29.0 $(K8S_DIR); \
-	else \
-		echo "  ℹ kubeconform not installed — skipping"; \
-	fi
+lint-k8s: ## Validate non-empty rendered Kustomize roots with kubeconform
+	@echo "▶ Validating rendered Kubernetes resources..."
+	@set -euo pipefail; \
+	for tool in kustomize kubeconform python3; do \
+		command -v "$$tool" >/dev/null || { echo "Required tool missing: $$tool" >&2; exit 1; }; \
+	done; \
+	tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	for root in overlays/lab backups jobs monitoring; do \
+		echo "  · $(K8S_DIR)/$$root"; \
+		kustomize build "$(K8S_DIR)/$$root" > "$$tmp/rendered.yaml"; \
+		kubeconform -strict -summary -output json -kubernetes-version 1.29.0 "$$tmp/rendered.yaml" > "$$tmp/result.json" || { cat "$$tmp/result.json"; exit 1; }; \
+		cat "$$tmp/result.json"; \
+		python3 -c 'import json, sys; s = json.load(open(sys.argv[1]))["summary"]; ok = s["valid"] > 0 and all(s[k] == 0 for k in ("invalid", "errors", "skipped")); sys.exit(0 if ok else "Expected >0 valid resources and no invalid, errored or skipped resources")' "$$tmp/result.json"; \
+	done
 
 .PHONY: security
-security: ## Security scan: gosec (Go SAST) + govulncheck (deps) + Trivy (fs)
+security: ## Strict security scan (SECURITY_STRICT=0 permits missing local tools)
 	@echo "▶ Security scan..."
+	@set -eu; \
+	case "$(SECURITY_STRICT)" in 0|1) ;; *) echo "SECURITY_STRICT must be 0 or 1" >&2; exit 1;; esac; \
+	if [ "$(SECURITY_STRICT)" = 1 ]; then \
+		for tool in gosec govulncheck gitleaks trivy; do \
+			command -v "$$tool" >/dev/null || { echo "Required security scanner missing: $$tool" >&2; exit 1; }; \
+		done; \
+	fi
 	@if command -v gosec >/dev/null 2>&1; then \
 		gosec -severity high -confidence medium -exclude-dir=tests ./... && \
 		echo "  ✓ gosec: no HIGH findings"; \
@@ -259,9 +339,14 @@ security: ## Security scan: gosec (Go SAST) + govulncheck (deps) + Trivy (fs)
 	else \
 		echo "  ℹ govulncheck not installed — skipping (go install golang.org/x/vuln/cmd/govulncheck@latest)"; \
 	fi
+	@if command -v gitleaks >/dev/null 2>&1; then \
+		gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1; \
+	else \
+		echo "  ℹ gitleaks not installed — skipping (install v8.30.1 from GitHub releases)"; \
+	fi
 	@if command -v trivy >/dev/null 2>&1; then \
 		echo "  · dependencies & secrets (blocking on HIGH/CRITICAL)"; \
-		trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .; \
+		trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 . || exit $$?; \
 		echo "  · Kubernetes misconfig (report only)"; \
 		trivy fs --scanners misconfig --severity HIGH,CRITICAL --exit-code 0 .; \
 	else \
@@ -338,6 +423,10 @@ secrets-encrypt: build ## Encrypt sensitive fields in config.yaml
 .PHONY: secrets-decrypt
 secrets-decrypt: build ## Decrypt and display config
 	./$(BINARY) -c $(CONFIG) secrets decrypt
+
+.PHONY: secrets-rotate
+secrets-rotate: build ## Rotate the age key and re-encrypt config.yaml (keeps backups)
+	./$(BINARY) -c $(CONFIG) secrets rotate
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CLEANUP

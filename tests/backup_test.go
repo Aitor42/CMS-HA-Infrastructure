@@ -84,6 +84,35 @@ func TestConfig_BackupDefaultsAndValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("validation rejects credentials that would break the env file", func(t *testing.T) {
+		cfg := base()
+		cfg.Backup.Engine = "garage"
+		cfg.Backup.SecretKey = "secret\nGARAGE_DEFAULT_BUCKET=evil"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a secret with an embedded newline")
+		}
+	})
+
+	t.Run("validation rejects an access key Garage cannot import", func(t *testing.T) {
+		cfg := base()
+		cfg.Backup.Engine = "garage"
+		cfg.Backup.AccessKey = "short"
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "backup.access_key") {
+			t.Fatalf("expected the backup.access_key error, got: %v", err)
+		}
+	})
+
+	t.Run("validation rejects a secret Garage cannot import", func(t *testing.T) {
+		cfg := base()
+		cfg.Backup.Engine = "garage"
+		cfg.Backup.SecretKey = "too-short"
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "backup.secret_key") {
+			t.Fatalf("expected the backup.secret_key error, got: %v", err)
+		}
+	})
+
 	t.Run("valid configuration passes", func(t *testing.T) {
 		cfg := base()
 		cfg.Backup.Engine = "garage"
@@ -116,10 +145,16 @@ func TestBackupManifests(t *testing.T) {
 			"rclone/rclone:",
 			"@sha256:",
 			"cms_backup_last_success_timestamp_seconds",
+			// The root password must travel through the environment, not the
+			// process list.
+			"MYSQL_PWD",
 		} {
 			if !strings.Contains(content, want) {
 				t.Errorf("mariadb-backup-cronjob.yaml is missing %q", want)
 			}
+		}
+		if strings.Contains(content, `--password=`) {
+			t.Error("mariadb-backup-cronjob.yaml must not pass the password on the command line")
 		}
 		if strings.Contains(content, ":latest") {
 			t.Error("mariadb-backup-cronjob.yaml must not use the floating :latest tag")
@@ -133,6 +168,9 @@ func TestBackupManifests(t *testing.T) {
 			"backup-secret",
 			"rclone/rclone:",
 			"mariadb-install-db",
+			// The pod runs as root, so mariadbd needs the explicit opt-in;
+			// without it the drill aborts before restoring anything.
+			"--user=root",
 			"cms_backup_restore_last_success_timestamp_seconds",
 			"cms_backup_restore_duration_seconds",
 		} {
@@ -150,10 +188,22 @@ func TestBackupManifests(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to read garage template: %v", err)
 		}
-		for _, want := range []string{"{{RPC_SECRET}}", "{{S3_PORT}}", "api_bind_addr", "data_dir"} {
+		for _, want := range []string{
+			"{{RPC_SECRET}}",
+			"{{S3_PORT}}",
+			"{{S3_BIND_ADDR}}",
+			`api_bind_addr = "{{S3_BIND_ADDR}}:{{S3_PORT}}"`,
+			"data_dir",
+		} {
 			if !strings.Contains(string(content), want) {
 				t.Errorf("garage.toml.tmpl is missing %q", want)
 			}
+		}
+		// The container runs on the host network, so a wildcard bind would
+		// expose the store on the WAN and a loopback-only bind would make it
+		// unreachable from the cluster.
+		if strings.Contains(string(content), `"[::]`) {
+			t.Error("garage.toml.tmpl binds a wildcard address; the store must bind the internal bridge")
 		}
 	})
 }

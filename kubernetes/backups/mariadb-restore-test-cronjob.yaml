@@ -1,7 +1,8 @@
 # mariadb-restore-test-cronjob.yaml
 # Daily restore drill: fetch the newest off-DRBD backup from the Garage S3
 # bucket, restore it into an ephemeral MariaDB instance and validate the
-# result, so RPO/RTO are proven and not just assumed.
+# result. This measures database restore readiness, NOT end-to-end CMS RTO.
+# It does not recover the production DB, frontends, routing or user traffic.
 #
 #   Schedule : every day at 03:30 UTC (backup.restore_test_schedule)
 #   Metrics  : cms_backup_restore_last_success_timestamp_seconds,
@@ -58,6 +59,11 @@ spec:
                 - -c
                 - |
                   set -eu
+                  # Persist the operation start across containers, before S3 listing
+                  # and the full download. Keep it across init-container retries.
+                  if [ ! -s /staging/restore.started ]; then
+                    date +%s > /staging/restore.started
+                  fi
                   export RCLONE_CONFIG_S3_TYPE=s3
                   export RCLONE_CONFIG_S3_PROVIDER=Other
                   export RCLONE_CONFIG_S3_ENDPOINT="${S3_ENDPOINT}"
@@ -95,13 +101,20 @@ spec:
                 - -c
                 - |
                   set -euo pipefail
-                  START=$(date +%s)
+                  START=$(cat /staging/restore.started)
+                  case "${START}" in
+                    ''|*[!0-9]*) echo "[ERROR] Invalid restore operation start timestamp"; exit 1 ;;
+                  esac
                   echo "[$(date)] Initializing ephemeral MariaDB data dir..."
                   mariadb-install-db --datadir=/tmp/mysqldata --auth-root-authentication-method=normal >/dev/null
 
                   echo "[$(date)] Starting ephemeral MariaDB..."
+                  # The pod runs as root (it writes the metric into the host
+                  # textfile directory), and mariadbd refuses to start as root
+                  # unless it is told explicitly to do so.
                   mariadbd --datadir=/tmp/mysqldata --socket=/tmp/mysqld.sock \
-                    --skip-networking --pid-file=/tmp/mysqld.pid >/tmp/mysqld.log 2>&1 &
+                    --skip-networking --pid-file=/tmp/mysqld.pid --user=root \
+                    >/tmp/mysqld.log 2>&1 &
                   READY=0
                   for _ in $(seq 1 60); do
                     if mariadb --socket=/tmp/mysqld.sock -e 'SELECT 1' >/dev/null 2>&1; then
@@ -138,14 +151,14 @@ spec:
                   mariadb-admin --socket=/tmp/mysqld.sock shutdown || true
 
                   DURATION=$(( $(date +%s) - START ))
-                  echo "[$(date)] Restore drill OK in ${DURATION}s"
+                  echo "[$(date)] Database restore drill OK in ${DURATION}s (including S3 download; not CMS RTO)"
 
                   NOW=$(date +%s)
                   cat > /host-metrics/cms_backup_restore.prom <<EOF
                   # HELP cms_backup_restore_last_success_timestamp_seconds Unix time of the last successful restore drill.
                   # TYPE cms_backup_restore_last_success_timestamp_seconds gauge
                   cms_backup_restore_last_success_timestamp_seconds ${NOW}
-                  # HELP cms_backup_restore_duration_seconds Duration of the last successful restore drill.
+                  # HELP cms_backup_restore_duration_seconds Database restore drill duration including S3 listing, download, DB initialization and validation; not end-to-end CMS RTO.
                   # TYPE cms_backup_restore_duration_seconds gauge
                   cms_backup_restore_duration_seconds ${DURATION}
                   EOF

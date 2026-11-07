@@ -9,6 +9,10 @@ metadata:
     type: local
 spec:
   storageClassName: manual
+  # Advisory only: hostPath volumes are not size-enforced by kubelet, and the
+  # real capacity is the DRBD device (drbd_disk_gb, 3 GiB). The value is left
+  # above it deliberately - a PVC's request is immutable, so shrinking it here
+  # would make `kubectl apply` fail on any existing claim.
   capacity:
     storage: 5Gi
   accessModes:
@@ -16,4 +20,6 @@ spec:
   persistentVolumeReclaimPolicy: Retain
   hostPath:
     path: /mnt/data/mariadb
-    type: DirectoryOrCreate
+    # Never create an empty local data directory if storage provisioning failed.
+    # The DRBD watchdog separately verifies the device before advertising it.
+    type: Directory

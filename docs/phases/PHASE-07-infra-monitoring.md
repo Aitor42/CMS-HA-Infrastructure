@@ -13,7 +13,7 @@
 ### Monitor Node (192.168.10.20)
 
 - **Prometheus 2.x:** Metrics collection (scraping) and storage engine
-- **Grafana 11.x:** Data visualization and dashboard platform
+- **Grafana 13.2.4:** Data visualization and dashboard platform
 
 ### node_exporter
 
@@ -24,6 +24,8 @@ Installed on all managed nodes via the `prometheus-node-exporter` apt package. P
 - 192.168.20.101-104 (cms1, cms2, main-lb1, main-lb2)
 
 ### Prometheus Configuration
+
+`cms-ha phase setup-puppet` renders `/etc/prometheus/prometheus.yml` from `config.yaml` and uploads it through Puppet's fileserver, so the scrape jobs follow the configured topology instead of the committed default lab. The committed file (`puppet/modules/role/files/prometheus/prometheus.yml`) is only the manual fallback used outside the orchestrator. The generated file includes one job per role:
 
 ```yaml
 global:
@@ -47,6 +49,8 @@ scrape_configs:
         - '192.168.20.102:9100'
 ```
 
+The default addresses above correspond to the default `config.yaml`. Renaming a node, changing either subnet or adding/removing workers updates `node_exporter`, `nginx`, `apache`, `mysql`, `k3s_kubelet`, `etcd`, `blackbox` and `blackbox-frontends` targets automatically; a role with no nodes (for example, no load balancers) omits its job rather than keeping a stale target.
+
 ### Infrastructure Metrics
 
 | Metric | PromQL Query | Description |
@@ -58,12 +62,13 @@ scrape_configs:
 
 ### Grafana Provisioning
 
-- **Datasource:** Prometheus configured automatically via `/etc/grafana/provisioning/datasources/`
-- **Dashboard:** Node Exporter Full (ID 1860) downloaded and imported automatically
+- **Datasource:** Prometheus, provisioned from `/etc/grafana/provisioning/datasources/`.
+- **Dashboards:** *Node Exporter Overview* and *HA Overview*, provisioned from `role::monitor`; the HA Overview is the home dashboard.
 
-### Associated Scripts
+### Implementation
 
-- `scripts/08_setup_monitoring.sh` — Installation of node_exporter, Prometheus, and Grafana
+- `internal/phases/monitoring` (`cms-ha phase setup-monitoring`) — verifies the exporters, mints the Prometheus token, deploys the alert rules and checks the services.
+- `puppet/modules/role` (`role::monitor`) — keeps the exporters and configuration converged.
 
 ### Verification
 

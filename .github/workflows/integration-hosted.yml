@@ -1,0 +1,764 @@
+name: Integration (KVM lab, hosted)
+
+# Free, GitHub-hosted counterpart of the self-hosted `Integration (KVM lab)`
+# gate: it runs the same deploy -> verify -> DRBD failover pipeline, but on a
+# standard `ubuntu-latest` runner instead of a dedicated lab host.
+#
+# Why it can work at all (measured on 2026-10-18, see the probe in git history):
+#   * hosted Linux runners do expose /dev/kvm — nested virtualisation was
+#     enabled for the Android emulator — and it is functional: `kvm-ok` passes
+#     and `qemu-system-x86_64 -accel kvm` starts a guest;
+#   * the "14 GB SSD" in GitHub's docs is stale: the runner reports 145 GB on
+#     /, 86 GB free (113 GB after deleting the preinstalled SDKs);
+#   * the real limits are 4 vCPU and 15 GiB of RAM + 3 GiB swap.
+#
+# That is why it deploys `config.ci.yaml` (config.yaml with the three client
+# hotdesks dropped and the installer RAM lowered to 3 GiB: 13 VMs instead of
+# 16, ~12.7 GB of guest RAM) and why the hosted workflow is reserved for the
+# nightly drift check, release gates and manual dispatch: a full run takes tens
+# of minutes and holds a whole runner for the duration. The full 16-VM
+# topology is still covered by `integration.yml` on a self-hosted `kvm` runner.
+#
+# The dispatch defaults favour the fast cloud path (cloud jumpstart + cloud
+# clients): it is the quickest way to exercise deploy/verify/failover on the
+# hosted runner. The PXE/Cobbler deliverable is still the gate; reproduce it
+# here with `jumpstart_image=iso` and `fast_provisioning=false`, or run the
+# self-hosted `integration.yml` workflow.
+#
+# Cadence: pull requests stay on the static/unit CI; the nightly schedule and
+# pushes to main use the fast cloud path; release calls this workflow with the
+# full ISO/PXE profile before publication. Manual dispatch accepts every profile.
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        description: "provision = stop after provisioning; full = deploy + verify + failover"
+        type: string
+        default: "full"
+      skip_chaos:
+        description: "Skip the DRBD failover chaos exercise"
+        type: boolean
+        default: false
+      teardown:
+        description: "Run `cleanup` at the end (the runner is thrown away anyway; proves the teardown path)"
+        type: boolean
+        default: false
+      jumpstart_image:
+        description: "Jumpstart install path: cloud (default fast boot) or iso (PXE/Cobbler gate)"
+        type: string
+        default: "cloud"
+      fast_provisioning:
+        description: "Provision client nodes from the cloud image (default fast path; set false for the PXE gate)"
+        type: boolean
+        default: true
+
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "provision = stop after provisioning; full = deploy + verify + failover"
+        type: choice
+        options: ["full", "provision"]
+        default: "full"
+      skip_chaos:
+        description: "Skip the DRBD failover chaos exercise"
+        type: boolean
+        default: false
+      teardown:
+        description: "Run `cleanup` at the end (the runner is thrown away anyway; proves the teardown path)"
+        type: boolean
+        default: false
+      jumpstart_image:
+        description: "Jumpstart install path: cloud (default fast boot) or iso (PXE/Cobbler gate)"
+        type: choice
+        options: ["cloud", "iso"]
+        default: "cloud"
+      fast_provisioning:
+        description: "Provision client nodes from the cloud image (default fast path; set false for the PXE gate)"
+        type: boolean
+        default: true
+
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  schedule:
+    # Nightly fast-cloud drift check. Scheduled workflows only run on the
+    # default branch; keep the expensive full PXE run for releases.
+    - cron: '0 3 * * *'
+# A called workflow inherits github.workflow from its caller. Keep the hosted
+# lock namespaced so it never waits on a release lock held by that same caller.
+concurrency:
+  group: integration-hosted-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# The job only needs to read the repository. It generates credentials inside
+# the runner and never writes back to GitHub, so do not hand GITHUB_TOKEN any
+# write scope.
+permissions:
+  contents: read
+
+env:
+  BASE_CONFIG: config.ci.yaml
+  # The workflow renders BASE_CONFIG into this throwaway copy, with freshly
+  # generated credentials, so no secret is ever committed.
+  CONFIG: config.ci.local.yaml
+  STATE_FILE: deploy.state
+  ARTIFACTS_DIR: integration-artifacts
+  # Resolve the profile from inputs, falling back to cloud for push/schedule.
+  # Reusable workflows retain the caller's event name (push for release tags).
+
+jobs:
+  integration:
+    name: Deploy + verify + failover (hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Free disk space
+        run: |
+          # The lab needs tens of GB of qcow2 images; the runner image carries
+          # ~27 GB of Android/.NET/Haskell/Node SDKs we will never touch.
+          sudo rm -rf /usr/local/lib/android \
+                      /usr/share/dotnet \
+                      /opt/hostedtoolcache \
+                      /usr/local/.ghcup \
+                      /usr/local/share/boost \
+                      /usr/share/swift
+          df -h /
+
+      - name: Add swap space
+        run: |
+          # 15 GiB of RAM cannot hold the whole lab at once: the reduced
+          # topology still asks for 3-4 GB per node while the installer runs.
+          # The disk is plentiful, so back the overcommit with swap — the PXE
+          # installers are I/O bound and would much rather swap than be
+          # OOM-killed.
+          #
+          # The image already runs 3 GB of swap from /swapfile, so this one
+          # needs its own name, and it is best-effort: the batch installer
+          # only needs it as a safety margin. Both live on the runner's
+          # disposable disk.
+          SWAP="$HOME/swapfile-lab"
+          if [ ! -f "$SWAP" ]; then
+            sudo fallocate -l 16G "$SWAP" 2>/dev/null \
+              || sudo dd if=/dev/zero of="$SWAP" bs=1M count=16384 status=none \
+              || echo "::warning::could not reserve swap space; carrying on without it"
+          fi
+          sudo chmod 600 "$SWAP" 2>/dev/null || true
+          sudo mkswap -q "$SWAP" 2>/dev/null || true
+          sudo swapon "$SWAP" 2>/dev/null || true
+          swapon --show
+          free -h
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install the hypervisor stack
+        run: |
+          set -x
+          # The runner image ships third-party APT sources (Microsoft, Azure
+          # CLI, Docker...) that periodically stop refreshing. A 403 or an
+          # unsigned InRelease there aborts `apt-get update`; a stalled host can
+          # hold it for many minutes. Nothing in this step comes from those
+          # sources, so disable them up front and keep only the Ubuntu archive.
+          for src in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            [ -f "$src" ] || continue
+            if grep -qiE 'packages\.microsoft\.com|packages\.azure\.com|download\.docker\.com|packages\.cloud\.google\.com|apt\.releases\.hashicorp\.com' "$src"; then
+              echo "::warning::disabling $src (third-party source not needed by this job)"
+              sudo sed -i -E 's/^[^#[:space:]]/#&/' "$src"
+            fi
+          done
+
+          # apt's own timeouts are generous. Bound every call so a slow mirror
+          # fails the step in minutes instead of holding the runner for hours.
+          APT_OPTS=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1)
+          updated=0
+          for attempt in 1 2 3; do
+            if sudo timeout 180 apt-get "${APT_OPTS[@]}" update -qq 2>/tmp/apt-update.err; then
+              updated=1
+              break
+            fi
+            echo "::warning::apt-get update failed (attempt $attempt)"
+            cat /tmp/apt-update.err
+            hosts=$(grep -hoE 'https?://[^/ ]+' /tmp/apt-update.err \
+              | sed -E 's|https?://||' | sort -u || true)
+            if [ -z "$hosts" ]; then
+              break
+            fi
+            for host in $hosts; do
+              sudo grep -rlsF "$host" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null |
+                while read -r src; do
+                  echo "::warning::disabling $src: $host cannot be reached"
+                  sudo sed -i -E 's/^[^#[:space:]]/#&/' "$src"
+                done
+            done
+          done
+          if [ "$updated" -ne 1 ]; then
+            echo "::error::apt-get update failed and no unreachable third-party source could be disabled"
+            exit 1
+          fi
+          sudo DEBIAN_FRONTEND=noninteractive timeout 900 \
+            apt-get "${APT_OPTS[@]}" install -y -qq \
+            qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virtinst \
+            xorriso dnsmasq-base bridge-utils openssh-server python3-yaml acl >/dev/null
+
+          # /dev/kvm is present but owned root:kvm with mode 0660. Grant the
+          # runner an ACL instead of making the device world-writable.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0660", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          if ! sudo setfacl -m u:"$USER":rw /dev/kvm; then
+            echo "::warning::/dev/kvm does not support ACLs; restricting it to the runner user"
+            sudo chown "$USER":root /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+
+          # libvirt must be able to traverse the home directory to reach
+          # ${HOME}/vm_storage, where the lab keeps its disk images. Grant the
+          # qemu account traverse/read only on that path instead of opening the
+          # whole home directory to every local user.
+          QEMU_USER=$(sudo awk -F= '/^[[:space:]]*user[[:space:]]*=/{gsub(/[" ]/,"",$2); print $2; exit}' \
+            /etc/libvirt/qemu.conf 2>/dev/null || true)
+          QEMU_USER=${QEMU_USER:-libvirt-qemu}
+          mkdir -p "$HOME/vm_storage"
+          if id "$QEMU_USER" >/dev/null 2>&1; then
+            if ! sudo setfacl -m u:"$QEMU_USER":x "$HOME" \
+              || ! sudo setfacl -m u:"$QEMU_USER":rx "$HOME/vm_storage"; then
+              echo "::warning::ACLs unsupported on $HOME; granting traverse only"
+              chmod o+x "$HOME"
+              chmod o+rx "$HOME/vm_storage"
+            fi
+          else
+            echo "::error::qemu user $QEMU_USER not found; cannot grant disk access safely"
+            exit 1
+          fi
+
+          # Ubuntu ships AppArmor enabled; its libvirt profile is the classic
+          # source of "qemu: could not open disk image" for disks outside
+          # /var/lib/libvirt. This is a disposable CI sandbox, so drop it.
+          sudo systemctl stop apparmor 2>/dev/null || true
+
+          # Start libvirt and make its socket reachable by the runner user,
+          # who is not in the `libvirt` group for the current session.
+          for u in virtproxyd.socket virtqemud.socket virtnetworkd.socket \
+                   virtstoraged.socket virtnodedevd.socket virtinterfaced.socket \
+                   virtsecretd.socket virtlogd.socket; do
+            sudo systemctl start "$u" 2>/dev/null || true
+          done
+          sudo systemctl start libvirtd 2>/dev/null || true
+          for _ in $(seq 30); do
+            [ -S /var/run/libvirt/libvirt-sock ] && break
+            sleep 1
+          done
+          if ! sudo setfacl -m u:"$USER":rw /var/run/libvirt/libvirt-sock; then
+            echo "::warning::libvirt socket does not support ACLs; scoping it to the runner group"
+            sudo chgrp "$USER" /var/run/libvirt/libvirt-sock
+            sudo chmod 0660 /var/run/libvirt/libvirt-sock
+          fi
+          sudo setfacl -m u:"$USER":rw /var/run/libvirt/libvirt-sock-ro 2>/dev/null || true
+
+          # The router uses libvirt's NAT network as its WAN uplink; the lab's
+          # own virbr-int / virbr-main networks are created by `phase init-vms`.
+          sudo virsh net-start default 2>/dev/null || true
+          sudo virsh net-autostart default 2>/dev/null || true
+
+          # sshd must listen on the future bridge address (.254) because the
+          # DRBD fence command powers off the failed peer over SSH+virsh.
+          sudo systemctl start ssh 2>/dev/null || sudo systemctl start sshd 2>/dev/null || true
+
+          echo "==== libvirt ==="
+          virsh version
+          virsh net-list --all
+          echo "==== kvm ===="
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" install -y -qq cpu-checker >/dev/null
+          sudo kvm-ok
+          echo "==== device/socket ACLs ===="
+          getfacl -p /dev/kvm 2>/dev/null | sed -n '1,8p' || true
+          getfacl -p /var/run/libvirt/libvirt-sock 2>/dev/null | sed -n '1,8p' || true
+          echo "==== listeners ===="
+          ss -ltn | grep -E ':(22|16509)\b' || true
+
+      - name: Prepare SSH keys
+        run: |
+          ssh-keygen -t ed25519 -N "" -C "cms-ha CI key" \
+            -f "$HOME/.ssh/id_ed25519_gar"
+          chmod 600 "$HOME/.ssh/id_ed25519_gar"
+
+      - name: Download the Ubuntu 24.04 server ISO
+        run: |
+          set -o pipefail
+          mkdir -p "$HOME/vm_storage"
+          BASE="https://releases.ubuntu.com/24.04"
+          # Do not hardcode a point release: the name changes with every LTS
+          # update and old ones eventually disappear from the mirror.
+          ISO_NAME="$(curl -fsSL --max-time 60 "$BASE/" \
+            | grep -oE 'ubuntu-24\.04(\.[0-9]+)?-live-server-amd64\.iso' \
+            | sort -u | sort -V | tail -n 1)"
+          test -n "$ISO_NAME"
+          echo "Downloading $ISO_NAME"
+
+          # releases.ubuntu.com normally serves this 4 GB file in seconds, but
+          # one bad edge took 2h22m on run 39765306172 and 40m on 39747321026.
+          # Try the official host and three independent mirrors, and abort a
+          # transfer that stays below 5 MiB/s for 30s instead of letting a bad
+          # mirror hold the whole job. The mirror list is only a fallback: the
+          # normal case still downloads from the official host.
+          ISO_PATH="$HOME/vm_storage/$ISO_NAME"
+          ok=0
+          for url in \
+            "$BASE/$ISO_NAME" \
+            "https://mirrors.edge.kernel.org/ubuntu-releases/24.04/$ISO_NAME" \
+            "https://ftp.osuosl.org/pub/ubuntu-releases/24.04/$ISO_NAME" \
+            "https://mirror.leaseweb.com/ubuntu-releases/24.04/$ISO_NAME"; do
+            echo "Trying $url"
+            rm -f "$ISO_PATH"
+            if curl -fL --connect-timeout 30 --max-time 1200 \
+                 --speed-limit 5242880 --speed-time 30 \
+                 -o "$ISO_PATH" "$url"; then
+              ok=1
+              break
+            fi
+            echo "::warning::download failed or stayed below 5 MiB/s: $url"
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::could not download the 4 GB ISO at a usable speed"
+            exit 1
+          fi
+          ls -lh "$ISO_PATH"
+          # A truncated download would fail much later, inside Cobbler. Verify
+          # the published checksum before handing the ISO to libvirt/Cobbler.
+          SUMS="$(mktemp)"
+          curl -fsSL --max-time 60 "$BASE/SHA256SUMS" -o "$SUMS"
+          EXPECTED="$(awk -v iso="$ISO_NAME" '{ f=$2; sub(/^\*/, "", f); if (f == iso) { print $1; exit } }' "$SUMS")"
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::no SHA256 entry for $ISO_NAME in $BASE/SHA256SUMS"
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "$ISO_PATH" | awk '{print $1}')"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::SHA256 mismatch for $ISO_NAME: expected $EXPECTED, got $ACTUAL"
+            exit 1
+          fi
+          echo "✔ SHA256 verified: $ISO_NAME"
+          rm -f "$SUMS"
+          SIZE=$(stat -c %s "$ISO_PATH")
+          test "$SIZE" -gt 1000000000
+
+      - name: Render the CI configuration with fresh credentials
+        run: |
+          umask 077
+          python3 - <<'PY'
+          import pathlib, secrets, yaml
+
+          def pw():
+              return secrets.token_urlsafe(24)
+
+          cfg = yaml.safe_load(pathlib.Path("config.ci.yaml").read_text())
+          cfg["database"].update(
+              password=pw(), root_password=pw(), exporter_password=pw()
+          )
+          cfg["wordpress"]["admin_password"] = pw()
+          cfg["backup"]["secret_key"] = pw()
+          cfg["pki"]["provisioner_password"] = pw()
+
+          out = pathlib.Path("config.ci.local.yaml")
+          out.write_text(yaml.safe_dump(cfg, sort_keys=False))
+          print(f"{out} written with generated secrets")
+          PY
+          # Fail early if the topology is not what this workflow expects.
+          python3 - <<'PY'
+          import yaml
+          cfg = yaml.safe_load(open("config.ci.local.yaml"))
+          assert cfg["nodes"]["hotdesks"]["count"] == 0, "hotdesks must be 0 for the hosted lab"
+          print("hotdesks:", cfg["nodes"]["hotdesks"]["count"],
+                "| VMs:", 1 + 1 + len(cfg["nodes"]["masters"]) + len(cfg["nodes"]["workers"])
+                + 1 + 1 + len(cfg["nodes"]["lbs"]) + len(cfg["nodes"]["cms_frontends"]))
+          PY
+
+      - name: Resolve integration profile
+        env:
+          STAGE_INPUT: ${{ inputs.stage }}
+          IMAGE_INPUT: ${{ inputs.jumpstart_image }}
+          FAST_INPUT: ${{ inputs.fast_provisioning }}
+        run: |
+          stage="${STAGE_INPUT:-full}"
+          image="${IMAGE_INPUT:-cloud}"
+          fast="${FAST_INPUT:-true}"
+          case "$stage" in full|provision) ;; *) echo "::error::Invalid stage: $stage"; exit 1;; esac
+          case "$image" in cloud|iso) ;; *) echo "::error::Invalid jumpstart_image: $image"; exit 1;; esac
+          case "$fast" in true|false) ;; *) echo "::error::Invalid fast_provisioning: $fast"; exit 1;; esac
+          echo "JUMPSTART_IMAGE=$image" >> "$GITHUB_ENV"
+          echo "FAST_PROVISIONING=$fast" >> "$GITHUB_ENV"
+
+      # Both stages need the lab installed; `full` then continues with the
+      # service phases, which find the client VMs already defined and skip
+      # their creation.
+      - name: Provision the lab (jumpstart, Cobbler and client nodes)
+        run: |
+          set -o pipefail
+          mkdir -p "$ARTIFACTS_DIR"
+
+          # `deploy.install_batch_size` keeps each install batch at four guests,
+          # so the host is asked for four 3 GiB installers plus the jumpstart —
+          # right at its 15 GiB. Give it a compressed swap device as a safety
+          # net: zram keeps the pages in RAM at a fraction of their size, where
+          # disk swap turned a ten-minute batch into a twenty-minute one.
+          # Best effort — without zram the run still works, just slower.
+          sudo modprobe zram || true
+          ZRAM_DEV=$(sudo zramctl --find --size 8G --algorithm zstd 2>/dev/null || true)
+          if [ -n "$ZRAM_DEV" ]; then
+            sudo mkswap "$ZRAM_DEV" >/dev/null 2>&1 || true
+            sudo swapon --priority 100 "$ZRAM_DEV" || true
+            echo "zram swap on $ZRAM_DEV"
+          else
+            echo "::warning::zram is not available; the batch installers will use disk swap"
+          fi
+          free -m
+          swapon --show || true
+
+          make build
+
+          # `--fast-provisioning` mirrors `deploy --fast-provisioning`: both the
+          # jumpstart and every client boot from the cloud image. The ISO is
+          # still downloaded above because setup-cobbler transfers it to the
+          # jumpstart and the verification gate checks Cobbler; only the ~31m
+          # PXE install disappears.
+          if [ "$FAST_PROVISIONING" = "true" ]; then
+            EFFECTIVE_JUMPSTART_IMAGE=cloud
+          else
+            EFFECTIVE_JUMPSTART_IMAGE="$JUMPSTART_IMAGE"
+          fi
+
+          # The hosted workflow defaults to the cloud jumpstart: download the
+          # ~600 MB base image once and let init-vms boot a qcow2 overlay
+          # instead of running Subiquity. The CLI/config default is still ISO,
+          # and the ISO/PXE path remains the deliverable gate (dispatch with
+          # jumpstart_image=iso and fast_provisioning=false).
+          if [ "$EFFECTIVE_JUMPSTART_IMAGE" = "cloud" ]; then
+            IMG="$HOME/vm_storage/ubuntu-24.04-server-cloudimg-amd64.img"
+            if [ ! -s "$IMG" ]; then
+              mkdir -p "$(dirname "$IMG")"
+              CLOUD_BASE="https://cloud-images.ubuntu.com/noble/current"
+              CLOUD_NAME="noble-server-cloudimg-amd64.img"
+              # Canonical publishes the Noble image under this name; the old
+              # `ubuntu-24.04-server-cloudimg-amd64.img` URL is a 404.
+              curl -fL --retry 3 --retry-delay 5 -o "$IMG.tmp" \
+                "$CLOUD_BASE/$CLOUD_NAME"
+              SUMS="$(mktemp)"
+              curl -fsSL --max-time 60 "$CLOUD_BASE/SHA256SUMS" -o "$SUMS"
+              EXPECTED="$(awk -v img="$CLOUD_NAME" '{ f=$2; sub(/^\*/, "", f); if (f == img) { print $1; exit } }' "$SUMS")"
+              if [ -z "$EXPECTED" ]; then
+                echo "::error::no SHA256 entry for $CLOUD_NAME in $CLOUD_BASE/SHA256SUMS"
+                exit 1
+              fi
+              ACTUAL="$(sha256sum "$IMG.tmp" | awk '{print $1}')"
+              if [ "$EXPECTED" != "$ACTUAL" ]; then
+                echo "::error::SHA256 mismatch for $CLOUD_NAME: expected $EXPECTED, got $ACTUAL"
+                exit 1
+              fi
+              echo "✔ SHA256 verified: $CLOUD_NAME"
+              rm -f "$SUMS"
+              mv "$IMG.tmp" "$IMG"
+            fi
+          fi
+
+          # The documented order: jumpstart first, then Cobbler, then the node
+          # templates. Client provisioning is the only branch: the PXE path
+          # installs them one batch at a time so the 15 GiB runner never holds
+          # the whole topology at once; the fast path creates cloud-image
+          # overlays instead and skips the installers entirely.
+          ./cms-ha -c "$CONFIG" phase init-vms --jumpstart-only \
+            --jumpstart-image "$EFFECTIVE_JUMPSTART_IMAGE" \
+            | tee "$ARTIFACTS_DIR/00-init-jumpstart.log"
+
+          if [ "$FAST_PROVISIONING" = "true" ]; then
+            # Cobbler is not on the cloud-image path: the clients boot from the
+            # image and cloud-init never asks the PXE server for a definition.
+            # The two steps are independent, so run them together and let the
+            # ~4m40s Cobbler install overlap the VM creation instead of
+            # preceding it. `register-nodes` still waits for Cobbler because it
+            # writes the system records the verification gate reads.
+            ./cms-ha -c "$CONFIG" phase setup-cobbler \
+              | tee "$ARTIFACTS_DIR/01-setup-cobbler.log" &
+            COBBLER_PID=$!
+            # One qcow2 overlay plus one cloud-init seed per client. The phase
+            # starts every guest at its runtime RAM, so the whole topology fits
+            # the runner without the installer batches.
+            ./cms-ha -c "$CONFIG" phase init-vms --nodes-only --fast-provisioning \
+              | tee "$ARTIFACTS_DIR/03-cloud-clients.log" &
+            CLIENTS_PID=$!
+
+            CLIENTS_RC=0
+            COBBLER_RC=0
+            wait "$CLIENTS_PID" || CLIENTS_RC=$?
+            wait "$COBBLER_PID" || COBBLER_RC=$?
+            if [ "$CLIENTS_RC" -ne 0 ] || [ "$COBBLER_RC" -ne 0 ]; then
+              echo "::error::fast provisioning failed (cloud clients exit $CLIENTS_RC, cobbler exit $COBBLER_RC)"
+              exit 1
+            fi
+            ./cms-ha -c "$CONFIG" phase register-nodes \
+              | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+          else
+            ./cms-ha -c "$CONFIG" phase setup-cobbler \
+              | tee "$ARTIFACTS_DIR/01-setup-cobbler.log"
+            ./cms-ha -c "$CONFIG" phase register-nodes \
+              | tee "$ARTIFACTS_DIR/02-register-nodes.log"
+
+            # Probes, not part of the deployment: the client installers resolve
+            # through the jumpstart's named and fetch their authorised keys from
+            # its Apache, so both are checked here, with the lab up and before the
+            # clients put load on it. Every probe is best-effort.
+            echo "==== resolver probe (as the client nodes use it) ===="
+            sudo apt-get install -y -qq dnsutils >/dev/null 2>&1 || true
+            for q in archive.ubuntu.com security.ubuntu.com; do
+              for srv in "@192.168.10.10" ""; do
+                label=$([ -n "$srv" ] && echo jumpstart || echo runner)
+                printf -- "-- %s via %s: " "$q" "$label"
+                timeout 30 dig +time=3 +tries=1 +noall +answer +comments \
+                  ${srv:+"$srv"} "$q" A 2>&1 \
+                  | grep -E "Query time|status:" | tr '\n' ' ' || true
+                echo
+              done
+            done
+            echo "==== cobbler HTTP endpoints, from the runner ===="
+            timeout 10 curl -sS -o /dev/null \
+              -w 'authorized_keys -> HTTP %{http_code} in %{time_total}s\n' \
+              http://192.168.10.10/cblr/pub/authorized_keys || true
+            timeout 10 curl -sS http://192.168.10.10/cblr/pub/authorized_keys 2>&1 | head -3 || true
+            timeout 10 curl -sS -o /dev/null \
+              -w 'autoinstall   -> HTTP %{http_code} in %{time_total}s\n' \
+              http://192.168.10.10/cblr/svc/op/autoinstall/system/ufw-router/ || true
+
+            ./cms-ha -c "$CONFIG" vm install-batches \
+              | tee "$ARTIFACTS_DIR/03-install-batches.log"
+          fi
+
+          # The PXE batches phase leaves every guest shut off until the last one
+          # is installed, then boots the whole topology at once (that is what
+          # keeps an idle batch from competing for RAM with the next batch's
+          # installers). The fast path has already started every cloud guest.
+          #
+          # `--wait` polls every node concurrently and returns as soon as the
+          # last one accepts a session. The old loop sampled the whole table
+          # once and then slept 30s, so it spent up to 87.5s to do 27.5s of work
+          # (measured on run 39580835333).
+          ./cms-ha -c "$CONFIG" status ssh --wait 10m \
+            2>&1 | tee "$ARTIFACTS_DIR/04-status-ssh.log"
+
+      - name: Run the integration test (deploy + verify + traffic + drills + failover)
+        if: ${{ inputs.stage != 'provision' }}
+        env:
+          SKIP_CHAOS: ${{ inputs.skip_chaos }}
+          # `Provision the lab` above already ran Step 1/2 of the manual, so the
+          # deploy takes the documented Step 3 path instead of revalidating the
+          # VM/networks phases.
+          SKIP_VM_CREATE: "1"
+          # k6 load profile after verify, short enough for a 4 vCPU runner: the
+          # request path is proven by the verify burst, this proves the lab holds
+          # up under concurrency (and its metrics reach Prometheus/Grafana).
+          TRAFFIC_DURATION: "45"
+          TRAFFIC_VUS: "3"
+        run: |
+          set -o pipefail
+          # The drills exercise the CronJobs and the certificate timer that a
+          # deploy + verify never runs; they are functional gates, not chaos.
+          ARGS=(--with-traffic --with-drills)
+          if [ "$SKIP_CHAOS" = "true" ]; then
+            ARGS+=(--skip-chaos)
+          fi
+          CONFIG="$CONFIG" STATE_FILE="$STATE_FILE" ARTIFACTS_DIR="$ARTIFACTS_DIR" \
+            tests/integration/run.sh "${ARGS[@]}"
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p "$ARTIFACTS_DIR"
+          {
+            echo "==== date ===="; date -u
+            echo "==== domains ===="; virsh -c qemu:///system list --all || true
+            echo "==== networks ===="; virsh -c qemu:///system net-list --all || true
+            echo "==== memory ===="; free -h
+            echo "==== disk ===="; df -h / "$HOME/vm_storage"
+            echo "==== vm storage ===="; du -sh "$HOME"/vm_storage/* 2>/dev/null || true
+            echo "==== deploy.state ===="; cat "$STATE_FILE" 2>/dev/null || true
+            echo "==== apparmor ===="; sudo aa-status 2>&1 | head -20 || true
+            echo "==== libvirt journal ===="
+            sudo journalctl -u virtqemud -u virtnetworkd -u libvirtd \
+              --no-pager -n 200 2>/dev/null || true
+            echo "==== qemu domain logs ===="
+            sudo tail -n 60 /var/log/libvirt/qemu/*.log 2>/dev/null || true
+            echo "==== dmesg (kvm/oom) ===="
+            sudo dmesg 2>/dev/null | grep -iE "kvm|oom|killed process" | tail -n 40 || true
+            echo "==== nodes: SSH authentication probe ===="
+            for ip in 192.168.10.1 192.168.10.15 192.168.10.20; do
+              echo "-- ubuntu@$ip"
+              timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" -o ConnectTimeout=6 \
+                -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" \
+                'echo NODE_OK; sudo -n -H true && echo SUDO_OK || echo SUDO_DENIED' 2>&1 \
+                | grep -vE "^debug1: (Reading|Offering|Trying|Authentications)" \
+                | tail -14 || true
+            done
+            echo "==== nodes: CPU time (busy = installing, idle = done or stuck) ===="
+            for d in ufw-router internal-monitor internal-storage; do
+              printf -- "-- %s: " "$d"
+              virsh -c qemu:///system domstats "$d" --cpu-total 2>&1 \
+                | grep -E "cpu.time|state" | tr '\n' ' ' || true
+              echo
+            done
+            echo "==== backup store (garage, off-DRBD) ===="
+            docker ps -a --filter "name=cms-garage" \
+              --format "{{.Names}} {{.Image}} {{.Status}}" 2>&1 || true
+            docker inspect -f 'network={{.HostConfig.NetworkMode}} ports={{json .HostConfig.PortBindings}}' \
+              cms-garage 2>&1 || true
+            docker logs --tail 30 cms-garage 2>&1 || true
+            sudo ls -ld /var/lib/cms-garage 2>&1 || true
+            sudo ls -l /var/lib/cms-garage 2>&1 || true
+            curl -s -o /dev/null -w "garage s3 endpoint: %{http_code}\n" -m 5 \
+              http://192.168.10.254:3900/ 2>&1 || true
+            # Explains why Docker port publishing was not reachable from the
+            # guests (Garage now binds the internal address on the host network).
+            sysctl net.bridge.bridge-nf-call-iptables 2>&1 || true
+
+            echo "==== neighbours on virbr-int ===="
+            ip neigh show dev virbr-int 2>/dev/null || true
+            echo "==== router: netplan and networkd ===="
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" \
+              -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.1 '
+                echo "-- /etc/netplan --"
+                sudo ls -l /etc/netplan 2>&1 || true
+                echo "-- overlay --"
+                sudo cat /etc/netplan/99-cms-router.yaml 2>&1 || true
+                echo "-- netplan get --"
+                sudo netplan get 2>&1 || true
+                echo "-- addresses --"
+                ip -4 -o addr show 2>&1 || true
+                echo "-- routes --"
+                ip -4 route 2>&1 || true
+                echo "-- backup --"
+                sudo ls -l /root/cms-netplan-backup 2>&1 || true
+                echo "-- apply log --"
+                sudo tail -20 /tmp/cms-netplan.log 2>&1 || true
+                echo "-- networkd journal (tail 40) --"
+                sudo journalctl -u systemd-networkd --no-pager -n 40 2>&1 || true
+              ' 2>&1 || true
+            echo "==== jumpstart: netboot flags, services and logs ===="
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" \
+              -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.10 '
+                echo "-- netboot flags --"
+                for n in ufw-router internal-monitor internal-storage; do
+                  printf "%s: " "$n"
+                  sudo cobbler system report --name "$n" 2>/dev/null \
+                    | grep -i "netboot" || echo "(no netboot line)"
+                done
+                echo "-- services --"
+                systemctl is-active named isc-dhcp-server apache2 cobblerd \
+                  tftpd-hpa nfs-kernel-server 2>&1 | tr "\n" " "; echo
+                echo "-- cobbler version --"
+                sudo cobbler --version 2>&1 | head -5 || true
+                echo "-- cobbler objects --"
+                sudo cobbler distro list 2>&1 || true
+                sudo cobbler profile list 2>&1 || true
+                echo "-- distro mirror --"
+                sudo ls -l /var/www/cobbler/distro_mirror/ubuntu-24.04/casper/ \
+                  2>&1 | head -20 || true
+                sudo cat /var/lib/cobbler/isos/.cms-mirror-stamp 2>&1 || true
+                sudo stat -c "ISO %s bytes, mtime %Y" \
+                  /var/lib/cobbler/isos/ubuntu-24.04-live-server-amd64.iso \
+                  2>&1 || true
+                echo "-- cobblerd journal (tail 80) --"
+                sudo journalctl -u cobblerd --no-pager -n 80 2>/dev/null || true
+                echo "-- cobbler log (tail 80) --"
+                sudo tail -80 /var/log/cobbler/cobbler.log 2>/dev/null || true
+                echo "-- apache access log (tail 40) --"
+                sudo tail -40 /var/log/apache2/access.log 2>/dev/null || true
+                echo "-- named journal (tail 30) --"
+                sudo journalctl -u named --no-pager -n 30 2>/dev/null || true
+                echo "-- dhcp journal (tail 80) --"
+                sudo journalctl -u isc-dhcp-server --no-pager -n 80 2>/dev/null || true
+              ' 2>&1 || true
+          } > "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
+
+          # Cluster-side state once the deploy has moved past provisioning: the
+          # later phases (DRBD, Kubernetes, CMS, monitoring) fail inside the
+          # guests, where the libvirt journal says nothing useful.
+          {
+            echo "==== cluster nodes: role state ===="
+            guest() {
+              ip="$1"; cmd="$2"
+              echo "-- ubuntu@$ip"
+              timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" -o ConnectTimeout=8 \
+                -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" "$cmd" 2>&1 \
+                | tail -200 || true
+            }
+            guest 192.168.10.11 'echo "[k3s]"; sudo systemctl is-active k3s; echo "[k3s restarts]"; systemctl show k3s -p NRestarts; echo "[uptime]"; uptime -s; echo "[memory]"; free -m; echo "[k3s result]"; systemctl show k3s -p Result -p ExecMainStartTimestamp; echo "[deploy kubectl]"; sudo -n -H bash -c "kubectl get nodes --no-headers | wc -l" 2>&1 || true; echo "[nodes]"; sudo k3s kubectl get nodes -o wide; echo "[token hashes]"; sudo sha256sum /var/lib/rancher/k3s/server/token /var/lib/rancher/k3s/server/node-token /root/.k3s-join-token 2>&1 || true; echo "[node-token size]"; sudo wc -l -c /var/lib/rancher/k3s/server/node-token 2>&1 || true; echo "[node-token trimmed hash]"; sudo cat /var/lib/rancher/k3s/server/node-token 2>/dev/null | tr -d "\r\n" | sha256sum || true; echo "[etcd members]"; sudo k3s kubectl get nodes -l node-role.kubernetes.io/etcd; echo "[etcd metrics]"; curl -s -m 5 http://127.0.0.1:2381/metrics | grep -E "^etcd_server_has_leader" || true; echo "[pods]"; sudo k3s kubectl get pods -A; echo "[journal]"; sudo journalctl -u k3s --no-pager -n 30; echo "[oom]"; sudo journalctl -k --no-pager -n 500 2>/dev/null | grep -iE "out of memory|killed process" | tail -5 || true; echo "[oomd]"; sudo journalctl -u systemd-oomd --no-pager -n 20 2>/dev/null || true; echo "[kernel tail]"; sudo journalctl -k --no-pager -n 20 2>/dev/null || true; echo "[drbd role]"; sudo drbdadm role cms_data; echo "[drbd]"; sudo drbdadm status; echo "[mount]"; findmnt -n -o TARGET,SOURCE,FSTYPE /mnt/data/mariadb || echo not-mounted; echo "[boot unit]"; systemctl is-enabled drbd-cms-boot.service; sudo journalctl -u drbd-cms-boot.service --no-pager -n 15; echo "[textfile]"; sudo ls -l /var/lib/prometheus/node-exporter; echo "[textfile metric]"; curl -s -m 5 http://localhost:9100/metrics | grep -E "^cms_" || echo none; echo "[drbd metrics timer]"; systemctl is-active cms-drbd-metrics.timer; systemctl is-enabled cms-drbd-metrics.timer; echo "[drbd metrics journal]"; sudo journalctl -u cms-drbd-metrics --no-pager -n 10'
+            guest 192.168.10.12 'echo "[k3s]"; sudo systemctl is-active k3s; echo "[drbd role]"; sudo drbdadm role cms_data; echo "[drbd]"; sudo drbdadm status; echo "[mount]"; findmnt -n -o TARGET,SOURCE,FSTYPE /mnt/data/mariadb || echo not-mounted; echo "[boot unit]"; systemctl is-enabled drbd-cms-boot.service; sudo journalctl -u drbd-cms-boot.service --no-pager -n 15; echo "[textfile]"; sudo ls -l /var/lib/prometheus/node-exporter; echo "[textfile metric]"; curl -s -m 5 http://localhost:9100/metrics | grep -E "^cms_" || echo none; echo "[drbd metrics timer]"; systemctl is-active cms-drbd-metrics.timer; systemctl is-enabled cms-drbd-metrics.timer; echo "[drbd metrics journal]"; sudo journalctl -u cms-drbd-metrics --no-pager -n 10'
+            guest 192.168.10.13 'echo "[k3s-agent]"; sudo systemctl is-active k3s-agent; echo "[join token]"; sudo sha256sum /root/.k3s-join-token 2>&1 || true; echo "[join token size]"; sudo wc -l -c /root/.k3s-join-token 2>&1 || true; echo "[join token trimmed hash]"; sudo cat /root/.k3s-join-token 2>/dev/null | tr -d "\r\n" | sha256sum || true; echo "[env]"; sudo sed -E "s/(TOKEN=).*/\1REDACTED/" /etc/systemd/system/k3s-agent.service.env 2>&1 || true; echo "[service]"; systemctl show k3s-agent -p ExecStart -p EnvironmentFiles -p Result -p NRestarts; echo "[journal]"; sudo journalctl -u k3s-agent --no-pager -n 30'
+            guest 192.168.10.14 'echo "[k3s-agent]"; sudo systemctl is-active k3s-agent; echo "[join token]"; sudo sha256sum /root/.k3s-join-token 2>&1 || true; echo "[join token size]"; sudo wc -l -c /root/.k3s-join-token 2>&1 || true; echo "[join token trimmed hash]"; sudo cat /root/.k3s-join-token 2>/dev/null | tr -d "\r\n" | sha256sum || true; echo "[env]"; sudo sed -E "s/(TOKEN=).*/\1REDACTED/" /etc/systemd/system/k3s-agent.service.env 2>&1 || true; echo "[service]"; systemctl show k3s-agent -p ExecStart -p EnvironmentFiles -p Result -p NRestarts; echo "[journal]"; sudo journalctl -u k3s-agent --no-pager -n 30'
+            guest 192.168.10.15 'echo "[nfs]"; sudo systemctl is-active nfs-kernel-server; echo "[exports]"; sudo exportfs -v'
+            # shellcheck disable=SC2016 # $pw expands on the guest, not the runner
+            guest 192.168.10.20 'echo "[units]"; systemctl is-active prometheus prometheus-node-exporter prometheus-alertmanager prometheus-blackbox-exporter grafana-server; echo "[prometheus]"; curl -sS -m 5 http://localhost:9090/-/ready; echo; echo "[grafana]"; curl -sS -m 5 http://localhost:3000/api/health; echo; echo "[grafana home]"; pw=$(sudo sed -n "s/^GF_SECURITY_ADMIN_PASSWORD=//p" /etc/grafana/grafana-admin.env 2>/dev/null); printf "user = \"admin:%s\"\n" "${pw:-admin}" | curl -sS -m 5 -K - http://localhost:3000/api/dashboards/home; echo; echo "[grafana env]"; systemctl show grafana-server -p Environment | sed -E "s/(PASSWORD|SECRET|TOKEN)=[^ ]*/\\1=REDACTED/g"; echo "[prometheus files]"; sudo ls -l /etc/prometheus; echo "[remote write]"; sudo grep -c -- "--web.enable-remote-write-receiver" /etc/default/prometheus; echo "[k6 metrics]"; curl -sS -m 5 "http://localhost:9090/api/v1/query?query=count(k6_http_reqs_total)"; echo; echo "[config check]"; echo "(alert-rules.yml is deployed by the monitoring phase, so an early run reports it missing)"; sudo promtool check config /etc/prometheus/prometheus.yml 2>&1 | tail -5; echo "[grafana listen]"; sudo ss -ltnp 2>/dev/null | grep -E ":3000" || true; echo "[grafana bind]"; sudo grep -nE "^[[:space:]]*;?[[:space:]]*http_addr" /etc/grafana/grafana.ini 2>/dev/null || true; echo "[grafana start]"; systemctl show grafana-server -p ActiveEnterTimestamp -p NRestarts; echo "[grafana journal]"; sudo journalctl -u grafana-server --no-pager -n 60 2>/dev/null || true; echo "[monitor ufw]"; sudo ufw status verbose 2>/dev/null || true'
+            guest 192.168.20.103 'echo "[units]"; systemctl is-active nginx keepalived prometheus-nginx-exporter; echo "[nginx -t]"; sudo nginx -t; echo "[vip]"; ip -4 -o addr show; echo "[keepalived]"; sudo journalctl -u keepalived --no-pager -n 30; echo "[vip https]"; curl -sk -m 8 -H "Host: cms.fake-enterprise.com" -o /dev/null -w "http_code=%{http_code}\n" https://192.168.20.100/; echo "[textfile]"; sudo ls -l /var/lib/prometheus/node-exporter; echo "[textfile metric]"; curl -s -m 5 http://localhost:9100/metrics | grep -E "^cms_" || echo none; echo "[keepalived metrics timer]"; systemctl is-active cms-keepalived-metrics.timer; systemctl is-enabled cms-keepalived-metrics.timer; echo "[keepalived metrics journal]"; sudo journalctl -u cms-keepalived-metrics --no-pager -n 10'
+            guest 192.168.20.101 'echo "[units]"; systemctl is-active apache2 prometheus-apache-exporter; echo "[mounts]"; mount | grep -i nfs; echo "[apache log]"; sudo tail -20 /var/log/apache2/wordpress_error.log 2>/dev/null; echo "[db nodeport]"; timeout 5 bash -c "cat < /dev/null > /dev/tcp/192.168.10.11/30306" && echo mariadb-nodeport-open || echo mariadb-nodeport-closed'
+          } >> "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
+
+          # Serial console and screen of the stalled installers. The serial
+          # port is a pty chardev, so `virsh console` refuses to run without a
+          # controlling TTY; reading the pty the domain holds gets the same
+          # output (the kernel logs there too, see the console=ttyS0 kernel
+          # option). The clients also carry a SPICE display, so a screenshot
+          # shows whatever the installer last drew on the VGA.
+          command -v convert >/dev/null 2>&1 \
+            || sudo apt-get install -y -qq imagemagick >/dev/null 2>&1 || true
+          {
+            echo "==== guest consoles ===="
+            for d in jumpstart ufw-router internal-monitor internal-storage; do
+              virsh -c qemu:///system screenshot "$d" "$ARTIFACTS_DIR/console-$d.ppm" \
+                2>&1 | sed "s/^/screenshot $d: /" || true
+              convert "$ARTIFACTS_DIR/console-$d.ppm" "$ARTIFACTS_DIR/console-$d.png" \
+                2>/dev/null || true
+              pty=$(virsh -c qemu:///system dumpxml "$d" 2>/dev/null \
+                | grep -oE "source path='[^']+'" | head -n1 | cut -d"'" -f2)
+              if [ -n "$pty" ]; then
+                sudo timeout 6 cat "$pty" 2>/dev/null | tr -d "\000" | tail -60 \
+                  > "$ARTIFACTS_DIR/console-$d.txt" || true
+              else
+                (sleep 2; printf "\n"; sleep 5) | timeout 15 script -qec \
+                  "virsh -c qemu:///system console $d --force" /dev/null \
+                  > "$ARTIFACTS_DIR/console-$d.txt" 2>&1 || true
+              fi
+              echo "-- $d serial console (tail) --"
+              tr -d "\000" < "$ARTIFACTS_DIR/console-$d.txt" | tail -40 || true
+            done
+          } >> "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: integration-hosted-artifacts
+          path: integration-artifacts/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Opt-in for manual runs and required by release: CI exercises the
+      # teardown path (VMs, disks and networks removed from whatever state the
+      # lab is in), so a failure here is a failure of the deliverable.
+      - name: Tear the lab down
+        if: ${{ inputs.teardown && always() }}
+        run: ./cms-ha -c "$CONFIG" cleanup --yes

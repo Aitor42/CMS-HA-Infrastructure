@@ -3,14 +3,14 @@
 <div align="center">
 
 [![Stack](https://img.shields.io/badge/Stack-Cobbler_%7C_Puppet_%7C_K3s_%7C_DRBD_%7C_Prometheus-0078D4?style=for-the-badge)](docs/SOFTWARE_BASELINE.md)
-[![Nodes](https://img.shields.io/badge/Nodes-14+_VMs-green?style=for-the-badge)]()
-[![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go)](cmd/cms-ha/)
+[![Nodes](https://img.shields.io/badge/Nodes-16_VMs-green?style=for-the-badge)]()
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go)](cmd/cms-ha/)
 [![IaC](https://img.shields.io/badge/IaC-Ansible_%7C_Go_CLI-blueviolet?style=for-the-badge)](ansible/)
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=for-the-badge)](.github/workflows/ci.yml)
-[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)]()
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
-**Production-grade, zero-touch infrastructure for a high-availability Content Management System.**  
-*14+ VMs · 2 segmented networks · 11 deployment phases · single Go binary · fully idempotent*
+**Zero-touch infrastructure for a high-availability Content Management System.**<br/>
+*16 VMs · 2 segmented networks · 14 deployment steps · single Go binary · idempotent*
 
 </div>
 
@@ -18,49 +18,47 @@
 
 ## Overview
 
-This project implements the **complete design, provisioning, and automation** of an enterprise-grade high-availability IT infrastructure running a WordPress CMS — from bare-metal OS installation to full-stack observability.
+This project implements the **design, provisioning, and automation** of an advanced high-availability infrastructure lab running a WordPress CMS — from OS installation to full-stack observability. It exercises selected VM/service failures on KVM; a single-host lab is not resilient to loss of the physical hypervisor.
 
-The entire environment is deployed with a **single command** (`cms-ha deploy`), requiring zero manual intervention across 16 virtual machines, 2 isolated network segments, and 11 orchestrated deployment phases.
+The environment is deployed with a **single command** (`cms-ha deploy`): 16 virtual machines, 2 isolated network segments and 14 pipeline steps, with no manual intervention.
 
 ### Orchestration Engine
 
 The environment is driven by three cooperating layers:
 
-- **`cms-ha` (Go CLI orchestrator)** — the supported entry point: a statically compiled binary with an integrated SSH connection pool, bounded worker semaphore concurrency, type-safe YAML configuration, `age`-based secret encryption, structured logging (`slog`), self-healing routines, phase checkpoints (`--resume` / `--from-phase`) and sub-second health verification.
-- **Ansible** (`ansible/`) — declarative *creation* of the libvirt networks and VM domains from `config.yaml`.
+- **`cms-ha` (Go CLI orchestrator)** — the supported entry point: a statically compiled binary with an integrated SSH connection pool, bounded worker semaphore concurrency, type-safe YAML configuration, `age`-based secret encryption, structured logging (`slog`), self-healing routines, phase checkpoints (`--resume` / `--from-phase`) and parallel health verification.
+- **Ansible** (`ansible/`, optional) — declarative *creation* of the libvirt networks and VM domains from `config.yaml`; the default, gate-validated creation path remains `cms-ha deploy`.
 - **Puppet** (`puppet/`) — node *desired state* (packages, services, exporters, `/etc/hosts`, …).
 
-> The legacy **v1 shell suite** (`scripts/`, `deploy_all.sh`) is **deprecated and
-> no longer maintained**; it is kept for historical reference only. See
-> [`scripts/README.md`](scripts/README.md) for the complete v1 → v2 mapping.
+> The legacy v1 shell suite has been removed; see `docs/LEGACY-V1-MAPPING.md` for the v1 → v2 command mapping.
 
 ### Key Technical Highlights
 
 | Area | Implementation |
 |:-----|:---------------|
 | **Zero-touch Provisioning** | Cobbler PXE server + Ubuntu autoinstall for unattended OS deployment |
-| **Idempotent Configuration** | Puppet 8 agent/server model with role-based manifests & auto SSL self-healing |
+| **Idempotent Configuration** | Puppet 8 agent/server model with role-based manifests & automatic recovery from stale Puppet SSL state (private-key mismatch or signature/verify failure) |
 | **HA Clustering** | K3s (lightweight Kubernetes) with 3 server nodes (embedded etcd, tolerates 1 failure) + 2 agent nodes |
-| **Synchronous Block Replication** | DRBD 9 Protocol C between master nodes for zero data loss with dynamic node affinity |
+| **Synchronous Block Replication** | DRBD 9 Protocol C, commit-time MariaDB redo flushing, verified mounts and dynamic node affinity; end-to-end RPO must be measured |
 | **Automated Failover** | Autonomous DRBD watchdog daemon (`drbd-failover-watchdog.service`) + gateway quorum verification + Kubernetes pod migration + chaos testing suite |
-| **Load Balancing** | Nginx reverse proxy with health checks across 2 WordPress/Apache frontends |
-| **Full-stack Observability** | Prometheus + Grafana with 19 alert rules (DRBD/etcd quorum, keepalived VIP, service & backup health) and dynamic scrape targets |
+| **Load Balancing** | Nginx reverse proxy with passive upstream failure checks across 2 WordPress/Apache frontends |
+| **Full-stack Observability** | Prometheus + Grafana with 19 alert rules (DRBD/etcd quorum, keepalived VIP, service & backup health), dynamic scrape targets and dashboards whose every panel query is checked against Prometheus |
 | **Defense in Depth** | UFW perimeter firewall + dynamic WAN MAC detection + per-node iptables rules + network segmentation |
 | **Internal PKI** | Private Certificate Authority (step-ca) with automated TLS trust distribution |
-| **Infrastructure as Code** | Ansible (`community.libvirt`) creates & declares networks, disks and VM domains |
+| **Infrastructure as Code (optional)** | Ansible (`community.libvirt`) declares networks, disks and VM domains; the Go `init-vms` phase is the default/gate path |
 | **Automated Backups** | Daily dump + off-DRBD upload to a Garage S3 store (container on the hypervisor), automated restore drill, `BackupMissing` alert |
-| **Secret Hardening** | `age` (X25519) auto-encryption of `config.yaml` secrets on first load (key kept at `~/.config/cms-ha/`, never committed); K3s join token distributed as a `0600` file — never in argv; database/WordPress/CA credentials supplied at runtime in the shell suite |
+| **Secret Hardening** | `age` (X25519) auto-encryption of `config.yaml` secrets on first load (key kept at `~/.config/cms-ha/`, never committed); K3s join token distributed as a `0600` file — never in argv; database/WordPress/CA credentials supplied in `config.yaml` |
 | **Access Hardening** | Non-root deploy account (`ssh.user`) with transparent `sudo -n`; direct root SSH disabled (`PermitRootLogin no`) on every node; SSH host keys pinned on first use (TOFU, fail-closed on mismatch) — see `docs/SECURITY.md` |
-| **Strict Failure Semantics** | Every remote command's exit code is verified per phase; broken DRBD/K3s state aborts the deploy instead of reporting silent success; failover tests validate shutdown and report un-runnable scenarios as `SKIP` |
+| **Strict Failure Semantics** | Critical DRBD/K3s failures abort deployment; failover tests validate shutdown, report un-runnable scenarios as `SKIP`, and reject skips in `--require-all` mode |
 | **CI/CD Pipeline** | GitHub Actions: Go test (-race), ShellCheck, yamllint, kubeconform, puppet-lint, ansible-lint, and a security job (`gosec` + `govulncheck` + `Trivy`) |
 
-> **Verified End-to-End Deployment** — The full infrastructure has been deployed, stress-tested, and validated end-to-end on KVM hypervisor environments (27 GB RAM limit), confirming flawless operation of all components: automated PXE provisioning, parallel Puppet convergence, K3s HA cluster, WordPress reachability via HTTPS (`200 OK`), DRBD replication, UFW NAT forwarding, and Prometheus metrics collection (`cms-ha verify` passing 100%).
+> **Evidence and limits** — automated deploy, verify and failover paths are implemented, but availability, recovery time and data integrity must be supported by results for the exact revision and topology tested. Keep a sanitized report and artifacts for each tested revision. Before upgrading an existing lab, read the [storage migration procedure](docs/MANUAL.md#62-wordpress-media-and-file-backups).
 
 ---
 
 ## Architecture
 
-The network is segmented into **two isolated subnets** connected by a UFW router/firewall:
+The network uses **two routed subnets** connected by a UFW router/firewall. Separate bridges do not by themselves provide service-level isolation:
 
 | Network | CIDR | Bridge | Purpose |
 |:--------|:-----|:-------|:--------|
@@ -132,20 +130,20 @@ graph TB
 | Component | Technology | Version | Purpose |
 |:----------|:-----------|:--------|:--------|
 | Operating System | Ubuntu Server | 24.04 LTS | Base OS for all nodes |
-| Bare-metal Provisioning | Cobbler | 3.3.x | PXE + autoinstall for unattended deployment |
+| Bare-metal Provisioning | Cobbler | APT package (not pinned) | PXE + autoinstall for unattended deployment |
 | Configuration Management | Puppet | 8.x | Declarative, agent-based configuration |
-| Container Orchestration | K3s | v1.29.x | Lightweight Kubernetes for HA clustering |
+| Container Orchestration | K3s | v1.29.9+k3s1 | Lightweight Kubernetes for HA clustering |
 | Database | MariaDB | 10.11.x | StatefulSet inside K3s cluster |
-| CMS | WordPress | 6.x | Content Management System |
-| Web Server | Apache | 2.4.x | CMS frontend server with PHP 8.3 |
-| Load Balancer | Nginx | 1.24.x | Reverse proxy with upstream health checks |
-| Block Replication | DRBD | 9.x | Synchronous Protocol C replication |
-| Metrics Collection | Prometheus | 2.x | Time-series monitoring with exporters |
-| Alerting | Prometheus alert rules (19) + Alertmanager | 2.x / 0.23 | Availability, DRBD/etcd quorum, keepalived, service & backup health; routed and deduplicated by Alertmanager |
-| Dashboards | Grafana | 11.x | Metrics visualisation and dashboards |
+| CMS | WordPress | `latest.tar.gz` at bootstrap (not pinned) | Content Management System |
+| Web Server | Apache | Ubuntu APT package (not pinned) | CMS frontend server with PHP 8.3 |
+| Load Balancer | Nginx | Ubuntu APT package (not pinned) | Reverse proxy with passive upstream failure checks |
+| Block Replication | DRBD | Kernel module + APT utilities (not version-pinned) | Synchronous Protocol C replication |
+| Metrics Collection | Prometheus | Ubuntu APT package (not pinned) | Time-series monitoring with exporters |
+| Alerting | Prometheus alert rules (19) + Alertmanager | Ubuntu APT packages (not pinned) | Availability, DRBD/etcd quorum, keepalived, service & backup health; routed and deduplicated by Alertmanager |
+| Dashboards | Grafana | 13.2.4 | Metrics visualisation and dashboards |
 | Firewall | UFW | — | Perimeter and per-node iptables rules |
-| PKI / TLS | step-ca | 0.27.x | Internal Certificate Authority |
-| Infrastructure Provisioning | Ansible + community.libvirt | 2.16 | Declarative network/VM creation from `config.yaml` |
+| PKI / TLS | step-ca | 0.30.2 | Internal Certificate Authority |
+| Infrastructure Provisioning (optional) | Ansible + community.libvirt | CI: ansible-core 2.21.5; collection ≥ 1.2.0 | Optional declarative network/VM creation; default is Go `init-vms` |
 | Virtualisation | KVM / QEMU / libvirt | — | Hypervisor and VM management |
 
 > Full software inventory with versions, dependencies, and download URLs: [`docs/SOFTWARE_BASELINE.md`](docs/SOFTWARE_BASELINE.md)
@@ -159,13 +157,15 @@ CMS-HA-Infrastructure/
 ├── README.md                        # This file
 ├── Makefile                         # Build, deploy, lint, and ops targets
 ├── config.yaml                      # Centralised typed configuration (age-encrypted secrets)
+├── schema/config.schema.json        # Generated JSON Schema for editor autocomplete/validation
 ├── go.mod / go.sum                  # Go module definition
+├── embed.go                         # Embeds templates/, kubernetes/ and Grafana dashboards
 │
 ├── cmd/cms-ha/                      # CLI entry point (Cobra)
 │   ├── main.go                      # Binary entry point
 │   └── root/                        # Command definitions
 │       ├── root.go                  # Root command + global flags (--config, --verbose, --dry-run)
-│       ├── phase.go                 # cms-ha phase <name>  (all 11 phases)
+│       ├── phase.go                 # cms-ha phase <name>  (all 13 phase subcommands)
 │       ├── deploy.go                # cms-ha deploy        (full orchestration)
 │       ├── vm.go                    # cms-ha vm <action>   (start, stop, shrink, fix-boot-order, ...)
 │       ├── cleanup.go               # cms-ha cleanup       (destroy all VMs, disks, and networks)
@@ -173,26 +173,31 @@ CMS-HA-Infrastructure/
 │       ├── test.go                  # cms-ha test failover (chaos engineering)
 │       ├── traffic.go               # cms-ha traffic       (k6 load test)
 │       ├── repair.go                # cms-ha repair k8s|clocks
-│       ├── secrets.go               # cms-ha secrets encrypt|decrypt|generate-key
+│       ├── secrets.go               # cms-ha secrets encrypt|decrypt|generate-key|rotate
+│       ├── config.go                # cms-ha config validate [--json]
 │       └── ...                      # backup, status, lint
 │
 ├── internal/                        # Core Go packages (not importable externally)
-│   ├── config/                      # Typed config loader (viper) + age encryption
+│   ├── config/                      # Typed YAML config loader (yaml.v3) + age encryption
 │   ├── ssh/                         # SSH connection pool + SFTP + parallel execution
 │   ├── libvirt/                     # virsh/virt-install/qemu-img wrapper
-│   ├── logging/                     # Coloured structured logging (slog + fatih/color)
+│   ├── logging/                     # Coloured structured logging (slog)
 │   ├── retry/                       # Retry/poll primitives with context
-│   ├── templates/                   # Go template renderer with embed.FS
 │   ├── deploy/                      # Orchestrator — coordinates all phases
 │   ├── lint/                        # External linter runner (shellcheck, yamllint, ...)
-│   ├── utils/                       # VM ops, verify, failover, repair, status
+│   ├── hypervisor/                  # VM creation, installation batches and lifecycle
+│   ├── verify/                      # Infrastructure and functional health checks
+│   ├── drills/                      # Backup/restore, TLS renewal and alert checks
+│   ├── utils/                       # Failover scenarios, repair and status
 │   └── phases/                      # Phase implementations (one package per phase)
 │       ├── initvms/                 # 00 — VM creation (libvirt/cloud-init/PXE)
 │       ├── cobbler/                 # 01 — Cobbler PXE server setup
 │       ├── registernodes/           # 02 — Register nodes in Cobbler
 │       ├── repairssh/               # 03 — SSH + Puppet CA repair
+│       ├── routerbootstrap/         # Router connectivity before Puppet downloads
 │       ├── puppet/                  # 04 — Puppet Server/Agent deployment
 │       ├── drbd/                    # 05 — DRBD block replication
+│       ├── backup/                  # Garage S3 backup store on the hypervisor
 │       ├── kubernetes/              # 06 — K3s HA cluster + MariaDB
 │       ├── nginx/                   # 07 — Nginx LB + WordPress frontends
 │       ├── monitoring/              # 08 — Prometheus + Grafana
@@ -200,15 +205,17 @@ CMS-HA-Infrastructure/
 │       ├── pki/                     # 10 — Internal CA (step-ca)
 │       └── traffic/                 # 11 — k6 load generator (pinned grafana/k6 container)
 │
-├── scripts/                         # Legacy v1 shell scripts — DEPRECATED (see scripts/README.md)
 ├── kubernetes/                      # K3s manifests — Kustomize tree (base/ + monitoring/ + overlays/ + backups/ + jobs/)
 ├── puppet/                          # Puppet manifests and modules (role-based)
 ├── templates/                       # Configuration templates (Go text/template)
 ├── ansible/                         # Infra as code: libvirt networks + VM domains (create/declare)
 ├── tests/integration/run.sh         # End-to-end integration driver (deploy + verify + failover)
 ├── docs/SECURITY.md                 # Non-root access, host-key TOFU, CI scanning model
+├── docs/LEGACY-V1-MAPPING.md        # v1 shell scripts → v2 commands (legacy scripts removed)
 ├── .github/workflows/ci.yml         # CI: build/tests + lint + kustomize/kubeconform + ansible-lint + security scan
-└── .github/workflows/integration.yml # CI: end-to-end lab run on a self-hosted KVM runner
+├── .github/workflows/release.yml    # Tagged releases: GoReleaser + Syft SBOM + Cosign keyless signature
+├── .github/workflows/integration.yml # CI: end-to-end lab run on a self-hosted KVM runner
+└── .github/workflows/integration-hosted.yml # CI: the same lab on a GitHub-hosted runner
 ```
 
 ---
@@ -218,7 +225,7 @@ CMS-HA-Infrastructure/
 ### Prerequisites
 
 - Linux host (AMD64) with **KVM/QEMU** and **libvirt** installed
-- **Go 1.22+** (for building from source) or download the pre-built binary
+- **Go 1.26+** (for building from source) or download the pre-built binary
 - At least **16 GB RAM** (27 GB recommended for full deployment)
 - Ubuntu 24.04 Server ISO
 - SSH key pair for cluster management
@@ -247,10 +254,13 @@ vim config.yaml
 # The configuration (CIDRs, node IPs/MACs/FQDNs, hotdesk bounds, HA quorum) is validated on every run.
 ./cms-ha deploy
 
-# Preview all 12 pipeline steps without executing anything (--dry-run only works in deploy)
+# Preview the deploy plan without executing anything
 ./cms-ha deploy --dry-run
 
-# Or resume with pre-installed VMs
+# Preview one phase; it validates config and opens no SSH/libvirt connection
+./cms-ha phase setup-kubernetes --dry-run
+
+# Deploy services into already installed VMs (not checkpoint resume)
 ./cms-ha deploy --skip-vm-create
 
 # Run a specific phase
@@ -260,14 +270,14 @@ vim config.yaml
 ./cms-ha -v deploy
 ```
 
-The legacy Bash deployment does not use the Go CLI's automatic encryption. Before using it, provide `DB_PASS`, `DB_ROOT_PASS`, `DB_EXPORTER_PASS`, and `WP_ADMIN_PASS` through the environment; avoid storing those values in shell scripts or committed files.
+The orchestrator executes all phases sequentially: VM Init (jumpstart) → Cobbler → Register Nodes → VM Init (clients) → Repair SSH → Router Gateway (addresses, forwarding, NAT) → Puppet → DRBD → Garage Backups → K3s → Nginx & WordPress → Monitoring → UFW → Internal CA (14 pipeline steps, from 13 distinct phases; `--skip-vm-create` drops the two VM Init steps for a 12-step run).
 
-The orchestrator executes all phases sequentially: VM Init (jumpstart) → Cobbler → Register Nodes → VM Init (clients) → Repair SSH → Puppet → DRBD → K3s → Nginx & WordPress → Monitoring → UFW → Internal CA (12 pipeline steps, from 11 distinct phases; `--skip-vm-create` drops the two VM Init steps for a 10-step run).
+### Optional: provisioning with Ansible (Infrastructure as Code)
 
-### Provisioning with Ansible (Infrastructure as Code)
-
-The VM/network layer is declared in Ansible and generated from `config.yaml`
-(the single source of truth):
+The default and PXE/Cobbler-gated path is `cms-ha deploy` (Go `init-vms`).
+Ansible is an optional declarative alternative generated from `config.yaml`
+(the single source of truth) and is linted/parity-tested, but it is not the
+gate-validated path:
 
 ```bash
 # Generate the inventory from config.yaml
@@ -285,56 +295,61 @@ Ansible only *creates and declares* infrastructure. Runtime operations
 (start/stop/shrink) and fencing stay on the thin `libvirt`/`virsh` primitive in
 the Go CLI — see [`ansible/README.md`](ansible/README.md) for the boundary.
 
-> **Migration window:** the legacy Go `init-vms` phase is intentionally kept as
-> a fallback until `provision.yml` has been validated against a real hypervisor.
-> After that, provisioning goes through Ansible only.
+Both paths derive topology from `config.yaml`, but lint/parity checks do not
+prove equivalent OS installation. Use Go `init-vms` for the supported path;
+see the Ansible README for the optional path's limitations.
 
 ---
 
 ## Deployment Phases
 
-Each phase is invoked through the unified Go CLI (`cms-ha`). The third column lists the **deprecated** v1 shell script the phase replaced; it is kept only as a reference (see [`scripts/README.md`](scripts/README.md)) and must not be used for new work. The `Phase` numbers below are the **Technical Execution Sequence** (the `cms-ha phase` subcommands); they are intentionally distinct from the **Project Milestones** (`docs/phases/PHASE-00..11`, e.g. PHASE-03 = *HA Cluster and Database*) and from the **verification check numbers** (00-07). See `docs/PLAN.md` → *Project Phases & Deployment Mapping* for the full cross-reference.
+Each phase is invoked through the unified Go CLI (`cms-ha`). The numbers follow the project milestones in `docs/phases/`; the rows are listed in deployment order.
 
-| Phase | Go CLI Command (v2) | Deprecated v1 script | Target Nodes | Description |
-|:-----:|:--------------------|:-----------------|:-------------|:------------|
-| **00** | `cms-ha phase init-vms` | `scripts/00_init_vms.sh` | Hypervisor (16 VMs) | Virtual networks and VM domain creation via libvirt/KVM |
-| **01** | `cms-ha phase setup-cobbler` | `scripts/01_setup_cobbler.sh` | `jumpstart` | Cobbler PXE server, DHCP, TFTP, DNS (BIND9) & NFS |
-| **02** | `cms-ha phase register-nodes` | `scripts/02_register_cobbler_nodes.sh` | `jumpstart` | Host profile definitions, static IPs and MAC bindings |
-| **03** | `cms-ha phase repair-ssh` | `scripts/03_repair_ssh_puppet.sh` | All client nodes | Post-install SSH key synchronization & Puppet CA reset |
-| **04** | `cms-ha phase setup-puppet` | `scripts/04_setup_puppet.sh` | `jumpstart` + 13 clients | Bounded parallel Puppet catalog execution with SSL healing |
-| **05** | `cms-ha phase setup-drbd` | `scripts/05_setup_drbd.sh` | `internal-master1/2` | DRBD 9 synchronous block replication (Protocol C) |
-| **06** | `cms-ha phase setup-kubernetes` | `scripts/06_setup_kubernetes.sh` | Masters + Workers | K3s HA cluster, DRBD node affinity labeling & MariaDB |
-| **07** | `cms-ha phase setup-nginx-wordpress` | `scripts/07_setup_nginx_wordpress.sh` | `main-lb1/2`, `main-cms1/2` | Nginx reverse proxy (+ keepalived VIP) & WordPress/Apache frontends |
-| **08** | `cms-ha phase setup-monitoring` | `scripts/08_setup_monitoring.sh` | `internal-monitor` + all | Prometheus, Grafana, alert rules, blackbox probes & node exporters |
-| **09** | `cms-ha phase setup-ufw` | `scripts/09_setup_ufw.sh` | `ufw-router` + all nodes | Perimeter routing, dynamic WAN NAT & per-node UFW |
-| **10** | `cms-ha phase setup-ca` | `scripts/10_setup_internal_ca.sh` | `jumpstart` + all nodes | Smallstep PKI (step-ca) & cluster-wide TLS trust |
-| **11** | `cms-ha traffic` | `scripts/11_traffic_mix.sh` | Workstations & LB | k6 HTTP load/smoke profile (RPS, p95/p99, error rate) with optional Prometheus remote-write |
+| Phase | Command | Target Nodes | Description |
+|:-----:|:--------|:-------------|:------------|
+| **00** | `cms-ha phase init-vms` | Hypervisor (16 VMs) | Virtual networks and VM domain creation via libvirt/KVM |
+| **01** | `cms-ha phase setup-cobbler` | `jumpstart` | Cobbler PXE server, DHCP, TFTP, DNS (BIND9) & NFS |
+| **02** | `cms-ha phase register-nodes` | `jumpstart` | Host profile definitions, static IPs and MAC bindings |
+| **03** | `cms-ha phase repair-ssh` | All client nodes | Post-install SSH key synchronization & Puppet CA reset |
+| **03.5** | `cms-ha phase bootstrap-router` | `ufw-router` | Router gateway bring-up: static gateway addresses, IP forwarding and NAT (checked with a real download before Puppet needs one) |
+| **04** | `cms-ha phase setup-puppet` | `jumpstart` + all clients | Bounded parallel Puppet catalog execution with stale SSL state recovery |
+| **05** | `cms-ha phase setup-drbd` | `internal-master1/2` | DRBD 9 synchronous block replication (Protocol C) |
+| **05.5** | `cms-ha phase setup-backup` | Hypervisor | Garage S3 store for the nightly database dumps |
+| **06** | `cms-ha phase setup-kubernetes` | Masters + Workers | K3s HA cluster, DRBD node affinity labeling & MariaDB |
+| **07** | `cms-ha phase setup-nginx-wordpress` | `main-lb1/2`, `main-cms1/2` | Nginx reverse proxy (+ keepalived VIP) & WordPress/Apache frontends |
+| **08** | `cms-ha phase setup-monitoring` | `internal-monitor` + all | Prometheus, Grafana, alert rules, blackbox probes & node exporters |
+| **09** | `cms-ha phase setup-ufw` | `ufw-router` + all nodes | Perimeter routing, dynamic WAN NAT & live UFW verification (node rules are Puppet-owned) |
+| **10** | `cms-ha phase setup-ca` | `jumpstart` + all nodes | Smallstep PKI (step-ca) & cluster-wide TLS trust |
+| **—** | `cms-ha traffic` | Workstations & LB | Post-deploy k6 load/smoke profile (RPS, p50/p95/p99, error rate); every Grafana panel query is then checked for data |
 
 ---
 
-## Orchestrator Architecture & Concurrency Model
+## Orchestrator Design
 
-The Go orchestrator (`cmd/cms-ha` and `internal/`) was engineered to replace serial bash loops with enterprise-grade concurrent execution patterns, connection reuse, and self-healing safeguards.
+The Go orchestrator keeps the pipeline fast and safe:
 
-### 1. SSH Connection Pooling (`internal/ssh`)
-- **Persistent Connection Multiplexing:** Maintains an active pool of authenticated SSH clients per IP, eliminating the overhead of negotiating TLS handshakes on every command.
-- **Thread-Safe Operations:** Protected by `sync.RWMutex` with lazy-initialization on first call and safe concurrent execution across multiple goroutines.
-- **In-Memory Streaming:** Direct SFTP/SCP payload delivery (`CopyContent`) without relying on external file artifacts on the hypervisor host.
+- **SSH connection pool** (`internal/ssh`) — one authenticated client per IP, safe for concurrent use, with in-memory SFTP uploads.
+- **Bounded parallelism** — clients converge in parallel (window from `deploy.puppet_concurrency`, auto 4–8 by CPU count) after the jumpstart node, so Puppet Server, DNS and Cobbler are up first. In phase 07 (Nginx/WordPress), the CMS frontends converge sequentially because the first one creates the WordPress schema; this ordering is not part of the parallel Puppet phase.
+- **Fast jumpstart (hosted workflow default)** — `phase init-vms --jumpstart-image cloud` boots a qcow2 overlay of the Ubuntu cloud image for iteration and CI. The CLI/config default remains ISO/PXE, and the ISO/PXE path remains the deliverable gate; the hosted workflow defaults to cloud because it is the fastest way to exercise the rest of the pipeline.
+- **Fast provisioning (hosted workflow default)** — `deploy --fast-provisioning` (or `vm.provisioning: cloud`) installs the jumpstart and every client node from the same cloud image, with per-node cloud-init for hostname, MACs, static addresses and SSH key. The CLI/config default remains PXE; the hosted workflow defaults to `fast_provisioning=true` for speed. The PXE/Cobbler run remains the deliverable gate (self-hosted `integration.yml`, or a hosted dispatch with `jumpstart_image=iso` and `fast_provisioning=false`).
+- **Self-healing** — when a Puppet agent reports a private-key mismatch or a `certificate signature failure`/`certificate verify failed`, the stale certificate is cleaned, the client SSL state is removed and the catalog is retried once. If the retry still fails, use the manual recovery steps in [`docs/MANUAL.md`](docs/MANUAL.md). Broken DRBD/K3s state aborts the deploy instead of reporting success.
+- **Secrets** — service passwords are age-encrypted on first load; the key lives in `~/.config/cms-ha/age.key`, outside the repository. `cms-ha secrets rotate` rekeys the config and keeps timestamped backups; `gitleaks` scans the tree in CI.
+- **Checkpoints and run correlation** — `deploy.state` binds progress to the executable, host and non-secret configuration. `--resume` skips recorded completed/assumed phases; `--from-phase` resets the suffix and records earlier phases as operator assumptions. Neither checks for live drift. A `deploy.state.lock` file makes a second concurrent deploy fail fast instead of corrupting the checkpoint. Every run gets a `run_id` (or accepts `--run-id`), printed once and stored in both `deploy.state` and `timings.json`, so a CI log, checkpoint and timing report can be matched without parsing free text.
 
-### 2. Bounded Concurrency & Staged Execution
-- **Worker Semaphore Pool (Puppet):** Rather than spawning unbounded goroutines that would exhaust the Puppet Master's CPU and memory (causing connection timeouts and 500 errors), `setup-puppet` utilizes a worker semaphore pool with a concurrency limit of **4**. This accelerates convergence across 13 client nodes from >7 minutes down to **~90 seconds**.
-- **Staged Master Convergence:** The orchestrator guarantees that the `role::jumpstart` Puppet manifest converges *before* any client node executes. This ensures that Puppet Server (8140), DNS (53), Cobbler (25151), DHCP (67), and TFTP (69) are actively listening before clients request catalogs.
-- **Sequential DB Initialization Guard:** In `setup-nginx-wordpress`, CMS frontends are converged sequentially (`main-cms1` followed by `main-cms2`) to prevent concurrent race conditions during the initial WordPress core database schema generation on MariaDB.
-- **Parallel Exporter & Firewall Convergence:** Phases `setup-monitoring`, `setup-ufw`, and `setup-ca` fan out in parallel across all cluster nodes with automatic progress tracking and aggregated error reporting.
+---
 
-### 3. Self-Healing & Distributed State Resilience
-- **Puppet SSL Self-Healing:** Detects SSL certificate discrepancies (`certificate verify failed`) automatically. If a node has a stale certificate, the orchestrator revokes and cleans the certificate on the master, deletes local SSL data on the client, regenerates a fresh CSR, signs it, and re-executes the catalog cleanly.
-- **Dual FQDN & Short Hostname Resolution:** DRBD resource configurations (`templates/drbd/cms-data.res`) and Kubernetes node affinity labeling (`kubectl label node ... drbd-status=primary`) dynamically match both FQDN (`internal-master1.internal.local`) and short hostname (`internal-master1`), guaranteeing that storage mounts and pod affinity never get trapped in `Pending` states.
-- **Idempotent NAT Table Injection:** In `setup-ufw`, the router discovers the dynamic WAN interface by MAC address (`52:54:00:10:00:02` -> `enp3s0`), strips existing NAT blocks to prevent duplicate accumulation, and injects the `*nat` table cleanly before `*filter` in `/etc/ufw/before.rules`.
+## Design Decisions
 
-### 4. Asymmetric Secret Management (`internal/config`)
-- Sensitive values (database, exporter, WordPress administrator, and provisioner passwords) can be entered in `config.yaml`; the CLI encrypts them automatically on first config load using `age` (X25519).
-- The generated private identity is stored at `~/.config/cms-ha/age.key`, outside the repository. Keep a secure backup; built-in manual key/encrypt/decrypt commands are also available.
+| Decision | Why | Trade-off |
+|:---------|:----|:----------|
+| **Go orchestrator instead of a shell suite** | Typed configuration, unit tests, bounded parallelism, structured errors and resumable checkpoints in one binary. | The team must maintain Go code; the removed v1 scripts remain available in git history and their command mapping is in [`docs/LEGACY-V1-MAPPING.md`](docs/LEGACY-V1-MAPPING.md). |
+| **PXE/Cobbler is the deliverable gate; cloud is the fast path** | PXE proves the real bare-metal path (DHCP/TFTP/autoinstall); cloud images cut iteration and hosted-CI time. | Two provisioning paths must stay in parity; the hosted workflow defaults to cloud, while releases force ISO/PXE. |
+| **Ubuntu 24.04 LTS + Puppet 8** | Long support window, mature autoinstall, and declarative convergence for 16 nodes. | Puppet catalog runs are slower than ad-hoc shell, so client convergence is bounded and parallel. |
+| **K3s with embedded etcd** | A lightweight, HA-capable Kubernetes control plane that fits the lab footprint. | etcd quorum is sensitive to disk latency; the design uses dedicated masters and DRBD-backed data. |
+| **DRBD 9 Protocol C + MariaDB StatefulSet** | Synchronous replication keeps the database available through a node loss without a shared SAN. | Writes pay replication latency; split-brain handling and fencing are explicit operational procedures. |
+| **age-encrypted secrets + non-root SSH** | No plaintext credentials in git and no direct root login; privileged commands use `sudo -n`. | The operator must protect and back up the age identity; `secrets rotate` documents the rekey procedure. |
+| **Kustomize manifests and embedded templates** | The binary ships the same manifests/templates it deploys; no drift between a repo checkout and the release. | Changes require a rebuild; CI validates the rendered manifests with kubeconform. |
+| **Pinned tools, images and checksums** | Reproducible CI and releases; a floating tag cannot silently change deployed bits. | Version bumps are deliberate PRs (Dependabot or manual), not automatic at runtime. |
 
 ---
 
@@ -345,32 +360,46 @@ The Go orchestrator (`cmd/cms-ha` and `internal/`) was engineered to replace ser
 Run the comprehensive, parallel health verifier:
 
 ```bash
-# Supported: runs 8 checks in parallel in ~1.5s
+# Supported: runs 10 checks in parallel; the end-to-end check adds a short
+# request burst through the load-balancer VIP and functional checks of the CMS
+# features, the database round-trip and the monitoring probes, so the run takes
+# seconds
 ./cms-ha verify
-
-# Deprecated v1 equivalent (reference only, see scripts/README.md)
-bash scripts/utils/verify_all.sh
 ```
 
 Example output from a fully converged environment:
 
 ```text
 ℹ Starting phase: Infrastructure Verification
-✓ Phase 00 - Libvirt VMs & Networks: [PASS] (15 running VMs)
-✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 13)
-✓ Phase 02 - Puppet Server & Certs: [PASS] (Certs: 13)
+✓ Phase 00 - Libvirt VMs & Networks: [PASS] (16 running VMs)
+✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 15)
+✓ Phase 02 - Puppet Server & Certs: [PASS] (Certs: 15)
 ✓ Phase 03 - Nginx & Apache & SSL: [PASS]
 ✓ Phase 04 - K3s & MariaDB Pod: [PASS]
 ✓ Phase 05 - Prometheus & Grafana: [PASS]
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
-✓ Completed phase: Infrastructure Verification in 1.52s
+✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v13.2.4))
+✓ Phase 10 - Stack functional checks (CMS pages, REST API, frontends, load balancers, MariaDB, backup store, probes, Grafana): [PASS]
+✓ Completed phase: Infrastructure Verification in 21.37s
+```
+
+### Configuration Validation
+
+Validate the same full configuration the deploy path uses, without touching any
+infrastructure. `--json` is a stable object for CI and scripts:
+
+```bash
+./cms-ha config validate
+./cms-ha config validate --json | jq
 ```
 
 ### SSH Connectivity Matrix
 
 ```bash
-./cms-ha status ssh
+./cms-ha status ssh              # one probe per node
+./cms-ha status ssh --wait 10m   # wait until every node accepts SSH, then print
+./cms-ha status ssh --json       # machine-readable rows (name, ip, state, ssh, healthy)
 ```
 
 ```text
@@ -423,7 +452,7 @@ main-hotdesk3        192.168.20.203  running    OK
 | Service | URL | Purpose |
 |:--------|:----|:--------|
 | Prometheus | `http://192.168.10.20:9090` | Metrics collection and alerting engine (`/alerts` shows firing alerts) |
-| Grafana | `http://192.168.10.20:3000` | Dashboards and visualisation (node overview + HA overview) |
+| Grafana | `http://192.168.10.20:3000` | Dashboards and visualisation (opens on the HA overview; node overview + HA overview). The admin password is generated on the first deployment in `/etc/grafana/grafana-admin.env` on the monitor node and reused afterwards, or set `monitoring.grafana_admin_password` in `config.yaml`. |
 | Alertmanager | `http://192.168.10.20:9093` | Alert routing, grouping and deduplication; add a webhook/email/Slack receiver to enable delivery (see `docs/MANUAL.md` §4) |
 
 ### Alert Rules
@@ -438,13 +467,13 @@ main-hotdesk3        192.168.20.203  running    OK
 | DiskSpaceCritical | critical | Filesystem < 10% free > 1 min |
 | DiskSpaceWarning | warning | Filesystem < 20% free > 5 min |
 | HighMemoryUsage | warning | Memory usage > 85% > 5 min |
-| MariaDBDown | critical | MariaDB exporter unreachable > 1 min |
-| NginxDown | critical | Nginx exporter unreachable > 1 min |
-| ApacheDown | warning | Apache exporter unreachable > 2 min |
+| MariaDBDown | critical | MariaDB down or its exporter unreachable > 1 min |
+| NginxDown | critical | Nginx down or its exporter unreachable > 1 min |
+| ApacheDown | warning | Apache down or its exporter unreachable > 2 min |
 | K3sNodeNotReady | critical | Kubelet unreachable > 3 min |
-| HighHTTP5xxRate | warning | HTTP 5xx rate > 5% over 5 min |
+| HTTP5xxResponses | warning | The blackbox probe receives a 5xx for > 2 min |
 | PrometheusTargetMissing | warning | Any scrape target down > 5 min |
-| BackupMissing | warning | No successful offsite backup > 26 h |
+| BackupMissing | critical | No successful offsite backup > 26 h |
 | BackupRestoreTestFailing | warning | Restore drill failing > 48 h |
 | EtcdNoQuorum | critical | Fewer than 2 of 3 etcd members reachable / no leader |
 | DRBDPeerDown | critical | DRBD replication link down > 2 min |
@@ -460,7 +489,8 @@ HTTP load/smoke generation is delegated to [k6](https://k6.io/), run from a
 pinned `grafana/k6` container on the hypervisor (docker/podman required). The
 profile lives in `templates/traffic/cms-smoke.js` and exercises the WordPress
 surface (home, search, REST API, feeds, login) with pass/fail thresholds on the
-error rate and p95/p99 latency.
+error rate and p95/p99 latency. It reports p50, p95 and p99, and the HA
+dashboard plots all three.
 
 ```bash
 # External (through the keepalived VIP) — the default
@@ -486,34 +516,60 @@ Automated failover tests validate the HA design under real failure conditions:
 ```bash
 ./cms-ha test failover
 
-# Inspect state without restoring
+# Acceptance run: no skipped scenarios, machine-readable evidence
+./cms-ha test failover --require-all --results-file failover.json
+
+# Inspect state without restoring the failed node (later scenarios may SKIP)
 ./cms-ha test failover --skip-restore
 ```
 
 | Test | Simulated Failure | Validated Behaviour |
 |:-----|:------------------|:-------------------|
-| DRBD Master Failover | Primary master node shutdown | Watchdog detects failure (15s), promotes Secondary, migrates MariaDB pod, CMS stays online |
-| CMS Frontend Failover | WordPress node shutdown | Nginx routes traffic to surviving frontend with zero downtime |
-| K3s Worker Failover | Worker node shutdown | Pods reschedule to remaining worker |
+| DRBD Master Failover | Shutdown of the node that currently holds the DRBD `Primary` role | Watchdog detects failure and promotes the Secondary after fencing; MariaDB becomes Ready on the survivor and the CMS responds again; the restarted master must return as Secondary. Measure interruption separately. |
+| DRBD Master Power Cut | The current DRBD Primary destroyed (no shutdown) | Same failover with stale `Primary` metadata left on the dead node: the survivor promotes, and the restarted node stands down as Secondary instead of becoming a second writer |
+| CMS Frontend Failover | WordPress node shutdown | Nginx routes subsequent traffic to the surviving frontend; quantify in-flight errors and interruption with concurrent load |
+| K3s Worker Failover | Worker node shutdown | MariaDB stays Running and Ready on its master (pinned by affinity + hostPath, it is not rescheduled onto a worker) and the VIP keeps serving the CMS |
+| Load Balancer VIP Failover | Shutdown of the balancer holding the VIP | keepalived moves the floating address to the survivor, which serves HTTPS; after the node returns both balancers are reachable and exactly one owns the VIP again |
 
 ---
 
 ## End-to-End Integration Test
 
-`tests/integration/run.sh` (also `make integration`) drives the whole pipeline on
-a real KVM host: **build → `deploy` → `verify` → `test failover`**. It is the job
-that `.github/workflows/integration.yml` runs on a **self-hosted runner labelled
-`kvm`**, triggered by hand (`workflow_dispatch`), because it needs libvirt and
-`/dev/kvm`.
+`tests/integration/run.sh` drives the whole pipeline on a real KVM host:
+**build → deploy → verify → failover**. Optional steps add the k6 load profile
+(`--with-traffic`) and the operational drills (`--with-drills`), which run the
+real backup and restore CronJobs, renew the balancer certificate over mTLS and
+assert that no alert is firing. The self-hosted `Integration (KVM lab)` workflow
+runs the driver on a `kvm` runner; the hosted workflow adds traffic and drills on
+the reduced topology.
 
 ```bash
-make integration           # full deploy + verify + failover
+make integration           # deploy + verify + failover
+make integration-traffic   # same, plus 45s of k6 load against the VIP
+make integration-drills    # traffic and the operational drills
 make integration-resume    # resume from the deploy.state checkpoint
 tests/integration/run.sh --skip-deploy --skip-chaos   # verify only
 ```
 
-The deployment checkpoint (`deploy.state`) is collected as a CI artifact so a
-failed run can be resumed with `./cms-ha deploy --resume`.
+The deployment checkpoint (`deploy.state`) is collected as a CI artifact. A
+failed run can resume with the same executable, non-secret configuration,
+provisioning options and host using `./cms-ha deploy --resume`. Legacy or
+mismatched progress is rejected; see the [deployment and checkpoint procedure](docs/MANUAL.md#step-3-service-and-application-deployment).
+A checkpoint is not proof that remote state has not drifted.
+
+The driver saves `failover.json` and requires every chaos scenario to run. Its
+optional k6 step runs **before**, not during, chaos. Scenario durations include
+preflight and node restoration, not the measured CMS outage or RTO.
+
+The same driver also runs on a standard `ubuntu-latest` runner through
+`.github/workflows/integration-hosted.yml` (nightly, push, manual dispatch and a reusable pre-publication release gate). Hosted runners do
+expose nested KVM, so the lab is genuinely virtualised, but it is small — 4
+vCPU and 15 GiB of RAM — which is why that workflow deploys `config.ci.yaml`
+(the shipped topology without the hotdesks) and provisions the clients in
+batches instead of booting every guest at once. Its dispatch defaults to the
+fast cloud path (`jumpstart_image=cloud`, `fast_provisioning=true`); the
+PXE/Cobbler deliverable gate is still the self-hosted workflow or a hosted
+dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 
 ---
 
@@ -525,24 +581,31 @@ failed run can be resumed with `./cms-ha deploy --resume`.
 | [MANUAL.md](docs/MANUAL.md) | Operations manual — deployment, scaling, failover, troubleshooting |
 | [SOFTWARE_BASELINE.md](docs/SOFTWARE_BASELINE.md) | Complete software inventory with versions and URLs |
 | [NETWORK_DIAGRAM.md](docs/NETWORK_DIAGRAM.md) | Network topology and service architecture diagrams |
+| [SECURITY.md](docs/SECURITY.md) | Non-root access, host-key pinning and CI scanning model |
+| [RELEASING.md](docs/RELEASING.md) | Tagged releases, checksums, SBOMs and Cosign verification |
+
+| [schema/config.schema.json](schema/config.schema.json) | Generated JSON Schema for `config.yaml` (autocomplete and pre-deploy validation) |
 | [phases/](docs/phases/) | Per-phase technical documentation |
 
 ---
 
 ## CI Pipeline
 
-The GitHub Actions CI validates every push and pull request:
+The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pull requests targeting `main`:
 
 | Job | Tool | Scope |
 |:----|:-----|:------|
-| **Go Build & Test** | `go build` + `go vet` + `go test` | CLI binary compilation + unit tests |
+| **Go Build & Test** | `go build` + `go vet` + `go test` + coverage | CLI binary compilation, unit tests, 40% global coverage floor and (on PRs) a 40% changed-line gate; `go-coverage` artifact |
+| Workflow Lint | actionlint + yamllint | Workflow syntax and pinned-action hygiene |
 | Shell Lint | ShellCheck + `bash -n` | All `.sh` scripts |
 | YAML Lint | yamllint | Kubernetes manifests, monitoring configs |
-| K8s Validation | kubeconform | Kubernetes manifests against v1.29 schemas |
-| Puppet Lint | puppet-lint | All `.pp` manifests |
+| K8s Validation | Kustomize + kubeconform | Non-empty rendered manifests against v1.29 schemas; invalid, errored or skipped resources fail |
+| Puppet Lint | puppet-lint + `puppet parser validate` | All `.pp` manifests |
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
-| Security Scan | gosec + govulncheck + Trivy | Go SAST, dependency CVEs, secrets/misconfig |
-| Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + DRBD failover (manual dispatch) |
+| Security Scan | gosec + govulncheck + Gitleaks + Trivy | Go SAST, dependency CVEs, committed secrets, secrets/misconfig |
+| Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + 5 failover scenarios (manual dispatch) |
+| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (push to `main`, nightly cloud, release PXE, manual dispatch) |
+| Release | CI + ISO/PXE integration + GoReleaser + Syft + Cosign | Tag `v*`: CI and full PXE gate on the tagged SHA before publication; archives, checksums, SBOMs and keyless signature (see `docs/RELEASING.md`) |
 
 ---
 

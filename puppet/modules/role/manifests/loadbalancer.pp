@@ -4,14 +4,37 @@
 # internal step-ca) + automated renewal timer, keepalived (shared VIP
 # 192.168.20.100), and UFW rules for HTTP/HTTPS/metrics/VRRP.
 
-class role::loadbalancer {
+class role::loadbalancer (
+  # Single source of truth for the addresses shared by the bootstrap
+  # certificate, the keepalived instance and the VIP metrics publisher. The
+  # values must match network.main.vip and nodes.lb* in config.yaml;
+  # tests/templates_test.go asserts that drift stays visible.
+  #
+  # `is_master` comes from the generated classifier, which knows the configured
+  # LB order. The default only keeps the committed site.pp (manual runs) working
+  # and must not be used to decide roles when the generated site.pp is present.
+  Boolean $is_master     = $facts['networking']['hostname'] == 'main-lb1',
+  String $cms_vhost      = 'cms.fake-enterprise.com',
+  String $vip            = '192.168.20.100',
+  String $master_ip      = '192.168.20.103',
+  String $backup_ip      = '192.168.20.104',
+  String $vrrp_auth_pass = 'cmshakeep',
+) {
 
   include role::base
+
+  $main_cidr = lookup('cms_ha::main_cidr', String, undef, '192.168.20.0/24')
+  $monitor_ip = lookup('cms_ha::monitor_ip', String, undef, '192.168.10.20')
+  # The VIP must be advertised with the main network's prefix, not a hardcoded
+  # /24: a non-/24 deployment would otherwise publish a VIP outside its subnet.
+  $vip_prefix = $main_cidr.split('/')[1]
 
   # ---------------------------------------------------------------------------
   # PACKAGES
   # ---------------------------------------------------------------------------
-  package { ['nginx', 'openssl', 'prometheus-nginx-exporter', 'keepalived']:
+  # curl is used by the nginx phase and the operational drills to probe the
+  # HTTPS vhost from each balancer; it is not guaranteed by the base image.
+  package { ['nginx', 'openssl', 'prometheus-nginx-exporter', 'keepalived', 'wget', 'curl']:
     ensure => installed,
   }
 
@@ -32,18 +55,19 @@ class role::loadbalancer {
   }
 
   exec { 'generate-ssl-cert':
-    command => '/usr/bin/openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-      -keyout /etc/nginx/ssl/cms.key \
-      -out    /etc/nginx/ssl/cms.crt \
-      -subj "/C=ES/ST=PaisVasco/L=Bilbao/O=FakeEnterprise/OU=IT/CN=cms.fake-enterprise.com"',
+    command => "/usr/bin/openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/nginx/ssl/cms.key -out /etc/nginx/ssl/cms.crt -addext \"subjectAltName=DNS:${cms_vhost},IP:${vip},IP:${master_ip},IP:${backup_ip}\" -subj \"/C=ES/ST=PaisVasco/L=Bilbao/O=FakeEnterprise/OU=IT/CN=${cms_vhost}\"",
     creates => '/etc/nginx/ssl/cms.crt',
     require => File['/etc/nginx/ssl'],
   }
 
-  # step CLI is required to renew the CA-issued certificate.
+  # step CLI is required to renew the CA-issued certificate. Pinned to the same
+  # release as pki.step_version in config.yaml (keep the two in sync): the
+  # version-independent "latest" alias would silently change what a fresh
+  # balancer installs. `set -e` plus the trailing `test -x` keep a failed
+  # download from exiting 0 and re-running on every convergence.
   exec { 'install-step-cli':
-    command => '/bin/bash -c "wget -q https://github.com/smallstep/cli/releases/latest/download/step-cli_$(dpkg --print-architecture).deb -O /tmp/step-cli.deb \
-      && dpkg -i /tmp/step-cli.deb || apt-get install -f -y; rm -f /tmp/step-cli.deb"',
+    command => '/bin/bash -c "set -e; wget -q https://github.com/smallstep/cli/releases/download/v0.31.0/step-cli_0.31.0-1_$(dpkg --print-architecture).deb -O /tmp/step-cli.deb; \
+      dpkg -i /tmp/step-cli.deb || apt-get install -f -y; rm -f /tmp/step-cli.deb; test -x /usr/bin/step"',
     creates => '/usr/bin/step',
     path    => ['/usr/bin', '/bin', '/usr/sbin', '/sbin'],
     timeout => 300,
@@ -151,16 +175,32 @@ class role::loadbalancer {
   }
 
   # ---------------------------------------------------------------------------
-  # KEEPALIVED — Floating VIP (192.168.20.100) shared by both LBs
+  # KEEPALIVED — Floating VIP shared by both LBs
   # ---------------------------------------------------------------------------
-  # main-lb1 is the preferred MASTER, main-lb2 the BACKUP. VRRP runs unicast
-  # between the two nodes over the main network; a track_script demotes a node
-  # whose nginx is unhealthy so the VIP follows a working balancer.
-  $lb_is_master = $facts['networking']['hostname'] == 'main-lb1'
-  $lb_peer  = $lb_is_master ? { true => '192.168.20.104', default => '192.168.20.103' }
-  $lb_prio  = $lb_is_master ? { true => '101',           default => '100' }
-  $lb_state = $lb_is_master ? { true => 'MASTER',        default => 'BACKUP' }
-  $lb_src_ip = $facts['networking']['interfaces']['enp2s0']['ip']
+  # The first configured LB is the preferred MASTER, the second the BACKUP
+  # (the generated classifier passes `is_master`). VRRP runs unicast between the
+  # two nodes over the main network; a track_script demotes a node whose nginx
+  # is unhealthy so the VIP follows a working balancer.
+  $lb_is_master = $is_master
+  $lb_peer  = $lb_is_master ? { true => $backup_ip, default => $master_ip }
+  $lb_prio  = $lb_is_master ? { true => '101',       default => '100' }
+  $lb_state = $lb_is_master ? { true => 'MASTER',    default => 'BACKUP' }
+
+  # VRRP runs over the main network, but the kernel name of that NIC must not
+  # be hardcoded: a load balancer only has one interface (enp1s0), while a node
+  # with more NICs names the second one enp2s0. Resolve it from the primary
+  # interface, which is the one carrying this node's address and default route,
+  # and fail loudly instead of compiling a catalog with an undefined address.
+  $lb_primary = $facts['networking']['primary']
+  $lb_iface_candidates = $facts['networking']['interfaces'].filter |$name, $data| {
+    $name == $lb_primary and $data['ip'] != undef
+  }
+  $lb_ifaces = $lb_iface_candidates.keys
+  if $lb_ifaces.length == 0 {
+    fail("role::loadbalancer: no IPv4 address on the primary interface (${lb_primary}) in facts; cannot configure keepalived")
+  }
+  $lb_iface  = $lb_ifaces[0]
+  $lb_src_ip = $lb_iface_candidates[$lb_iface]['ip']
 
   file { '/etc/keepalived/keepalived.conf':
     ensure  => file,
@@ -179,7 +219,7 @@ class role::loadbalancer {
 
       vrrp_instance CMS_VIP {
           state ${lb_state}
-          interface enp2s0
+          interface ${lb_iface}
           virtual_router_id 51
           priority ${lb_prio}
           advert_int 1
@@ -189,10 +229,10 @@ class role::loadbalancer {
           }
           authentication {
               auth_type PASS
-              auth_pass cmshakeep
+              auth_pass ${vrrp_auth_pass}
           }
           virtual_ipaddress {
-              192.168.20.100/24
+              ${vip}/${vip_prefix}
           }
           track_script {
               chk_nginx
@@ -222,16 +262,61 @@ class role::loadbalancer {
     source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.sh',
   }
 
-  cron { 'cms-keepalived-metrics':
-    ensure  => present,
-    command => '/usr/local/bin/cms-keepalived-metrics.sh 192.168.20.100 >/dev/null 2>&1',
-    user    => 'root',
-    minute  => '*',
+  # The VIP is published to the script through an environment file so the
+  # systemd unit carries no address of its own: keepalived.conf and the metrics
+  # publisher now read the same class parameter.
+  file { '/etc/default/cms-keepalived-metrics':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0644',
+    content => "CMS_VIP=${vip}\n",
+  }
+
+  # A systemd timer, not cron: the lab images do not reliably run a cron
+  # daemon, and a missing publisher only shows up as blank dashboard panels and
+  # silent alerts. systemd is the one scheduler guaranteed to be running.
+  file { '/etc/systemd/system/cms-keepalived-metrics.service':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0644',
+    source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.service',
+    notify => Exec['cms-keepalived-metrics-daemon-reload'],
+  }
+
+  file { '/etc/systemd/system/cms-keepalived-metrics.timer':
+    ensure => file,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0644',
+    source => 'puppet:///modules/role/cms-ha/cms-keepalived-metrics.timer',
+    notify => Exec['cms-keepalived-metrics-daemon-reload'],
+  }
+
+  exec { 'cms-keepalived-metrics-daemon-reload':
+    command     => '/bin/systemctl daemon-reload',
+    refreshonly => true,
+    before      => Service['cms-keepalived-metrics.timer'],
+  }
+
+  service { 'cms-keepalived-metrics.timer':
+    ensure  => running,
+    enable  => true,
     require => [
       File['/usr/local/bin/cms-keepalived-metrics.sh'],
       File['/var/lib/prometheus/node-exporter'],
-      Service['keepalived'],
+      File['/etc/default/cms-keepalived-metrics'],
+      File['/etc/systemd/system/cms-keepalived-metrics.service'],
+      File['/etc/systemd/system/cms-keepalived-metrics.timer'],
+      Exec['cms-keepalived-metrics-daemon-reload'],
     ],
+  }
+
+  # Earlier revisions published from cron; remove the entry so an upgraded node
+  # does not also run the script every minute.
+  cron { 'cms-keepalived-metrics':
+    ensure => absent,
   }
 
   # ---------------------------------------------------------------------------
@@ -239,25 +324,29 @@ class role::loadbalancer {
   # ---------------------------------------------------------------------------
   exec { 'ufw-lb-http':
     command => '/usr/sbin/ufw allow 80/tcp comment "HTTP"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW IN"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "80/tcp.*ALLOW"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-lb-https':
     command => '/usr/sbin/ufw allow 443/tcp comment "HTTPS"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "443/tcp.*ALLOW IN"',
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "443/tcp.*ALLOW"',
     require => Exec['ufw-enable'],
   }
 
   exec { 'ufw-lb-nginx-exporter':
-    command => '/usr/sbin/ufw allow from 192.168.10.20 to any port 9113 proto tcp comment "nginx_exporter"',
+    command => "/usr/sbin/ufw allow from ${monitor_ip} to any port 9113 proto tcp comment \"nginx_exporter\"",
     unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "9113"',
     require => Exec['ufw-enable'],
   }
 
+  # Keepalived speaks VRRP (IP protocol 112) between the two balancers. ufw
+  # only accepts protocol *names* from its supported list, so "proto 112" is
+  # rejected ("ERROR: Unsupported protocol '112'") and the catalog fails; the
+  # supported spelling renders in `ufw status` as "<cidr>/vrrp".
   exec { 'ufw-lb-vrrp':
-    command => '/usr/sbin/ufw allow from 192.168.20.0/24 proto 112 comment "keepalived VRRP"',
-    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "112"',
+    command => "/usr/sbin/ufw allow from ${main_cidr} proto vrrp comment \"keepalived VRRP\"",
+    unless  => '/usr/sbin/ufw status | /usr/bin/grep -q "vrrp"',
     require => Exec['ufw-enable'],
   }
 }

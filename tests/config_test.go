@@ -1,12 +1,14 @@
 package tests
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/testutil"
 )
 
 func TestConfig_LoadAndNodeSpecs(t *testing.T) {
@@ -16,7 +18,7 @@ vm:
   libvirt_uri: "qemu:///system"
 
 ssh:
-  private_key: "~/.ssh/id_ed25519"
+  private_key: "~/.ssh/` + testutil.FakeSecret("id") + `"
   connect_timeout: 10s
 
 network:
@@ -134,7 +136,7 @@ nodes:
 database:
   name: "wordpress"
   user: "wp_user"
-  password: "WpS3cur3P4ss!"
+  password: "` + testutil.FakeSecret("database") + `"
   root_password: "mysqlrootpass"
   port: 30306
 
@@ -146,7 +148,7 @@ monitoring:
 
 pki:
   ca_port: 8443
-  provisioner_password: "StepCA-Pr0v1s10ner!"
+  provisioner_password: "` + testutil.FakeSecret("provisioner") + `"
   step_version: "0.27.5"
   step_ca_version: "0.27.5"
   domain: "ca.internal.local"
@@ -199,7 +201,7 @@ func TestConfig_LegacyBatchModeFieldIsIgnored(t *testing.T) {
 vm:
   storage_dir: "~/vm_storage"
 ssh:
-  private_key: "~/.ssh/id_ed25519"
+  private_key: "~/.ssh/` + testutil.FakeSecret("id") + `"
   batch_mode: true
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -248,6 +250,59 @@ func TestConfig_SecretsEncryption(t *testing.T) {
 	}
 }
 
+func TestConfig_JumpstartImageMode(t *testing.T) {
+	cases := []struct {
+		set  string
+		want string
+	}{
+		{"", "iso"},
+		{"iso", "iso"},
+		{" Cloud ", "cloud"},
+	}
+	for _, tc := range cases {
+		cfg := &config.Config{VM: config.VMConfig{JumpstartImage: tc.set}}
+		if got := cfg.JumpstartImageMode(); got != tc.want {
+			t.Errorf("JumpstartImageMode(%q) = %q, want %q", tc.set, got, tc.want)
+		}
+	}
+}
+
+func TestConfig_ClientProvisioningMode(t *testing.T) {
+	cases := []struct {
+		set  string
+		want string
+	}{
+		{"", "pxe"},
+		{"pxe", "pxe"},
+		{" Cloud ", "cloud"},
+	}
+	for _, tc := range cases {
+		cfg := &config.Config{VM: config.VMConfig{Provisioning: tc.set}}
+		if got := cfg.ClientProvisioningMode(); got != tc.want {
+			t.Errorf("ClientProvisioningMode(%q) = %q, want %q", tc.set, got, tc.want)
+		}
+	}
+}
+
+func TestConfig_RuntimeRAMMB(t *testing.T) {
+	cases := []struct {
+		name string
+		node config.NodeDetail
+		want int
+	}{
+		{"final wins", config.NodeDetail{RAMInstallMB: 3072, RAMFinalMB: 1024}, 1024},
+		{"install fallback", config.NodeDetail{RAMInstallMB: 3072}, 3072},
+		{"zero fallback", config.NodeDetail{}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.node.RuntimeRAMMB(); got != tc.want {
+				t.Errorf("RuntimeRAMMB() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConfig_Validate(t *testing.T) {
 	validCfg := func() *config.Config {
 		return &config.Config{
@@ -284,11 +339,141 @@ func TestConfig_Validate(t *testing.T) {
 		}
 	})
 
+	t.Run("custom network bridge and domain pass", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Bridge = "br-lab0"
+		cfg.Network.Internal.Domain = "lab.internal"
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("expected custom bridge and domain to pass, got: %v", err)
+		}
+	})
+
+	t.Run("invalid network bridge", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.Bridge = "br main"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a bridge name with a space")
+		}
+	})
+
+	t.Run("network bridge too long", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Main.Bridge = strings.Repeat("b", 16)
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a bridge name longer than IFNAMSIZ")
+		}
+	})
+
+	t.Run("invalid network domain", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Domain = "not a domain"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a domain name with a space")
+		}
+	})
+
+	t.Run("gateway outside its subnet", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Gateway = "192.168.99.1"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "outside") {
+			t.Fatalf("Validate() = %v, want the gateway-outside-subnet error", err)
+		}
+	})
+
+	t.Run("router must be the internal gateway", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.Gateway = "192.168.10.254"
+		cfg.Nodes.Router.IP = "192.168.10.1"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "internal gateway") {
+			t.Fatalf("Validate() = %v, want the router/gateway mismatch error", err)
+		}
+	})
+
+	t.Run("duplicate node IP", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[1].IP = cfg.Nodes.Masters[0].IP
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reuses IP") {
+			t.Fatalf("Validate() = %v, want the duplicate IP error", err)
+		}
+	})
+
+	t.Run("duplicate node MAC", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[0].MAC = "52:54:00:10:01:11"
+		cfg.Nodes.Masters[1].MAC = "52:54:00:10:01:11"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reuses MAC") {
+			t.Fatalf("Validate() = %v, want the duplicate MAC error", err)
+		}
+	})
+
+	t.Run("duplicate node name", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[1].Name = cfg.Nodes.Masters[0].Name
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate node name") {
+			t.Fatalf("Validate() = %v, want the duplicate name error", err)
+		}
+	})
+
+	t.Run("duplicate Puppet certname", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Masters[0].FQDN = "shared.internal.local"
+		cfg.Nodes.Masters[1].FQDN = "shared.internal.local"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate Puppet certname") {
+			t.Fatalf("Validate() = %v, want the duplicate certname error", err)
+		}
+	})
+
+	t.Run("invalid raw mac_internal", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Nodes.Jumpstart.MACInternal = "not-a-mac"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "mac_internal") {
+			t.Fatalf("Validate() = %v, want the mac_internal error", err)
+		}
+	})
+
 	t.Run("missing storage_dir", func(t *testing.T) {
 		cfg := validCfg()
 		cfg.VM.StorageDir = ""
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for empty storage_dir")
+		}
+	})
+
+	t.Run("invalid jumpstart image", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.JumpstartImage = "pxe"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an unknown jumpstart image")
+		}
+	})
+
+	t.Run("invalid client provisioning", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.Provisioning = "fast"
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for an unknown client provisioning mode")
+		}
+	})
+
+	// Validate is split into helpers; the split must not reorder the checks,
+	// because callers rely on the first broken field being the one reported.
+	t.Run("deploy error precedes network error", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.VM.StorageDir = ""
+		cfg.Network.Internal.CIDR = "not-a-cidr"
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "vm.storage_dir") {
+			t.Fatalf("Validate() = %v, want the vm.storage_dir error first", err)
+		}
+	})
+
+	t.Run("network error precedes topology error", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Network.Internal.CIDR = "not-a-cidr"
+		cfg.Nodes.Router.IP = ""
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "network.internal.cidr") {
+			t.Fatalf("Validate() = %v, want the network.internal.cidr error first", err)
 		}
 	})
 
@@ -433,6 +618,14 @@ func TestConfig_Validate(t *testing.T) {
 			t.Fatal("expected error for a scheme-less traffic.prometheus_rw_url")
 		}
 	})
+
+	t.Run("unsafe Grafana admin password is rejected", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.Monitoring.GrafanaAdminPassword = environmentFileBreakingPassword()
+		if err := cfg.Validate(); err == nil {
+			t.Fatal("expected error for a Grafana password that breaks the EnvironmentFile")
+		}
+	})
 }
 
 // TestConfig_ValidatePartial guards the relaxed validation used by commands
@@ -480,7 +673,10 @@ func TestConfig_HypervisorIPAndFenceCommands(t *testing.T) {
 	}
 
 	t.Run("derived fencing commands target the hypervisor", func(t *testing.T) {
-		off, state := cfg.FenceCommands()
+		off, state, err := cfg.FenceCommandsChecked()
+		if err != nil {
+			t.Fatalf("FenceCommandsChecked() error = %v", err)
+		}
 		for _, cmd := range []string{off, state} {
 			if !strings.Contains(cmd, "192.168.10.254") {
 				t.Errorf("derived fence command %q must target the hypervisor address", cmd)
@@ -500,7 +696,10 @@ func TestConfig_HypervisorIPAndFenceCommands(t *testing.T) {
 	t.Run("custom commands are returned verbatim", func(t *testing.T) {
 		cfg.DRBD.FenceCommand = "fence-off {domain}"
 		cfg.DRBD.FenceStateCommand = "fence-state {domain}"
-		off, state := cfg.FenceCommands()
+		off, state, err := cfg.FenceCommandsChecked()
+		if err != nil {
+			t.Fatalf("FenceCommandsChecked() error = %v", err)
+		}
 		if off != "fence-off {domain}" || state != "fence-state {domain}" {
 			t.Errorf("custom commands not returned verbatim: %q / %q", off, state)
 		}
@@ -603,6 +802,69 @@ func TestConfig_LoadBalancerTLS(t *testing.T) {
 	})
 }
 
+func TestConfig_ValidatePKI(t *testing.T) {
+	base := func() *config.Config {
+		return &config.Config{
+			VM: config.VMConfig{StorageDir: "/var/lib/libvirt/images"},
+			Network: config.NetworkConfig{
+				Internal: config.NetworkDetail{CIDR: "192.168.10.0/24"},
+				Main:     config.NetworkDetail{CIDR: "192.168.20.0/24", VIP: "192.168.20.100"},
+			},
+			Nodes: config.NodesConfig{
+				Router:    config.NodeDetail{Name: "ufw-router", IP: "192.168.10.1"},
+				Jumpstart: config.NodeDetail{Name: "jumpstart", IP: "192.168.10.10"},
+				Masters: []config.NodeDetail{
+					{Name: "master1", IP: "192.168.10.11"},
+					{Name: "master2", IP: "192.168.10.12"},
+					{Name: "master3", IP: "192.168.10.16"},
+				},
+				LBs: []config.NodeDetail{
+					{Name: "lb1", IP: "192.168.20.103"},
+					{Name: "lb2", IP: "192.168.20.104"},
+				},
+				CMSFrontends: []config.NodeDetail{{Name: "cms1", IP: "192.168.20.101"}},
+			},
+		}
+	}
+
+	t.Run("valid custom PKI settings pass", func(t *testing.T) {
+		cfg := base()
+		cfg.PKI.Domain = "ca.example.test"
+		cfg.PKI.CAName = "Lab CA 2"
+		cfg.PKI.CAPort = 9443
+		cfg.PKI.CertLifetimeHours = config.MaxPKICertLifetimeHours
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want a pass", err)
+		}
+	})
+
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+		want   string
+	}{
+		{"invalid domain", func(c *config.Config) { c.PKI.Domain = "ca internal" }, "pki.domain"},
+		{"invalid CA name", func(c *config.Config) { c.PKI.CAName = "CA; rm -rf /" }, "pki.ca_name"},
+		{"CA name too long", func(c *config.Config) { c.PKI.CAName = strings.Repeat("a", 65) }, "pki.ca_name"},
+		{"CA port out of range", func(c *config.Config) { c.PKI.CAPort = 70000 }, "pki.ca_port"},
+		{"negative CA port", func(c *config.Config) { c.PKI.CAPort = -1 }, "pki.ca_port"},
+		{"lifetime above the provisioner maximum", func(c *config.Config) {
+			c.PKI.CertLifetimeHours = config.MaxPKICertLifetimeHours + 1
+		}, "pki.cert_lifetime_hours"},
+		{"negative lifetime", func(c *config.Config) { c.PKI.CertLifetimeHours = -1 }, "pki.cert_lifetime_hours"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mutate(cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want an error mentioning %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func contains(values []string, want string) bool {
 	for _, v := range values {
 		if v == want {
@@ -654,10 +916,10 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 		}
 	})
 
-	t.Run("empty ssh.user falls back to root for backwards compatibility", func(t *testing.T) {
+	t.Run("empty ssh.user falls back to the installer deploy account", func(t *testing.T) {
 		cfg := &config.Config{}
-		if got := cfg.SSHUser(); got != "root" {
-			t.Errorf("SSHUser() = %q, want root", got)
+		if got := cfg.SSHUser(); got != "ubuntu" {
+			t.Errorf("SSHUser() = %q, want ubuntu", got)
 		}
 	})
 
@@ -666,6 +928,14 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 		cfg.SSH.User = "bad user; rm -rf /"
 		if err := cfg.Validate(); err == nil {
 			t.Fatal("expected error for an invalid ssh.user")
+		}
+	})
+
+	t.Run("validation rejects root as the deploy account", func(t *testing.T) {
+		cfg := validCfg()
+		cfg.SSH.User = "root"
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "non-root") {
+			t.Fatalf("Validate() = %v, want the non-root ssh.user error", err)
 		}
 	})
 
@@ -678,9 +948,9 @@ func TestConfig_SSHAccessHardening(t *testing.T) {
 	})
 }
 
-func TestConfig_HotdeskSpecsFollowMainCIDR(t *testing.T) {
+func TestConfig_HotdeskSpecsFollowMainCIDRAndDomain(t *testing.T) {
 	cfg := &config.Config{
-		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/24"}},
+		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/24", Domain: "lab.example"}},
 		Nodes:   config.NodesConfig{Hotdesks: config.HotdesksConf{Count: 2, BaseIPOctet: 201}},
 	}
 	specs := cfg.HotdeskSpecs()
@@ -693,22 +963,88 @@ func TestConfig_HotdeskSpecsFollowMainCIDR(t *testing.T) {
 	if got, want := specs[1].IP, "10.0.30.202"; got != want {
 		t.Errorf("hotdesk IP = %q, want %q (derived from network.main.cidr)", got, want)
 	}
-}
-
-func TestConfig_PrefixFromCIDR(t *testing.T) {
-	tests := []struct {
-		cidr     string
-		fallback string
-		want     string
-	}{
-		{"192.168.30.0/24", "192.168.20.", "192.168.30."},
-		{"10.0.30.0/24", "192.168.20.", "10.0.30."},
-		{"", "192.168.20.", "192.168.20."},
-		{"not-a-cidr", "192.168.20.", "192.168.20."},
-	}
-	for _, tt := range tests {
-		if got := config.PrefixFromCIDR(tt.cidr, tt.fallback); got != tt.want {
-			t.Errorf("PrefixFromCIDR(%q, %q) = %q, want %q", tt.cidr, tt.fallback, got, tt.want)
+	for i, spec := range specs {
+		want := fmt.Sprintf("main-hotdesk%d.lab.example", i+1)
+		if spec.FQDN != want {
+			t.Errorf("hotdesk FQDN = %q, want %q (derived from network.main.domain)", spec.FQDN, want)
 		}
 	}
+
+	// An unset domain keeps the historical default instead of producing
+	// "main-hotdesk1." with an empty label.
+	cfg.Network.Main.Domain = ""
+	if got, want := cfg.HotdeskSpecs()[0].FQDN, "main-hotdesk1.main.local"; got != want {
+		t.Errorf("hotdesk FQDN without a domain = %q, want %q", got, want)
+	}
+}
+
+func TestConfig_HostAddress(t *testing.T) {
+	tests := []struct {
+		cidr   string
+		offset uint32
+		want   string
+	}{
+		{"192.168.30.0/24", 201, "192.168.30.201"},
+		{"10.0.30.0/24", 1, "10.0.30.1"},
+		// A /23 continues into the next octet instead of wrapping inside .30.
+		{"10.0.30.0/23", 260, "10.0.31.4"},
+		// The network address is normalised, not taken from the written octet.
+		{"192.168.21.5/16", 201, "192.168.0.201"},
+	}
+	for _, tt := range tests {
+		got, err := config.HostAddress(tt.cidr, tt.offset)
+		if err != nil {
+			t.Errorf("HostAddress(%q, %d): %v", tt.cidr, tt.offset, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("HostAddress(%q, %d) = %q, want %q", tt.cidr, tt.offset, got, tt.want)
+		}
+	}
+	for _, tt := range []struct {
+		cidr   string
+		offset uint32
+	}{
+		{"192.168.30.0/24", 0},
+		{"192.168.30.0/24", 255},
+		{"", 1},
+		{"not-a-cidr", 1},
+	} {
+		if got, err := config.HostAddress(tt.cidr, tt.offset); err == nil {
+			t.Errorf("HostAddress(%q, %d) = %q, want an error", tt.cidr, tt.offset, got)
+		}
+	}
+}
+
+func TestConfig_HotdeskSpecsRespectNonSlash24Networks(t *testing.T) {
+	cfg := &config.Config{
+		Network: config.NetworkConfig{Main: config.NetworkDetail{CIDR: "10.0.30.0/23", Domain: "lab.example"}},
+		Nodes:   config.NodesConfig{Hotdesks: config.HotdesksConf{Count: 10, BaseIPOctet: 250}},
+	}
+	specs := cfg.HotdeskSpecs()
+	if len(specs) != 10 {
+		t.Fatalf("expected 10 hotdesk specs, got %d", len(specs))
+	}
+	for i, spec := range specs {
+		if spec.IP == "" {
+			t.Fatalf("hotdesk %d has no address", i+1)
+		}
+		if !config.ValidMAC(spec.MAC) {
+			t.Errorf("hotdesk %d MAC = %q, want a valid MAC", i+1, spec.MAC)
+		}
+	}
+	if got, want := specs[0].IP, "10.0.30.250"; got != want {
+		t.Errorf("first hotdesk IP = %q, want %q", got, want)
+	}
+	// Offset 260 crosses the /24 boundary but stays inside the /23.
+	if got, want := specs[9].IP, "10.0.31.3"; got != want {
+		t.Errorf("last hotdesk IP = %q, want %q", got, want)
+	}
+}
+
+// environmentFileBreakingPassword builds the invalid Grafana password used to
+// assert that Validate rejects values that would break the EnvironmentFile
+// Grafana loads: a newline followed by an env-style assignment.
+func environmentFileBreakingPassword() string {
+	return "bad password\n" + strings.Join([]string{"GF_SECURITY_ADMIN_USER", "attacker"}, "=")
 }

@@ -3,6 +3,7 @@ package tests
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"text/template"
@@ -137,6 +138,89 @@ func TestDRBD_WatchdogScriptIntegrity(t *testing.T) {
 	}
 }
 
+func TestDRBD_FailoverScriptRefusesForcedPromotionAndClearsStaleLabels(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-failover.sh: %v", err)
+	}
+	script := string(content)
+	if strings.Contains(script, "drbdadm primary --force") {
+		t.Error("failover promotion must not force an Outdated/Inconsistent disk to Primary")
+	}
+	// Clear every node that still advertises the primary label, not only
+	// nodes whose name happens to contain "master": a custom-named
+	// control-plane node would otherwise keep the label.
+	if !strings.Contains(script, `kubectl get nodes -l drbd-status=primary`) {
+		t.Error("failover promotion must select the stale primaries by their label")
+	}
+	if !strings.Contains(script, `grep -vx "$LOCAL_NODE"`) {
+		t.Error("failover promotion must clear the primary label from every other node")
+	}
+	if strings.Contains(script, `grep "master"`) {
+		t.Error("failover promotion must not identify control-plane nodes by a hardcoded name fragment")
+	}
+	// The local node lookup must compare whole hostname labels, not substrings:
+	// "internal-master1" must never match "internal-master10".
+	if !strings.Contains(script, "local_k8s_node()") || !strings.Contains(script, `sub(/\..*/, "", n)`) {
+		t.Error("failover promotion must resolve the local Kubernetes node by exact first label")
+	}
+	if strings.Contains(script, `grep "$(hostname)"`) {
+		t.Error("failover promotion still matches the local node with a substring grep")
+	}
+}
+
+func TestDRBD_WatchdogHasNoDefaultLabFallbacks(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-watchdog.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-watchdog.sh: %v", err)
+	}
+	script := string(content)
+	for _, hardcoded := range []string{
+		`echo "192.168.10.1"`,
+		`peer="192.168.10.12"`,
+		`peer="192.168.10.11"`,
+		`grep "$(hostname)"`,
+	} {
+		if strings.Contains(script, hardcoded) {
+			t.Errorf("watchdog still falls back to the default lab with %q", hardcoded)
+		}
+	}
+	// An unknown peer must suppress failover, not promote blindly.
+	if !strings.Contains(script, "cannot determine the peer IP") {
+		t.Error("watchdog must fail closed when the peer address cannot be read")
+	}
+	if !strings.Contains(script, "local_k8s_node()") || !strings.Contains(script, `sub(/\..*/, "", n)`) {
+		t.Error("watchdog must resolve the local Kubernetes node by exact first label")
+	}
+}
+
+func TestDRBD_FailoverDemotePausesWatchdogAndWaitsForThePod(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-failover.sh: %v", err)
+	}
+	script := string(content)
+	if !strings.Contains(script, "systemctl stop drbd-failover-watchdog.service") {
+		t.Error("demote must pause the watchdog so it cannot scale MariaDB back up mid-demote")
+	}
+	if !strings.Contains(script, "trap restart_watchdog EXIT") {
+		t.Error("demote must restart the watchdog even when a step fails")
+	}
+	if !strings.Contains(script, "kubectl get pod mariadb-0 -n cms") {
+		t.Error("demote must wait for mariadb-0 to release the volume before unmounting")
+	}
+}
+
+func TestDRBD_WatchdogRestoresMariaDBReplicas(t *testing.T) {
+	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-watchdog.sh")
+	if err != nil {
+		t.Fatalf("failed to read drbd-watchdog.sh: %v", err)
+	}
+	if !strings.Contains(string(content), "kubectl scale statefulset mariadb -n cms --replicas=1") {
+		t.Error("watchdog must scale MariaDB back to one replica when the local node is Primary")
+	}
+}
+
 func TestDRBD_WatchdogServiceDefinition(t *testing.T) {
 	content, err := cms.TemplatesFS.ReadFile("templates/drbd/drbd-failover-watchdog.service")
 	if err != nil {
@@ -148,7 +232,8 @@ func TestDRBD_WatchdogServiceDefinition(t *testing.T) {
 	expectedDirectives := []string{
 		"[Unit]",
 		"Description=DRBD Automatic Failover Watchdog Daemon",
-		"After=network-online.target drbd.service",
+		"After=network-online.target drbd.service drbd-cms-boot.service",
+		"Wants=network-online.target drbd.service drbd-cms-boot.service",
 		"Before=k3s.service",
 		"[Service]",
 		"Type=simple",
@@ -162,5 +247,20 @@ func TestDRBD_WatchdogServiceDefinition(t *testing.T) {
 		if !strings.Contains(svc, d) {
 			t.Errorf("watchdog service missing expected directive: %s", d)
 		}
+	}
+}
+
+// TestDrbdMetricsScriptUsesTheResourceName keeps the textfile publisher in step
+// with templates/drbd/cms-data.res. When the names drift apart "drbdadm status"
+// fails, the script deletes its .prom file, and the DRBD panels go blank while
+// DRBDPeerDown/DRBDSplitBrain stay silent: nothing else in the lab notices.
+func TestDrbdMetricsScriptUsesTheResourceName(t *testing.T) {
+	script, err := os.ReadFile("../puppet/modules/role/files/cms-ha/cms-drbd-metrics.sh")
+	if err != nil {
+		t.Fatalf("read the DRBD metrics script: %v", err)
+	}
+	const want = `RESOURCE="${CMS_DRBD_RESOURCE:-cms_data}"`
+	if !strings.Contains(string(script), want) {
+		t.Fatalf("cms-drbd-metrics.sh must query the resource created by templates/drbd/cms-data.res, want %s", want)
 	}
 }

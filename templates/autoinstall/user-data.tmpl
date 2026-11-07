@@ -7,7 +7,7 @@ autoinstall:
     layout: es
   identity:
     hostname: {{ .Hostname }}
-    username: ubuntu
+    username: {{ .DeployUser }}
     password: "{{ .PasswordHash }}"
   ssh:
     install-server: true
@@ -21,7 +21,7 @@ autoinstall:
         match:
           macaddress: "{{ .MACInternal }}"
         addresses:
-          - {{ .IPInternal }}/24
+          - {{ .IPInternal }}/{{ .InternalPrefix }}
         nameservers:
           addresses:
             - {{ .IPInternal }}
@@ -33,24 +33,24 @@ autoinstall:
         match:
           macaddress: "{{ .MACMain }}"
         addresses:
-          - {{ .IPMain }}/24
+          - {{ .IPMain }}/{{ .MainPrefix }}
 {{ if .WANIfaceConfig }}{{ .WANIfaceConfig }}{{ end }}
   storage:
     layout:
       name: direct
   late-commands:
-    - echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/ubuntu
-    - chmod 440 /target/etc/sudoers.d/ubuntu
-    - printf 'Defaults:ubuntu !requiretty\nDefaults log_output\n' > /target/etc/sudoers.d/90-cms-ha
+    - echo '{{ .DeployUser }} ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/{{ .DeployUser }}
+    - chmod 440 /target/etc/sudoers.d/{{ .DeployUser }}
+    - printf 'Defaults:{{ .DeployUser }} !requiretty\nDefaults log_output\n' > /target/etc/sudoers.d/90-cms-ha
     - chmod 440 /target/etc/sudoers.d/90-cms-ha
-    - curtin in-target --target=/target -- passwd -l ubuntu
+    - curtin in-target --target=/target -- passwd -l {{ .DeployUser }}
     - curtin in-target --target=/target -- passwd -l root
-    - mkdir -p /target/root/.ssh /target/home/ubuntu/.ssh
+    - mkdir -p /target/root/.ssh /target/home/{{ .DeployUser }}/.ssh
     - echo "{{ .PubKey }}" >> /target/root/.ssh/authorized_keys
-    - echo "{{ .PubKey }}" >> /target/home/ubuntu/.ssh/authorized_keys
-    - chmod 700 /target/root/.ssh /target/home/ubuntu/.ssh
-    - chmod 600 /target/root/.ssh/authorized_keys /target/home/ubuntu/.ssh/authorized_keys
-    - curtin in-target --target=/target -- chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+    - echo "{{ .PubKey }}" >> /target/home/{{ .DeployUser }}/.ssh/authorized_keys
+    - chmod 700 /target/root/.ssh /target/home/{{ .DeployUser }}/.ssh
+    - chmod 600 /target/root/.ssh/authorized_keys /target/home/{{ .DeployUser }}/.ssh/authorized_keys
+    - curtin in-target --target=/target -- chown -R {{ .DeployUser }}:{{ .DeployUser }} /home/{{ .DeployUser }}/.ssh
     - sed -i 's/#\?PermitRootLogin.*/PermitRootLogin no/' /target/etc/ssh/sshd_config
     - mkdir -p /target/etc/ssh/sshd_config.d
     - echo 'PermitRootLogin no' > /target/etc/ssh/sshd_config.d/01-permitrootlogin.conf

@@ -3,7 +3,7 @@ package root
 import (
 	"time"
 
-	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/hypervisor"
 	"github.com/spf13/cobra"
 )
 
@@ -25,7 +25,7 @@ func init() {
 				return err
 			}
 			lv := newLibvirtClient(cfg)
-			return utils.StartAllVMs(cmd.Context(), cfg, lv, 5*time.Second)
+			return hypervisor.StartAllVMs(cmd.Context(), cfg, lv, 5*time.Second)
 		},
 	}
 	vmCmd.AddCommand(startCmd)
@@ -42,11 +42,11 @@ func init() {
 			lv := newLibvirtClient(cfg)
 			force, _ := cmd.Flags().GetBool("force")
 			timeout, _ := cmd.Flags().GetDuration("timeout")
-			opts := utils.StopOptions{
+			opts := hypervisor.StopOptions{
 				Force:   force,
 				Timeout: timeout,
 			}
-			return utils.StopAllVMs(cmd.Context(), cfg, lv, opts)
+			return hypervisor.StopAllVMs(cmd.Context(), cfg, lv, opts)
 		},
 	}
 	vmStopCmd.Flags().BoolP("force", "f", false, "Force power off (destroy) VMs that do not stop gracefully within the timeout")
@@ -63,7 +63,7 @@ func init() {
 				return err
 			}
 			lv := newLibvirtClient(cfg)
-			return utils.ShrinkVMRAM(cmd.Context(), cfg, lv)
+			return hypervisor.ShrinkVMRAM(cmd.Context(), cfg, lv)
 		},
 	}
 	vmCmd.AddCommand(shrinkCmd)
@@ -84,7 +84,7 @@ func init() {
 			for i, n := range nodes {
 				names[i] = n.Name
 			}
-			return utils.FixBootOrder(cmd.Context(), lv, names)
+			return hypervisor.FixBootOrder(cmd.Context(), lv, names)
 		},
 	}
 	vmCmd.AddCommand(fixBootCmd)
@@ -104,7 +104,7 @@ func init() {
 			defer pool.Close()
 			lv := newLibvirtClient(cfg)
 
-			return utils.InstallByBatches(cmd.Context(), cfg, lv, pool)
+			return hypervisor.InstallByBatches(cmd.Context(), cfg, lv, pool)
 		},
 	}
 	vmCmd.AddCommand(installBatchesCmd)
@@ -119,7 +119,7 @@ func init() {
 				return err
 			}
 			lv := newLibvirtClient(cfg)
-			return utils.RecreateFailedVMs(cmd.Context(), cfg, lv)
+			return hypervisor.RecreateFailedVMs(cmd.Context(), cfg, lv)
 		},
 	}
 	vmCmd.AddCommand(recreateCmd)

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -40,17 +41,25 @@ type NetworkOpt struct {
 
 // VirtInstallOpts holds all parameters for virt-install.
 type VirtInstallOpts struct {
-	Name          string
-	RAM           int // in MB
-	VCPUs         int
-	Disks         []DiskOpt
-	Networks      []NetworkOpt
-	PXE           bool
-	BootOrder     []string
-	OSVariant     string
-	ExtraArgs     string
-	Location      string
+	Name     string
+	RAM      int // in MB
+	VCPUs    int
+	Disks    []DiskOpt
+	Networks []NetworkOpt
+	PXE      bool
+	// Import tells virt-install to build the guest around an existing disk
+	// image instead of booting an installer. The cloud-image jumpstart uses it
+	// with a qcow2 overlay and must not pass --location or --extra-args.
+	Import    bool
+	BootOrder []string
+	OSVariant string
+	ExtraArgs string
+	Location  string
+	// Wait is passed to virt-install in minutes. NoWait omits --wait entirely,
+	// which is what an imported disk needs: the guest boots and stays up, so
+	// waiting for an installer to power it off would never return.
 	Wait          int
+	NoWait        bool
 	NoAutoConsole bool
 	NoReboot      bool
 	GraphicsNone  bool
@@ -65,7 +74,6 @@ func NewClient(uri string) *Client {
 	useSudo := false
 	if _, err := exec.LookPath("virsh"); err == nil {
 		if uri == "qemu:///system" || strings.HasPrefix(uri, "qemu+ssh://root@") {
-			// Check if virsh works directly
 			probeCtx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 			if err := exec.CommandContext(probeCtx, "virsh", "-c", uri, "list").Run(); err != nil { // #nosec G204
 				// Only use sudo if sudo -n works non-interactively
@@ -300,6 +308,11 @@ func (c *Client) NetExistsChecked(ctx context.Context, name string) (bool, error
 	return false, nil
 }
 
+// NetDefinition returns the persistent XML definition of a libvirt network.
+func (c *Client) NetDefinition(ctx context.Context, name string) ([]byte, error) {
+	return c.virsh(ctx, "net-dumpxml", name)
+}
+
 // NetIsActive checks if a libvirt network is active.
 func (c *Client) NetIsActive(ctx context.Context, name string) bool {
 	out, err := c.virsh(ctx, "net-info", name)
@@ -335,6 +348,15 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 				return fmt.Errorf("network %d: %s must not contain commas: %q", i+1, field, v)
 			}
 		}
+	}
+
+	// Everything below reaches a virt-install argv element; a config value
+	// outside the allowed sets must fail here, not at the hypervisor tooling.
+	if err := ValidateURI(c.URI); err != nil {
+		return err
+	}
+	if err := validateVirtInstallOpts(opts); err != nil {
+		return err
 	}
 
 	args := []string{"--connect", c.URI, "--name", opts.Name, "--memory", fmt.Sprintf("%d", opts.RAM), "--vcpus", fmt.Sprintf("%d", opts.VCPUs)}
@@ -377,7 +399,18 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--network", netArg)
 	}
 
-	if opts.PXE && len(opts.BootOrder) == 0 {
+	if opts.Import {
+		args = append(args, "--import")
+	}
+
+	if opts.PXE {
+		// virt-install wants an explicit install method: --boot only describes
+		// a boot order, and virt-install 4.1 (the version shipped by Ubuntu
+		// 24.04) aborts with "An install method must be specified" when the
+		// guest has no other install source. --pxe wins over --boot there and
+		// leaves the guest booting from the network first; FixBootOrder
+		// restores the intended disk-first order afterwards (see
+		// internal/utils/vmcreate.go).
 		args = append(args, "--pxe")
 	}
 
@@ -393,7 +426,9 @@ func (c *Client) VirtInstall(ctx context.Context, opts VirtInstallOpts) error {
 		args = append(args, "--extra-args", opts.ExtraArgs)
 	}
 
-	args = append(args, "--wait", strconv.Itoa(opts.Wait))
+	if !opts.NoWait {
+		args = append(args, "--wait", strconv.Itoa(opts.Wait))
+	}
 
 	if opts.NoAutoConsole {
 		args = append(args, "--noautoconsole")
@@ -433,6 +468,12 @@ func CreateDisk(ctx context.Context, path string, sizeGB int, format string) err
 	if format == "" {
 		return fmt.Errorf("disk format is required (use qcow2)")
 	}
+	if err := validatePath("disk path", path); err != nil {
+		return err
+	}
+	if err := validateDiskFormat("disk format", format); err != nil {
+		return err
+	}
 	args := []string{"create", "-f", format, path, fmt.Sprintf("%dG", sizeGB)}
 	cmd := exec.CommandContext(ctx, "qemu-img", args...) // #nosec G204 -- qemu-img command with validated options
 	out, err := cmd.CombinedOutput()
@@ -442,10 +483,50 @@ func CreateDisk(ctx context.Context, path string, sizeGB int, format string) err
 	return nil
 }
 
+// CreateOverlayDisk creates a qcow2 overlay backed by basePath. The base image
+// stays read-only and is shared between jumpstart iterations, so a fast cloud
+// boot costs one downloaded image plus a small delta disk instead of a full
+// install. The backing path is made absolute because qemu-img resolves a
+// relative backing file against the overlay's directory.
+func CreateOverlayDisk(ctx context.Context, path, basePath string, sizeGB int) error {
+	if path == "" || basePath == "" {
+		return fmt.Errorf("overlay and base disk paths are required")
+	}
+	if sizeGB <= 0 {
+		return fmt.Errorf("overlay size must be positive (got %d)", sizeGB)
+	}
+	if err := validatePath("overlay path", path); err != nil {
+		return err
+	}
+	if err := validatePath("base image path", basePath); err != nil {
+		return err
+	}
+	baseAbs, err := filepath.Abs(basePath)
+	if err != nil {
+		return fmt.Errorf("resolve base image %s: %w", basePath, err)
+	}
+	args := []string{"create", "-f", "qcow2", "-F", "qcow2", "-b", baseAbs, path, fmt.Sprintf("%dG", sizeGB)}
+	cmd := exec.CommandContext(ctx, "qemu-img", args...) // #nosec G204 -- qemu-img command with validated options
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("qemu-img create overlay failed: %v, output: %s", err, string(out))
+	}
+	return nil
+}
+
 // CreateISO runs xorrisofs to create an ISO.
 func CreateISO(ctx context.Context, outputPath, sourceDir, volID string) error {
 	if outputPath == "" || sourceDir == "" {
 		return fmt.Errorf("ISO output path and source directory are required")
+	}
+	if err := validatePath("ISO output path", outputPath); err != nil {
+		return err
+	}
+	if err := validatePath("ISO source directory", sourceDir); err != nil {
+		return err
+	}
+	if err := validateArg("ISO volume ID", volID); err != nil {
+		return err
 	}
 	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
 		// Failing to clear the old output would make xorrisofs fail with a

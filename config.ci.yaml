@@ -1,0 +1,333 @@
+# CMS-HA Infrastructure Configuration — hosted CI variant.
+#
+# This is the topology the `Integration (KVM lab, hosted)` workflow deploys on a
+# standard GitHub-hosted runner (4 vCPU / 15 GiB RAM / ~86 GB disk with nested
+# KVM). It keeps the same topology as `config.yaml`; only the sizing, pacing
+# and secret fields listed below differ:
+#
+#   * `nodes.hotdesks.count` is 0 instead of 3. The three client workstations
+#     cost ~2.3 GB of RAM and 30 GB of disk, and the runner has to share its
+#     15 GiB with 13 VMs (16 without this change). Nothing in `verify` or in
+#     the DRBD failover exercise touches the hotdesks, so the HA pipeline under
+#     test is unchanged.
+#   * `ram_install_mb` stays at 3072 (the K3s nodes use 4096 in `config.yaml`).
+#     Canonical's hard minimum for an ISO install is 1.5 GiB, but its
+#     *suggested* minimum is 3 GiB and Subiquity also unpacks the base snaps,
+#     so this lab does not install below that. To keep that 3 GiB affordable,
+#     `deploy.install_batch_size` caps each batch at the runner's four vCPUs
+#     (see the comment there): four 3 GiB installers plus the jumpstart fit the
+#     15 GiB host, and installed batches stay shut off until the end. The
+#     workflow still adds a zram swap device so a batch that dips past the
+#     limit is compressed in RAM instead of thrashing the disk.
+#     `ram_final_mb` — what each node actually runs on, k3s included — is the
+#     same as in `config.yaml` and is never touched.
+#   * `deploy.stagger_delay` is 0s (5s in `config.yaml`),
+#     `deploy.puppet_concurrency` is 6 (auto in `config.yaml`, which derives 4
+#     on a 4 vCPU host), `deploy.install_batch_size` is 4 (0, meaning the
+#     documented batches, in `config.yaml`) and `deploy.node_install_timeout`
+#     is 25m (15m in `config.yaml`). The phases run against separate guests and
+#     the runner has only four vCPUs for the whole lab, so these values trade
+#     the reference host's pacing for the runner's.
+
+#   * the secret fields are left empty on purpose. The workflow fills them with
+#     freshly generated values into a throwaway `config.ci.local.yaml` (which is
+#     gitignored) instead of committing credentials to a public repository.
+#
+# The full 16-VM topology stays in `config.yaml` and is deployed by the
+# self-hosted `integration.yml` workflow (and by operators on a real lab host).
+#
+# Passwords can be encrypted with: cms-ha secrets encrypt
+
+vm:
+  storage_dir: "${HOME}/vm_storage"
+  libvirt_uri: "qemu:///system"
+  # Jumpstart install path: "iso" (default, the PXE/autoinstall deliverable) or
+  # "cloud" (opt-in: boot a qcow2 overlay of the Ubuntu cloud image). For cloud,
+  # put noble-server-cloudimg-amd64.img (or the legacy
+  # ubuntu-24.04-server-cloudimg-amd64.img name) in storage_dir or set
+  # jumpstart_base_image. The cloud path is for iteration and CI; it does not
+  # replace the ISO/PXE gate.
+  jumpstart_image: "iso"
+  # Client install path: "pxe" (default, Cobbler deliverable) or "cloud"
+  # (opt-in: qcow2 overlays of the same base image plus per-node cloud-init).
+  # `deploy --fast-provisioning` switches both this and the jumpstart for one run.
+  provisioning: "pxe"
+
+ssh:
+  # Non-root deploy account created by every installer (Cobbler autoinstall and
+  # cloud-init). Privileged remote commands are elevated with `sudo -n`; direct
+  # root logins are disabled (`PermitRootLogin no`).
+  user: "ubuntu"
+  # TOFU database where VM host keys are pinned on first contact.
+  known_hosts_file: "${HOME}/.ssh/cms_known_hosts"
+  private_key: "${HOME}/.ssh/id_ed25519_gar"
+  connect_timeout: 10s
+
+network:
+  internal:
+    cidr: "192.168.10.0/24"
+    gateway: "192.168.10.1"
+    domain: "internal.local"
+    bridge: "virbr-int"
+  main:
+    cidr: "192.168.20.0/24"
+    gateway: "192.168.20.1"
+    domain: "main.local"
+    bridge: "virbr-main"
+    # keepalived floating VIP: clients reach the CMS here and the router DNATs
+    # to it. The LBs themselves live on .103/.104.
+    vip: "192.168.20.100"
+
+nodes:
+  router:
+    name: "ufw-router"
+    ip: "192.168.10.1"
+    fqdn: "ufw-router.internal.local"
+    mac_internal: "52:54:00:10:01:02"
+    mac_main: "52:54:00:10:02:02"
+    mac_wan: "52:54:00:10:00:02"
+    ram_install_mb: 3072
+    ram_final_mb: 768
+    vcpus: 1
+    disk_gb: 5
+  jumpstart:
+    name: "jumpstart"
+    ip: "192.168.10.10"
+    ip_main: "192.168.20.10"
+    fqdn: "jumpstart.internal.local"
+    mac_internal: "52:54:00:10:00:01"
+    mac_main: "52:54:00:10:02:0a"
+    mac_wan: "52:54:00:10:00:09"
+    ram_install_mb: 3072
+    ram_final_mb: 2048
+    vcpus: 2
+    disk_gb: 30
+  # Install-time RAM is 3072 MB, Canonical's suggested minimum for the ISO
+  # installer (the jumpstart installs on its own, so its 3072 MB does not
+  # compete with anyone). It only affects the installer, not the RAM the
+  # cluster runs on (`ram_final_mb`, below, is unchanged).
+  masters:
+    - name: "internal-master1"
+      ip: "192.168.10.11"
+      fqdn: "internal-master1.internal.local"
+      mac: "52:54:00:10:01:11"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+      drbd_disk_gb: 3
+    - name: "internal-master2"
+      ip: "192.168.10.12"
+      fqdn: "internal-master2.internal.local"
+      mac: "52:54:00:10:01:12"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+      drbd_disk_gb: 3
+    # Third control-plane server: without it the embedded etcd cluster has no
+    # quorum (2 members tolerate 0 failures) and the API server goes
+    # read-only when one master is lost, which blocks DRBD/MariaDB failover.
+    # It carries no DRBD disk: replication stays a 2-node setup on master1/2.
+    - name: "internal-master3"
+      ip: "192.168.10.16"
+      fqdn: "internal-master3.internal.local"
+      mac: "52:54:00:10:01:16"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+  workers:
+    - name: "internal-worker1"
+      ip: "192.168.10.13"
+      fqdn: "internal-worker1.internal.local"
+      mac: "52:54:00:10:01:13"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+    - name: "internal-worker2"
+      ip: "192.168.10.14"
+      fqdn: "internal-worker2.internal.local"
+      mac: "52:54:00:10:01:14"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+  storage:
+    name: "internal-storage"
+    ip: "192.168.10.15"
+    fqdn: "internal-storage.internal.local"
+    mac: "52:54:00:10:01:15"
+    ram_install_mb: 3072
+    ram_final_mb: 1024
+    vcpus: 1
+    disk_gb: 8
+  monitor:
+    name: "internal-monitor"
+    ip: "192.168.10.20"
+    fqdn: "internal-monitor.internal.local"
+    mac: "52:54:00:10:01:10"
+    ram_install_mb: 3072
+    ram_final_mb: 1024
+    vcpus: 1
+    disk_gb: 10
+  lbs:
+    - name: "main-lb1"
+      ip: "192.168.20.103"
+      fqdn: "main-lb1.main.local"
+      mac: "52:54:00:10:02:67"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+    - name: "main-lb2"
+      ip: "192.168.20.104"
+      fqdn: "main-lb2.main.local"
+      mac: "52:54:00:10:02:68"
+      ram_install_mb: 3072
+      ram_final_mb: 768
+      vcpus: 1
+      disk_gb: 8
+  cms_frontends:
+    - name: "main-cms1"
+      ip: "192.168.20.101"
+      fqdn: "main-cms1.main.local"
+      mac: "52:54:00:10:02:65"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+    - name: "main-cms2"
+      ip: "192.168.20.102"
+      fqdn: "main-cms2.main.local"
+      mac: "52:54:00:10:02:66"
+      ram_install_mb: 3072
+      ram_final_mb: 1024
+      vcpus: 1
+      disk_gb: 8
+  hotdesks:
+    # Dropped for the hosted-runner variant: see the header of this file.
+    count: 0
+    max: 8
+    ram_install_mb: 3072
+    ram_final_mb: 768
+    vcpus: 1
+    disk_gb: 10
+    base_ip_octet: 201
+
+database:
+  name: "wordpress"
+  user: "wp_user"
+  password: ""
+  root_password: ""
+  exporter_password: ""
+  port: 30306
+
+wordpress:
+  admin_password: ""
+
+monitoring:
+  # Empty means the monitoring phase generates a random per-deployment
+  # password and stores it on the monitor node at
+  # /etc/grafana/grafana-admin.env (root:grafana 0640).
+  grafana_admin_password: ""
+  exporters:
+    nginx_version: "1.4.1"
+    apache_version: "1.0.9"
+    mysqld_version: "0.16.0"
+
+pki:
+  ca_port: 8443
+  provisioner_password: ""
+  # Pinned step-cli / step-ca releases: the deploy downloads these exact Debian
+  # assets on a fresh jumpstart (both known asset-name shapes are tried; the
+  # version-independent "latest" alias is used only when a version is empty).
+  # The versions below are the ones verified end to end with this phase.
+  step_version: "0.31.0"
+  step_ca_version: "0.30.2"
+  domain: "ca.internal.local"
+  # Common name of the internal CA. The verify phase asserts the load-balancer
+  # certificate was issued by this CA (i.e. is no longer self-signed).
+  ca_name: "CMS Local CA"
+  # DNS SANs for the load-balancer certificate. The keepalived VIP and both
+  # balancer addresses are added automatically (clients use the VIP).
+  cert_dns_names:
+    - "cms.fake-enterprise.com"
+  # Minimum remaining validity required by `cms-ha verify` (renewal keeps the
+  # certificate above this threshold).
+  cert_min_valid_days: 30
+  # Requested certificate lifetime (hours). Must exceed cert_min_valid_days.
+  # 2160h = 90 days, so renewal kicks in around 30 days remaining.
+  cert_lifetime_hours: 2160
+
+deploy:
+  ssh_timeout: 600s
+  # The phases run against separate guests (or are already ordered by their own
+  # dependencies), so the 5s pause only added 55s to the hosted run (measured:
+  # 11 gaps of 5s). Keep it in config.yaml for slow interactive hosts; CI does
+  # not need it.
+  stagger_delay: 0s
+  # Puppet catalogs are mostly guest-side work (apt, files, services). The
+  # measured first catalog took 376s for 1,953s of per-node work at concurrency
+  # 6, with the three heaviest nodes setting the floor. Override per run with
+  # PUPPET_CONCURRENCY.
+  puppet_concurrency: 6
+  # A hosted runner has 4 vCPU for the whole lab. Each installer saturates
+  # about one vCPU, so a batch of five pays two rounds of ~8 minutes while the
+  # same twelve guests in batches of four pay three rounds in total. It is also
+  # what keeps the 3 GiB installers inside the host: four installers plus the
+  # jumpstart fit 15 GiB, five do not.
+  install_batch_size: 4
+  # A hosted runner has 4 vCPU for the whole lab, so a batch of three or four
+  # installers takes far longer than on the reference host. Give the batch
+  # installer room for it instead of letting it give up at the 15m default.
+  # One budget covers every batch of a provision run, and it is a stall guard,
+  # not the expected duration: a slow-but-progressing batch must not be failed.
+  node_install_timeout: 25m
+
+drbd:
+  # STONITH fencing (split-brain prevention). Before a node promotes itself it
+  # powers off the failed peer at the hypervisor, and only promotes once the
+  # power-off is confirmed. Set fencing: false only for demos: the legacy
+  # best-effort ICMP heuristic cannot rule out split-brain.
+  fencing: true
+  # Leave empty to auto-derive an SSH+virsh command against the hypervisor at
+  # <internal network>.254 (the deploy phase provisions the SSH key). Override
+  # for a different transport. {domain} is replaced with the peer domain name.
+  fence_command: ""
+  fence_state_command: ""
+
+backup:
+  # Off-DRBD backup target. Garage (S3-compatible) runs as a container on the
+  # hypervisor, on a data volume outside the DRBD device, so a split-brain
+  # never takes the copies with it. Set engine: "" to disable provisioning.
+  engine: "garage"
+  # Pinned image tag (no floating tags).
+  garage_version: "v2.4.1"
+  # Hypervisor directory for Garage data + metadata (outside the DRBD device).
+  data_dir: "/var/lib/cms-garage"
+  # S3 API port, bound on the hypervisor's internal address only (host network).
+  s3_port: 3900
+  s3_region: "garage"
+  bucket: "cms-backups"
+  # S3 access key id (not secret on its own).
+  access_key: "GKcmshabackup0000000000"
+  # S3 secret (encrypt with: cms-ha secrets encrypt). Required when engine is set.
+  secret_key: ""
+  # Keep this many days of objects (bucket) and dump files (staging volume).
+  retention_days: 7
+  # Daily dump+upload and restore drill (cron).
+  schedule: "0 2 * * *"
+  restore_test_schedule: "30 3 * * *"
+
+traffic:
+  # Load/smoke generator. The custom in-process HTTP generator was replaced by
+  # k6, run from a pinned container on the hypervisor (docker/podman required).
+  # Pinned image tag (no floating tags).
+  k6_version: "0.55.0"
+  # Stream k6 metrics to Prometheus through its remote-write endpoint so RPS,
+  # p95/p99 and error rate show up in Grafana. Empty disables the output.
+  prometheus_rw_url: "http://192.168.10.20:9090/api/v1/write"
+  # HTTP Host header the CMS vhost expects.
+  vhost: "cms.fake-enterprise.com"

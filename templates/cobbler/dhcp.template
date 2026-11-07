@@ -2,31 +2,31 @@ ddns-update-style interim;
 allow booting;
 allow bootp;
 
-option domain-name "internal.local";
-option domain-name-servers 192.168.10.10;
+option domain-name "{{internal_domain}}";
+option domain-name-servers {{jumpstart_ip}};
 default-lease-time 21600;
 max-lease-time 43200;
 
-# Dynamic range and PXE parameters for the internal network (192.168.10.0/24)
-subnet 192.168.10.0 netmask 255.255.255.0 {
-    option routers 192.168.10.1;
-    option subnet-mask 255.255.255.0;
-    range dynamic-bootp 192.168.10.50 192.168.10.99;
-    option domain-name "internal.local";
-    option domain-name-servers 192.168.10.10;
+# Dynamic range and PXE parameters for the internal network.
+subnet {{internal_network}} netmask {{internal_netmask}} {
+    option routers {{internal_gateway}};
+    option subnet-mask {{internal_netmask}};
+    range dynamic-bootp {{internal_dhcp_start}} {{internal_dhcp_end}};
+    option domain-name "{{internal_domain}}";
+    option domain-name-servers {{jumpstart_ip}};
     filename "/pxelinux.0";
-    next-server 192.168.10.10;
+    next-server {{jumpstart_ip}};
 }
 
-# Dynamic range and PXE parameters for the main network (192.168.20.0/24)
-subnet 192.168.20.0 netmask 255.255.255.0 {
-    option routers 192.168.20.1;
-    option subnet-mask 255.255.255.0;
-    range dynamic-bootp 192.168.20.50 192.168.20.99;
-    option domain-name "main.local";
-    option domain-name-servers 192.168.20.10;
+# Dynamic range and PXE parameters for the main network.
+subnet {{main_network}} netmask {{main_netmask}} {
+    option routers {{main_gateway}};
+    option subnet-mask {{main_netmask}};
+    range dynamic-bootp {{main_dhcp_start}} {{main_dhcp_end}};
+    option domain-name "{{main_domain}}";
+    option domain-name-servers {{jumpstart_ip_main}};
     filename "/pxelinux.0";
-    next-server 192.168.20.10;
+    next-server {{jumpstart_ip_main}};
 }
 
 # Static IP mappings generated dynamically by Cobbler

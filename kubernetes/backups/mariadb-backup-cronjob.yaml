@@ -74,6 +74,10 @@ spec:
 
                   echo "[$(date)] Starting MariaDB backup..."
 
+                  # Pass the password through the environment: --password on the
+                  # command line would expose it in the pod's process list.
+                  export MYSQL_PWD="${MYSQL_ROOT_PASSWORD}"
+
                   # Check available space on the staging volume (>= 50MB free)
                   AVAIL_KB=$(df -P /backups | awk 'NR==2 {print $4}')
                   if [ "${AVAIL_KB}" -lt 51200 ]; then
@@ -85,7 +89,6 @@ spec:
                     --host=mariadb.cms.svc.cluster.local \
                     --port=3306 \
                     --user=root \
-                    --password="${MYSQL_ROOT_PASSWORD}" \
                     --single-transaction \
                     --routines \
                     --triggers \

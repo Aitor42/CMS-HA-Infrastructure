@@ -11,6 +11,8 @@ spec:
   storageClassName: manual
   accessModes:
     - ReadWriteOnce
+  # Must match the PV. Changing the request is rejected on an existing claim
+  # (immutable field), and hostPath capacity is advisory anyway.
   resources:
     requests:
       storage: 5Gi

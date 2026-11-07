@@ -1,0 +1,25 @@
+# Gitleaks configuration.
+#
+# Keep the upstream rules. The allowlists below are scoped by commit and path
+# so that a new secret still fails the scan. The hosted integration diagnostic
+# reads the Grafana password from the guest's EnvironmentFile and passes it to
+# curl over stdin (`-K -`), never on the command line.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Historical hosted diagnostic passed the Grafana password in curl argv. Fixed at HEAD to read it from the guest EnvironmentFile over stdin (-K -)."
+commits = ["9c3b5a0c7786f9407dc8f38fe94a802dd7f23091", "d73e91c82de12c7c856da9d204652a1a57e917f2", "353f5627a94836315748fd04ade5a7f75d13dc07"]
+paths = ['''.github/workflows/integration-hosted\.yml''']
+
+[[allowlists]]
+description = "Old test fixture with placeholder Garage keys (renamed to test-access-key/test-secret-key in 2026-11-05)"
+commits = ["42fadfede37a8385d7458fc51d7a268c97f89ed5"]
+paths = ['''internal/phases/backup/backup_test\.go''']
+regexTarget = "match"
+regexes = ['''GARAGE_DEFAULT_(ACCESS|SECRET)_KEY=(access|secret)''']
+
+[[allowlists]]
+description = "Historical MariaDB lab Secret, already removed in 2701369. The values were lab defaults and are not present anywhere in the current tree or configuration; treat them as compromised and never reuse them."
+commits = ["3f6581e5814bb173dc353ee116cb16db25339032"]
+paths = ['''kubernetes/mariadb-secret\.yaml''']

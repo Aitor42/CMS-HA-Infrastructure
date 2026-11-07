@@ -1,7 +1,10 @@
 [Unit]
 Description=DRBD Automatic Failover Watchdog Daemon
-After=network-online.target drbd.service
-Wants=network-online.target drbd.service
+# The boot-time role resolver must finish before the watchdog may mount and
+# label a node: a stale Primary coming back from a power cut has to be demoted
+# before the watchdog can mistake it for the active writer.
+After=network-online.target drbd.service drbd-cms-boot.service
+Wants=network-online.target drbd.service drbd-cms-boot.service
 Before=k3s.service
 
 [Service]

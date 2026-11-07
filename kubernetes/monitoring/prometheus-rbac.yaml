@@ -22,10 +22,17 @@ metadata:
   labels:
     app.kubernetes.io/part-of: cms-ha
     app.kubernetes.io/component: monitoring
+# Prometheus scrapes kubelet directly on :10250 with static targets (see
+# puppet/modules/role/files/prometheus/prometheus.yml), not through the API
+# server proxy. The kubelet webhook authorizer therefore only asks for
+# `nodes/metrics`; `nodes/proxy` would additionally allow log/exec/port-forward
+# style access through the kubelet and is not needed. The /metrics non-resource
+# URL covers the API server scrape on :6443. There is no Kubernetes service
+# discovery here, so no list/watch on pods, services or endpoints either.
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "nodes/metrics", "nodes/proxy", "pods", "services", "endpoints", "namespaces"]
-    verbs: ["get", "list", "watch"]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
   - nonResourceURLs: ["/metrics"]
     verbs: ["get"]
 ---

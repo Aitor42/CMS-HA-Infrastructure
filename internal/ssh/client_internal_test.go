@@ -9,23 +9,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-func TestShellQuote(t *testing.T) {
-	cases := map[string]string{
-		"simple":      "'simple'",
-		"with space":  "'with space'",
-		"it's":        `'it'\''s'`,
-		"":            "''",
-		"a;rm -rf /":  "'a;rm -rf /'",
-		"$(touch /x)": "'$(touch /x)'",
-	}
-	for in, want := range cases {
-		if got := shellQuote(in); got != want {
-			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
+func TestAptLockWaitBoundsCloudInit(t *testing.T) {
+	for name, script := range map[string]string{
+		"AptLockWaitSnippet": AptLockWaitSnippet,
+		"aptLockWaitScript":  aptLockWaitScript,
+	} {
+		if !strings.Contains(script, "timeout 120 cloud-init status --wait") {
+			t.Errorf("%s waits for cloud-init without a timeout; a stuck seed would hang the deploy", name)
 		}
+	}
+	if aptLockWaitTimeout < 4*time.Minute {
+		t.Errorf("aptLockWaitTimeout = %s, want room for the 120s cloud-init wait plus the 120s lock loop", aptLockWaitTimeout)
 	}
 }
 
@@ -85,6 +85,82 @@ func TestHostKeyTOFU(t *testing.T) {
 	otherAddr := &net.TCPAddr{IP: net.ParseIP("192.168.10.12"), Port: 22}
 	if err := p2.verifyHostKey("192.168.10.12:22", otherAddr, key2); err != nil {
 		t.Fatalf("unknown host should be trusted (TOFU): %v", err)
+	}
+}
+
+// TestForgetHostDropsPinnedKey verifies that a reinstalled node can present a
+// new host key after ForgetHost, both in the in-memory verifier and on disk.
+func TestForgetHostDropsPinnedKey(t *testing.T) {
+	dir := t.TempDir()
+	knownHosts := filepath.Join(dir, "known_hosts")
+	addr := &net.TCPAddr{IP: net.ParseIP("192.168.10.11"), Port: 22}
+	hostname := "192.168.10.11:22"
+
+	p := &Pool{user: "ubuntu", knownHostsPath: knownHosts}
+	if err := p.verifyHostKey(hostname, addr, newTestHostKey(t)); err != nil {
+		t.Fatalf("seed pinned key: %v", err)
+	}
+
+	p.ForgetHost("192.168.10.11")
+
+	if err := p.verifyHostKey(hostname, addr, newTestHostKey(t)); err != nil {
+		t.Fatalf("a new key after ForgetHost should be trusted: %v", err)
+	}
+}
+
+// TestForgetHostWaitsForInFlightVerification is the regression test for the
+// reinstall race: ForgetHost must not remove the pinned entry while a
+// first-contact handshake holds knownHostsMu and is about to append it again.
+func TestForgetHostWaitsForInFlightVerification(t *testing.T) {
+	dir := t.TempDir()
+	knownHosts := filepath.Join(dir, "known_hosts")
+	addr := &net.TCPAddr{IP: net.ParseIP("192.168.10.11"), Port: 22}
+	hostname := "192.168.10.11:22"
+	key := newTestHostKey(t)
+
+	p := &Pool{user: "ubuntu", knownHostsPath: knownHosts}
+	if err := p.verifyHostKey(hostname, addr, key); err != nil {
+		t.Fatalf("seed pinned key: %v", err)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	p.knownHostsCallback = func(string, net.Addr, ssh.PublicKey) error {
+		close(started)
+		<-release
+		return &knownhosts.KeyError{}
+	}
+
+	verifyDone := make(chan error, 1)
+	go func() {
+		verifyDone <- p.verifyHostKey(hostname, addr, key)
+	}()
+	<-started
+
+	forgetDone := make(chan struct{})
+	go func() {
+		p.ForgetHost("192.168.10.11")
+		close(forgetDone)
+	}()
+
+	select {
+	case <-forgetDone:
+		t.Fatal("ForgetHost returned while a verification held the known-hosts lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-verifyDone; err != nil {
+		t.Fatalf("in-flight verification: %v", err)
+	}
+	<-forgetDone
+
+	data, err := os.ReadFile(knownHosts)
+	if err != nil {
+		t.Fatalf("read known_hosts: %v", err)
+	}
+	if strings.Contains(string(data), "192.168.10.11") {
+		t.Fatalf("ForgetHost left the old key behind: %q", string(data))
 	}
 }
 

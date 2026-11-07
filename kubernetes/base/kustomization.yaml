@@ -15,6 +15,7 @@ namespace: cms
 
 resources:
   - namespace.yaml
+  - mariadb-configmap.yaml
   - mariadb-pv.yaml
   - mariadb-pvc.yaml
   - mariadb-service.yaml

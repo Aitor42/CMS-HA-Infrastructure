@@ -2,4 +2,4 @@
 # Ansible collections required for provisioning.
 collections:
   - name: community.libvirt
-    version: ">=1.2.0"
+    version: "1.2.0"

@@ -22,8 +22,8 @@ var inventoryCmd = &cobra.Command{
 	Short: "Generate the Ansible inventory from config.yaml",
 	Long: `Render the Ansible inventory consumed by the provisioning playbook.
 
-Paths are resolved relative to the configuration file, so the inventory is
-always written inside the repository regardless of the working directory.`,
+Relative output paths are resolved against the directory containing the
+configuration file, independent of the working directory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig()
 		if err != nil {

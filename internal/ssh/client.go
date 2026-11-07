@@ -1,7 +1,6 @@
 package ssh
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	crand "crypto/rand"
@@ -12,13 +11,13 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/pkg/sftp"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -42,6 +41,42 @@ type Pool struct {
 	// by in-flight operations; they are definitively closed in Close(). Closing
 	// here instead would sever sessions of concurrent goroutines.
 	evicted []*ssh.Client
+
+	// Counters exposed through Stats. They are read after a deployment to
+	// populate timings.json and are updated from parallel host tasks.
+	commandCount atomic.Int64
+	retryCount   atomic.Int64
+	bytesSent    atomic.Int64
+}
+
+// Stats is a snapshot of the pool's activity counters.
+type Stats struct {
+	Commands       int64 `json:"commands"`
+	ConnectRetries int64 `json:"connect_retries"`
+	BytesUploaded  int64 `json:"bytes_uploaded"`
+}
+
+// Stats returns the pool's activity counters. They are cumulative for the
+// lifetime of the pool and safe to read while commands are in flight.
+func (p *Pool) Stats() Stats {
+	return Stats{
+		Commands:       p.commandCount.Load(),
+		ConnectRetries: p.retryCount.Load(),
+		BytesUploaded:  p.bytesSent.Load(),
+	}
+}
+
+// countingReader reports every byte read through it to an atomic counter, so
+// uploads of arbitrarily large files (the 3.9 GB ISO) stay O(1) in memory.
+type countingReader struct {
+	reader io.Reader
+	total  *atomic.Int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	c.total.Add(int64(n))
+	return n, err
 }
 
 // Options configures an SSH connection pool.
@@ -112,7 +147,6 @@ func NewPoolWithOptions(keyPath string, opts Options) (*Pool, error) {
 		connectTimeout: opts.ConnectTimeout,
 	}
 
-	// If key file exists, initialize immediately
 	if _, err := os.Stat(keyPath); err == nil {
 		if err := p.initKey(); err != nil {
 			return nil, err
@@ -136,13 +170,7 @@ func (p *Pool) remoteCommand(cmd string) string {
 	if !p.elevated() {
 		return cmd
 	}
-	return "sudo -n -H bash -c " + shellQuote(cmd)
-}
-
-// shellQuote wraps s in single quotes, escaping embedded single quotes, so it
-// can be safely embedded in a `bash -c '...'` invocation.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return "sudo -n -H bash -c " + shell.Quote(cmd)
 }
 
 func (p *Pool) initKey() error {
@@ -329,6 +357,7 @@ func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.R
 	if dst == nil {
 		return "", -1, fmt.Errorf("stdout writer cannot be nil")
 	}
+	p.commandCount.Add(1)
 	client, err := p.getClient(host)
 	if err != nil {
 		return "", -1, err
@@ -337,6 +366,7 @@ func (p *Pool) RunCommandStdin(ctx context.Context, host, cmd string, stdin io.R
 	session, err := client.NewSession()
 	if err != nil {
 		// Stale connection retry once
+		p.retryCount.Add(1)
 		p.invalidateClient(host)
 		client, err = p.getClient(host)
 		if err != nil {
@@ -411,413 +441,4 @@ func (p *Pool) RunScript(ctx context.Context, host, script string) (string, erro
 	}
 
 	return stdout, nil
-}
-
-// CopyFile uploads a local file to the remote host using direct streaming (O(1) memory).
-func (p *Pool) CopyFile(ctx context.Context, host, localPath, remotePath string) error {
-	info, err := os.Stat(localPath)
-	if err != nil {
-		return fmt.Errorf("failed to stat local file %s: %w", localPath, err)
-	}
-
-	src, err := os.Open(filepath.Clean(localPath))
-	if err != nil {
-		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
-	}
-	defer src.Close()
-
-	return p.writeRemoteFile(ctx, host, src, remotePath, info.Mode())
-}
-
-// WithSFTP opens an SFTP client and executes fn, allowing multiple file transfers
-// to reuse a single SFTP session and avoid repeated subsystem negotiation roundtrips.
-//
-// Note: when the pool uses a non-root deploy account, SFTP can only write where
-// that account has permission (e.g. /tmp). Use CopyContent/CopyFile for
-// root-owned destinations, which elevate transparently.
-func (p *Pool) WithSFTP(ctx context.Context, host string, fn func(sftpClient *sftp.Client) error) error {
-	return p.withSFTPClient(ctx, host, fn)
-}
-
-// withSFTPClient dials (retrying once on a stale connection) and runs fn with a
-// fresh SFTP session.
-func (p *Pool) withSFTPClient(ctx context.Context, host string, fn func(sftpClient *sftp.Client) error) error {
-	client, err := p.getClient(host)
-	if err != nil {
-		return err
-	}
-
-	sftpClient, err := sftp.NewClient(client)
-	if err != nil {
-		p.invalidateClient(host)
-		client, err = p.getClient(host)
-		if err != nil {
-			return err
-		}
-		sftpClient, err = sftp.NewClient(client)
-		if err != nil {
-			return fmt.Errorf("failed to create sftp client on %s: %w", host, err)
-		}
-	}
-	defer sftpClient.Close()
-
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	return fn(sftpClient)
-}
-
-func copyFileWithSFTP(ctx context.Context, sftpClient *sftp.Client, localPath, remotePath string, mode os.FileMode) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-
-	srcFile, err := os.Open(filepath.Clean(localPath))
-	if err != nil {
-		return fmt.Errorf("failed to open local file %s: %w", localPath, err)
-	}
-	defer srcFile.Close()
-	return writeRemoteFile(sftpClient, srcFile, remotePath, mode)
-}
-
-func writeRemoteFile(sftpClient *sftp.Client, src io.Reader, remotePath string, mode os.FileMode) error {
-	// Write to a sidecar file and rename afterwards: on any failure the
-	// previous version of remotePath stays intact (never half-overwritten).
-	tmpPath := remotePath + ".cms-tmp"
-	if err := writeRemoteFileAt(sftpClient, src, tmpPath, mode); err != nil {
-		return err
-	}
-	if err := sftpClient.PosixRename(tmpPath, remotePath); err != nil {
-		_ = sftpClient.Remove(tmpPath)
-		return fmt.Errorf("failed to replace remote file %s: %w", remotePath, err)
-	}
-	return nil
-}
-
-// copyBufPool recycles the 256 KiB streaming buffer used by SFTP writes so a
-// directory copy does not allocate a fresh buffer per file. The pooled value is
-// a *[]byte (staticcheck SA6002: pointer-like values avoid boxing allocations).
-var copyBufPool = sync.Pool{
-	New: func() any {
-		buf := make([]byte, 256*1024)
-		return &buf
-	},
-}
-
-func writeRemoteFileAt(sftpClient *sftp.Client, src io.Reader, remotePath string, mode os.FileMode) error {
-	remoteFile, err := sftpClient.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
-	if err != nil {
-		return fmt.Errorf("failed to open remote file %s: %w", remotePath, err)
-	}
-	if err := remoteFile.Chmod(mode); err != nil {
-		_ = remoteFile.Close()
-		_ = sftpClient.Remove(remotePath)
-		return fmt.Errorf("failed to set permissions on remote file %s: %w", remotePath, err)
-	}
-
-	bufp := copyBufPool.Get().(*[]byte)
-	defer copyBufPool.Put(bufp)
-	if _, err := io.CopyBuffer(remoteFile, src, *bufp); err != nil {
-		_ = remoteFile.Close()
-		_ = sftpClient.Remove(remotePath)
-		return fmt.Errorf("failed to stream content to %s: %w", remotePath, err)
-	}
-	if err := remoteFile.Close(); err != nil {
-		_ = sftpClient.Remove(remotePath)
-		return fmt.Errorf("failed to close remote file %s: %w", remotePath, err)
-	}
-	return nil
-}
-
-// CopyContent writes in-memory content to a remote file.
-func (p *Pool) CopyContent(ctx context.Context, host string, content []byte, remotePath string, mode os.FileMode) error {
-	return p.writeRemoteFile(ctx, host, bytes.NewReader(content), remotePath, mode)
-}
-
-// writeRemoteFile uploads src to remotePath atomically. With a non-root deploy
-// account the bytes are streamed through sudo: `cat` into a sidecar file,
-// `chmod`, then `mv` into place (mirroring the SFTP sidecar+rename strategy).
-func (p *Pool) writeRemoteFile(ctx context.Context, host string, src io.Reader, remotePath string, mode os.FileMode) error {
-	if !p.elevated() {
-		return p.withSFTPClient(ctx, host, func(sftpClient *sftp.Client) error {
-			return writeRemoteFile(sftpClient, src, remotePath, mode)
-		})
-	}
-
-	tmpPath := remotePath + ".cms-tmp"
-	script := fmt.Sprintf("set -e; mkdir -p %s; cat > %s; chmod %o %s; mv -f %s %s",
-		shellQuote(path.Dir(remotePath)),
-		shellQuote(tmpPath),
-		mode.Perm(),
-		shellQuote(tmpPath),
-		shellQuote(tmpPath),
-		shellQuote(remotePath),
-	)
-	stderr, code, err := p.RunCommandStdin(ctx, host, script, src, io.Discard)
-	if err != nil {
-		return fmt.Errorf("failed to write remote file %s: %w", remotePath, err)
-	}
-	if code != 0 {
-		return fmt.Errorf("failed to write remote file %s (exit %d): %s", remotePath, code, strings.TrimSpace(stderr))
-	}
-	return nil
-}
-
-// CopyDir recursively uploads a directory, reusing a single SFTP session as
-// root and streaming the whole tree as one sudo tar extraction otherwise.
-func (p *Pool) CopyDir(ctx context.Context, host, localDir, remoteDir string) error {
-	if p.elevated() {
-		return p.copyDirElevated(ctx, host, localDir, remoteDir)
-	}
-
-	return p.withSFTPClient(ctx, host, func(sftpClient *sftp.Client) error {
-		return filepath.Walk(localDir, func(localPath string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			relPath, err := filepath.Rel(localDir, localPath)
-			if err != nil {
-				return err
-			}
-
-			remPath := filepath.ToSlash(filepath.Join(remoteDir, relPath))
-
-			if info.IsDir() {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				if err := sftpClient.MkdirAll(remPath); err != nil {
-					// A real failure (permissions, ENOSPC) would surface much
-					// later as a confusing file-copy error; fail here instead.
-					return fmt.Errorf("failed to create remote directory %s: %w", remPath, err)
-				}
-				return nil
-			}
-
-			return copyFileWithSFTP(ctx, sftpClient, localPath, remPath, info.Mode())
-		})
-	})
-}
-
-// copyDirElevated uploads a directory using a single sudo tar extraction so it
-// can land in root-owned locations (e.g. /etc/puppetlabs/code). This replaces
-// one `sudo` round-trip per directory and per file with a single SSH session.
-func (p *Pool) copyDirElevated(ctx context.Context, host, localDir, remoteDir string) error {
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-
-	werr := filepath.Walk(localDir, func(localPath string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(localDir, localPath)
-		if err != nil {
-			return err
-		}
-		if relPath == "." {
-			return nil
-		}
-
-		var link string
-		if info.Mode()&os.ModeSymlink != 0 {
-			if link, err = os.Readlink(localPath); err != nil {
-				return err
-			}
-		}
-
-		hdr, err := tar.FileInfoHeader(info, link)
-		if err != nil {
-			return err
-		}
-		hdr.Name = filepath.ToSlash(relPath)
-		if info.IsDir() {
-			hdr.Name += "/"
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-
-		f, err := os.Open(localPath) // #nosec G122 -- localPath is walked from the trusted repo tree (puppet/), not from untrusted input
-		if err != nil {
-			return err
-		}
-		_, cerr := io.Copy(tw, f)
-		_ = f.Close()
-		return cerr
-	})
-	if werr != nil {
-		_ = tw.Close()
-		return werr
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-
-	return p.CopyTar(ctx, host, remoteDir, buf.Bytes())
-}
-
-// CopyTar extracts an in-memory tar archive under remoteDir in a single SSH
-// session (through sudo for non-root deploy accounts). It lets callers push a
-// whole tree — embedded manifests, directory uploads — without one round-trip
-// per file. --no-same-owner keeps extracted files owned by the deploy/root
-// account rather than the local uid/gid stored in the archive.
-func (p *Pool) CopyTar(ctx context.Context, host, remoteDir string, tarball []byte) error {
-	script := fmt.Sprintf("set -e; mkdir -p %s; tar -xf - -C %s --no-same-owner",
-		shellQuote(remoteDir), shellQuote(remoteDir))
-	stderr, code, err := p.RunCommandStdin(ctx, host, script, bytes.NewReader(tarball), io.Discard)
-	if err != nil {
-		return fmt.Errorf("failed to upload archive to %s: %w", remoteDir, err)
-	}
-	if code != 0 {
-		return fmt.Errorf("failed to extract archive at %s (exit %d): %s", remoteDir, code, strings.TrimSpace(stderr))
-	}
-	return nil
-}
-
-// ReadFile reads remote file content.
-func (p *Pool) ReadFile(ctx context.Context, host, remotePath string) ([]byte, error) {
-	if p.elevated() {
-		out, stderr, code, err := p.RunCommand(ctx, host, "cat -- "+shellQuote(remotePath))
-		if err != nil || code != 0 {
-			return nil, fmt.Errorf("failed to read remote file %s (exit %d): %v %s", remotePath, code, err, strings.TrimSpace(stderr))
-		}
-		if len(out) > maxRemoteFileRead {
-			return nil, fmt.Errorf("remote file %s exceeds the %d MiB read limit", remotePath, maxRemoteFileRead>>20)
-		}
-		return []byte(out), nil
-	}
-
-	client, err := p.getClient(host)
-	if err != nil {
-		return nil, err
-	}
-
-	sftpClient, err := sftp.NewClient(client)
-	if err != nil {
-		p.invalidateClient(host)
-		client, err = p.getClient(host)
-		if err != nil {
-			return nil, err
-		}
-		sftpClient, err = sftp.NewClient(client)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create sftp client on %s: %w", host, err)
-		}
-	}
-	defer sftpClient.Close()
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-
-	file, err := sftpClient.Open(remotePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open remote file %s: %w", remotePath, err)
-	}
-	defer file.Close()
-
-	// Cap the read: remote logs can be huge and unbounded io.Copy would
-	// exhaust memory when the caller expects a config-like file.
-	data, err := io.ReadAll(io.LimitReader(file, maxRemoteFileRead+1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read remote file %s: %w", remotePath, err)
-	}
-	if len(data) > maxRemoteFileRead {
-		return nil, fmt.Errorf("remote file %s exceeds the %d MiB read limit", remotePath, maxRemoteFileRead>>20)
-	}
-
-	return data, nil
-}
-
-// WaitForSSH polls until SSH connection succeeds using adaptive backoff (starting at 1s up to 5s).
-func (p *Pool) WaitForSSH(ctx context.Context, host string, timeout time.Duration) error {
-	slog.Info("waiting for ssh to become available", "host", host, "timeout", timeout)
-
-	pollCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	interval := 1 * time.Second
-	maxInterval := 5 * time.Second
-	timer := time.NewTimer(interval)
-	defer timer.Stop()
-
-	for {
-		client, err := p.getClient(host)
-		if err == nil {
-			session, err := client.NewSession()
-			if err == nil {
-				session.Close()
-				slog.Info("ssh is available", "host", host)
-				return nil
-			}
-			p.invalidateClient(host)
-		}
-
-		select {
-		case <-pollCtx.Done():
-			return fmt.Errorf("timed out waiting for ssh on %s: %w", host, pollCtx.Err())
-		case <-timer.C:
-			interval = time.Duration(float64(interval) * 1.5)
-			if interval > maxInterval {
-				interval = maxInterval
-			}
-			timer.Reset(interval)
-		}
-	}
-}
-
-// AptLockWaitSnippet is the shared shell preamble that waits for
-// unattended-upgrades, dpkg or cloud-init to release apt locks before apt
-// operations; callers embed it at the top of their install scripts.
-const AptLockWaitSnippet = `cloud-init status --wait 2>/dev/null || true
-for i in {1..30}; do
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-        break
-    fi
-    sleep 2
-done
-`
-
-// WaitForAptLock waits for unattended-upgrades, dpkg or cloud-init to release
-// apt locks on the target host. Fails (exit 1) if no lock is released in
-// time, instead of falsely reporting success.
-func (p *Pool) WaitForAptLock(ctx context.Context, host string) error {
-	waitScript := `
-cloud-init status --wait 2>/dev/null || true
-for i in {1..60}; do
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 && ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
-        exit 0
-    fi
-    sleep 2
-done
-echo "apt lock still held after 120s (unattended-upgrades/dpkg?)" >&2
-exit 1
-`
-	_, err := p.RunScript(ctx, host, waitScript)
-	return err
-}
-
-// Close closes all connections in the pool.
-func (p *Pool) Close() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for host, client := range p.clients {
-		client.Close()
-		slog.Debug("closed ssh connection", "host", host)
-	}
-	p.clients = make(map[string]*ssh.Client)
-	for _, client := range p.evicted {
-		client.Close()
-	}
-	p.evicted = nil
 }

@@ -1,0 +1,9 @@
+# Self-hosted runner labels used by this repository.
+#
+# actionlint only knows the labels of GitHub-hosted runners, so a workflow that
+# targets the lab's own hypervisor (`runs-on: [self-hosted, linux, kvm]`) is
+# otherwise reported as an error. Declaring the custom label here keeps
+# `actionlint` useful: it still checks everything else in the workflows.
+self-hosted-runner:
+  labels:
+    - kvm

@@ -8,8 +8,9 @@
 //   VHOST     HTTP Host header the CMS vhost expects.
 //
 // TLS verification uses the container trust store; `cms-ha traffic` mounts the
-// lab root CA and sets SSL_CERT_FILE when it is present, otherwise it passes
-// `--insecure`. Metrics can be streamed to Prometheus with
+// lab root CA (the copy the PKI phase leaves under the deploy account's HOME)
+// and sets SSL_CERT_FILE when it is present, otherwise it passes
+// `--insecure-skip-tls-verify`. Metrics can be streamed to Prometheus with
 // `--out experimental-prometheus-rw` (see traffic.prometheus_rw_url).
 //
 // Run standalone with:
@@ -22,8 +23,8 @@ import { Rate, Trend } from 'k6/metrics';
 const BASE_URL = __ENV.BASE_URL || 'https://192.168.20.100';
 const VHOST = __ENV.VHOST || 'cms.fake-enterprise.com';
 
-// Browse paths mirror the WordPress surface exercised by the old Go generator
-// (front page, search, REST API, feeds, cron and the login form).
+// Browse paths cover the WordPress surface a CMS user exercises (front page,
+// search, REST API, feeds, cron and the login form).
 const BROWSE_PATHS = [
   '/',
   '/wp-login.php',

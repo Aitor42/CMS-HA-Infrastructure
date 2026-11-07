@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +24,24 @@ func SetVerbose(v bool) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: level,
 	})))
+}
+
+// runID is the current deployment/run identifier. It is attached to structured
+// debug records so a log line can be correlated with timings.json and the
+// checkpoint without parsing the human-readable prefix.
+var runID atomic.Value
+
+// SetRunID sets the identifier attached to subsequent structured log records.
+func SetRunID(id string) {
+	runID.Store(id)
+}
+
+// RunID returns the current identifier, or an empty string when none is set.
+func RunID() string {
+	if v := runID.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // FormatMsg formats a message if format arguments are provided.
@@ -60,10 +80,38 @@ func Error(msg string, args ...any) {
 // progress must use Info/Success/Warn/Error so it always prints.
 func Debug(msg string, args ...any) {
 	if len(args) > 0 {
-		slog.Debug(fmt.Sprintf(msg, args...))
-		return
+		msg = fmt.Sprintf(msg, args...)
 	}
-	slog.Debug(msg)
+	attrs := []any{}
+	if id := RunID(); id != "" {
+		attrs = append(attrs, "run_id", id)
+	}
+	slog.Debug(msg, attrs...)
+}
+
+// phaseObserver receives the name, start time and duration of every completed
+// phase timer. It is used by the deploy package to persist timings.json.
+var (
+	phaseObserverMu sync.RWMutex
+	phaseObserver   func(name string, start time.Time, duration time.Duration)
+)
+
+// SetPhaseObserver installs a global phase-timer observer. Passing nil removes
+// it. Timers still print their normal output; the observer is an extra sink for
+// structured measurements, not a replacement for the user-facing log.
+func SetPhaseObserver(fn func(name string, start time.Time, duration time.Duration)) {
+	phaseObserverMu.Lock()
+	phaseObserver = fn
+	phaseObserverMu.Unlock()
+}
+
+func notifyPhaseObserver(name string, start time.Time, duration time.Duration) {
+	phaseObserverMu.RLock()
+	observer := phaseObserver
+	phaseObserverMu.RUnlock()
+	if observer != nil {
+		observer(name, start, duration)
+	}
 }
 
 // PhaseTimer measures and prints the duration of a phase.
@@ -83,7 +131,9 @@ func PhaseStart(name string) *PhaseTimer {
 
 // End finishes the phase timer and prints the duration.
 func (t *PhaseTimer) End() {
-	Success("Completed phase: %s in %s", t.name, FormatDuration(time.Since(t.start)))
+	duration := time.Since(t.start)
+	notifyPhaseObserver(t.name, t.start, duration)
+	Success("Completed phase: %s in %s", t.name, FormatDuration(duration))
 }
 
 // FormatDuration renders a duration in human units with at most two decimal

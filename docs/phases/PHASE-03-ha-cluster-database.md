@@ -4,7 +4,7 @@
 
 - [x] Install high-availability cluster: 3 control-plane (server) nodes, 2 agent/worker nodes.
 - [x] Configure SQL database within the cluster.
-- [x] Verify database and controller synchronization and failover.
+- [x] Implement database/controller synchronization checks and failover scenarios (live acceptance requires recorded results).
 
 ---
 
@@ -21,10 +21,10 @@
 | internal-worker2 | 192.168.10.14 | Agent |
 
 **Installation:**
-- Master 1: `curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption --node-external-ip 192.168.10.11 --flannel-iface enp1s0" sh -` (Secret encryption at rest is enabled from cluster init).
-- Master 2: joins the existing cluster with `--server https://192.168.10.11:6443 --token-file /root/.k3s-join-token` — the join token is uploaded to each joining node as a file with `0600` permissions and never placed on the command line (an argv value would be readable by every local user via `/proc/*/cmdline`).
-- Master 3: joins as an additional control-plane **server** with the same command, giving the embedded etcd cluster an odd quorum (3 members tolerate 1 failure). It carries no DRBD disk. After all servers join, the phase verifies `kubectl -n kube-system get pods -o name | grep -c 'pod/etcd-'` equals the configured master count.
-- Workers: join as agents with `K3S_TOKEN` expanded from the same protected file into an exported environment variable (`export K3S_TOKEN="$(cat /root/.k3s-join-token)"`), visible only in the owner-readable `/proc/*/environ`. Agent join results are validated per node (SSH error **and** exit code); a failed join aborts the phase.
+- Master 1: the orchestrator downloads the pinned `v1.29.9+k3s1` binary, verifies its SHA-256, installs it, and runs the upstream setup script with `INSTALL_K3S_SKIP_DOWNLOAD=true` and `INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption --node-external-ip 192.168.10.11 --flannel-iface <internal NIC>"` (Secret encryption at rest is enabled from cluster init). The NIC is not hardcoded: before installing, the node runs `ip -o -4 addr show` and selects the interface that owns its configured internal address, so a guest whose NIC order differs (or that has extra networks) still points Flannel at the correct link. The install aborts if no interface owns that address.
+- Master 2: joins the existing cluster with `--server https://192.168.10.11:6443 --token-file /root/.k3s-join-token` — the join token is uploaded to each joining node as a file with `0600` permissions and never placed on the command line (an argv value would be readable by every local user via `/proc/*/cmdline`). It resolves its own Flannel interface the same way.
+- Master 3: joins as an additional control-plane **server** with the same command, giving the embedded etcd cluster an odd quorum (3 members tolerate 1 failure). It carries no DRBD disk. After all servers join, the phase verifies that the number of nodes labelled `node-role.kubernetes.io/etcd` equals the configured master count — K3s runs etcd inside the server process, so its members are control-plane nodes, not kube-system pods.
+- Workers: join as agents with `K3S_TOKEN_FILE=/root/.k3s-join-token`, so the agent reads the token directly from the protected 0600 file. The secret is never expanded into argv or the systemd environment file. Each worker resolves the Flannel interface from its own internal address before the agent starts, and its join is validated per node (SSH error **and** exit code); a failed join aborts the phase.
 
 ### MariaDB Database and Replication (DRBD)
 
@@ -35,18 +35,20 @@
   - Only the promoted primary master (`internal-master1` by default) mounts the DRBD volume.
 - **Dynamic Node Pinning (Kubernetes + DRBD):** 
   - To prevent MariaDB from running on nodes without the mounted DRBD storage, `nodeSelector: drbd-status: primary` is configured in `mariadb-statefulset.yaml`.
-  - The script `06_setup_kubernetes.sh` automatically labels `internal-master1` with `drbd-status=primary`.
+  - The Kubernetes phase asks the DRBD-enabled masters for the `cms_data` role and labels the node that reports `Primary` with `drbd-status=primary` (`internal-master1` on a fresh deploy, or the survivor after a failover/resume). It fails if no node, or more than one, claims the primary role.
   - The local failover script (`/usr/local/bin/drbd-failover.sh`) dynamically reassigns this label during promotion and demotion, causing Kubernetes to automatically move the MariaDB pod to the active master node.
+  - The pod tolerates node loss for only 60 s (`node.kubernetes.io/not-ready` / `unreachable` `NoExecute` tolerations with `tolerationSeconds: 60`). Kubernetes' default is 300 s, which would leave WordPress without a database for five minutes after a master failure even though the watchdog has already fenced the peer and promoted the survivor. The window is deliberately longer than the 40 s `node-monitor-grace-period`, so a transient blip does not evict the database.
 - **Automated Failover Watchdog (`drbd-failover-watchdog.service`):**
   - Continuous background daemon (`/usr/local/bin/drbd-watchdog.sh`) running on both control plane masters.
   - **Quorum & Anti-Split-Brain Safeguards:**
     1. *Gateway Ping Check:* Verifies reachability of the default gateway (`192.168.10.1`). If the gateway is unreachable, failover is suppressed to prevent split-brain under network isolation.
     2. *Peer Heartbeat Check:* Pings the peer master before taking action, avoiding false positives during transient replication interruptions.
-    3. *Debounce Strike Threshold:* Requires 3 consecutive failed checks (15s timeout) before triggering promotion.
-    4. *STONITH Fencing (`/usr/local/bin/fence-peer.sh`):* The ping checks are only a precondition. Before promoting, the failed peer domain is powered off at the hypervisor and the power-off is **confirmed**; without a confirmed fence the watchdog refuses to promote (unless `drbd.fencing` is disabled). This makes split-brain impossible rather than merely unlikely.
-    5. *Autonomous Orchestration:* Automatically promotes DRBD, mounts the partition, updates Kubernetes node affinity labels, and reschedules the MariaDB StatefulSet.
+    3. *Debounce Strike Threshold:* Requires 3 consecutive failed checks before attempting takeover; the nominal 5-second poll interval excludes time spent on probes and fencing.
+    4. *STONITH Fencing (`/usr/local/bin/fence-peer.sh`):* The ping checks are only a precondition. Before promoting, the failed peer domain is powered off at the hypervisor and the power-off is **confirmed**; without a confirmed fence the watchdog refuses to promote when `drbd.fencing` is enabled. Derived SSH fencing uses a dedicated restricted key and forced command allowing only exact `virsh destroy` / `virsh domstate` requests for the first two configured masters, never the third quorum member. Hypervisor host keys come from local sshd public keys, are persistently pinned and copied to the peers, and are checked strictly. Custom command pairs are operator-managed. This is a safety control, not an unconditional split-brain guarantee; disabling fencing removes it. Existing labs must rerun `setup-drbd` and review key/pin migration as described in [MANUAL section 7.1](../MANUAL.md#71-master-1-failure-drbdk3s-primary).
+    5. *Autonomous Orchestration:* Automatically promotes DRBD, mounts the partition, updates Kubernetes node affinity labels, and reschedules the MariaDB StatefulSet. The pod left behind on the failed master is force-deleted (`--force --grace-period=0`) instead of gracefully: a pod whose node is unreachable stays in `Terminating` until that node's kubelet confirms the deletion, and a StatefulSet only creates its replacement once the old pod object is gone — with a graceful delete the database would stay down until the failed master came back, long after DRBD had failed over. The peer is fenced off before this happens, so no process can still be writing the volume.
     6. *Automatic Split-Brain Auto-healing:* Upon node recovery, DRBD kernel handlers (`after-sb-1pri discard-secondary`) automatically resynchronize outdated blocks without human intervention.
-- **Exposure:** ClusterIP (3306) + NodePort (30306) for access from the main network.
+- **Durability:** `mariadb-configmap.yaml` sets `innodb_use_native_aio=0`, `innodb_flush_method=fsync` and `innodb_flush_log_at_trx_commit=1`. Reapply the Kubernetes phase and restart the MariaDB pod in a maintenance window if an existing server still uses the old commit setting; updating a mounted ConfigMap alone does not reload server startup options.
+- **Exposure:** ClusterIP (3306) + NodePort (30306). Endpoint UFW rules scope the K3s API (6443/tcp) to Internal and MariaDB NodePort to the Internal/Main CIDRs, removing legacy public grants. This is INPUT-rule subnet scoping, not a per-frontend DB allowlist or complete NodePort isolation: kube-proxy DNAT/FORWARD can bypass UFW INPUT.
 - **Database:** `wordpress`
 - **User:** `wp_user` with GRANT ALL on `wordpress`.
 
@@ -59,10 +61,15 @@ hypervisor (`backup` phase), on a data volume under `backup.data_dir`
 (default `/var/lib/cms-garage`).
 
 - **Store:** Garage v2.4.1 (`dxflrs/garage`), single-node/`--default-bucket`,
-  S3 API published only on the hypervisor's internal address
-  (`192.168.10.254:3900`), never on the WAN. Deployed by
-  `internal/phases/backup/backup.go`; its `garage.toml` (with freshly generated
-  RPC/admin secrets) is written once and reused on later deploys.
+  running on the **host network** and bound to the hypervisor's internal
+  address (`192.168.10.254:3900`), never on the WAN; the RPC, web and admin
+  APIs stay on loopback. Host networking is deliberate: Docker's port
+  publishing is not reachable from the libvirt guests in the CI lab (the
+  backup CronJob got `connection refused` while the hypervisor itself could
+  reach the store), so the S3 API binds the bridge address directly. Deployed
+  by `internal/phases/backup/backup.go`; its `garage.toml` (with freshly
+  generated RPC/admin secrets) is written once and reused on later deploys
+  (a config from before host networking is regenerated).
 - **Dump + upload** (`mariadb-backup-cronjob.yaml`, daily 02:00):
   `mysqldump` writes a gzip dump to the local staging PVC, then an `rclone`
   container uploads it to the bucket and drops objects older than
@@ -70,7 +77,11 @@ hypervisor (`backup` phase), on a data volume under `backup.data_dir`
 - **Restore drill** (`mariadb-restore-test-cronjob.yaml`, daily 03:30): fetches
   the newest object, restores it into a throwaway MariaDB instance, and
   validates the WordPress schema (`wp_posts`, `wp_options`, `wp_users`). It also
-  measures the restore duration, so RTO is proven rather than assumed.
+  records `cms_backup_restore_duration_seconds` from before S3 listing/download
+  through ephemeral DB initialization, import, validation and shutdown (including
+  fetch retries). This is **database restore drill duration, not CMS RTO**: the
+  production DB, uploads, frontends, routing and user traffic are not recovered
+  by this drill.
 - **Alerts:** the jobs publish `cms_backup_last_success_timestamp_seconds` and
   `cms_backup_restore_*` through the node-exporter textfile collector;
   `BackupMissing` (26 h) and `BackupRestoreTestFailing` (48 h) guard the RPO.
@@ -79,7 +90,8 @@ hypervisor (`backup` phase), on a data volume under `backup.data_dir`
   (endpoint/bucket/region/retention) and a `backup-secret` Secret
   (access/secret key) from it, and pins the CronJob schedules.
 - **Engine:** `backup.engine: "garage"` (`""` disables the whole feature). The
-  S3 secret must be encrypted with `cms-ha secrets encrypt`.
+  S3 secret is age-encrypted on normal config load; no separate encryption
+  command is required.
 
 ### Kubernetes Manifests (Kustomize)
 
@@ -122,11 +134,11 @@ kubernetes/
 
 The monitoring phase binds Prometheus to a dedicated read-only `ClusterRole` (`prometheus-metrics-reader`: nodes, pods, services, endpoints, namespaces, `/metrics`), not `cluster-admin`. The bearer token issued for scraping is valid for **1 year** and is rotatable by re-running the monitoring phase; failures during token rotation are warnings, not silent failures.
 
-### Associated Scripts & Daemons
+### Associated Code & Daemons
 
-- `scripts/06_setup_kubernetes.sh` / `internal/phases/kubernetes/kubernetes.go` — K3s installation, node labeling, and MariaDB deployment.
-- `scripts/05_setup_drbd.sh` / `internal/phases/drbd/drbd.go` — DRBD configuration, initial Primary bootstrap, failover utility (`/usr/local/bin/drbd-failover.sh`), and watchdog service (`/etc/systemd/system/drbd-failover-watchdog.service`).
-- `scripts/utils/test_failover.sh` — Automated chaos engineering test suite validating unattended master, frontend, and worker node failover.
+- `internal/phases/kubernetes` (`cms-ha phase setup-kubernetes`) — K3s installation, node labeling and MariaDB deployment.
+- `internal/phases/drbd` (`cms-ha phase setup-drbd`) — DRBD configuration, initial Primary bootstrap, failover utility (`/usr/local/bin/drbd-failover.sh`) and watchdog service (`/etc/systemd/system/drbd-failover-watchdog.service`).
+- `cms-ha test failover` — chaos suite validating unattended master, frontend, worker and balancer failover.
 
 ### Verification
 

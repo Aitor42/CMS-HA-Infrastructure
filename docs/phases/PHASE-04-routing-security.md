@@ -2,9 +2,9 @@
 
 ## Objectives to Achieve
 
-- [x] Rules: Restrict internet access exclusively to the load balancer (LB).
-- [x] Rules: Allow outbound internet access from the `main` subnet and permit `internal` communication.
-- [x] Rules: Restrict the `internal` subnet to communicate outbound only with `main`.
+- [x] Publish only HTTP/S on the LB VIP to the WAN.
+- [x] Allow `main` and `internal` outbound access through NAT.
+- [x] Allow inter-zone traffic while keeping the WAN out of both subnets.
 - [x] Verify subnet isolation.
 
 ---
@@ -36,14 +36,19 @@ ufw default allow outgoing
 
 ### NAT Rules (/etc/ufw/before.rules)
 
-**DNAT (External access → LB VIP, floated between main-lb1/main-lb2 by keepalived):**
+The block is rendered from `templates/ufw/nat-rules` with the configured
+`network.internal.cidr`, `network.main.cidr`, `network.main.vip` and the WAN
+interface discovered at runtime. **DNAT** publishes the keepalived VIP to the
+WAN; **MASQUERADE** gives both lab subnets outbound access:
+
 ```
 *nat
 :PREROUTING ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
--A PREROUTING -i eth0 -p tcp --dport 80 -j DNAT --to-destination 192.168.20.100:80
--A PREROUTING -i eth0 -p tcp --dport 443 -j DNAT --to-destination 192.168.20.100:443
--A POSTROUTING -s 192.168.20.0/24 -o eth0 -j MASQUERADE
+-A PREROUTING -i <wan> -p tcp --dport 80 -j DNAT --to-destination <lb-vip>:80
+-A PREROUTING -i <wan> -p tcp --dport 443 -j DNAT --to-destination <lb-vip>:443
+-A POSTROUTING -s <internal-cidr> -o <wan> -j MASQUERADE
+-A POSTROUTING -s <main-cidr> -o <wan> -j MASQUERADE
 COMMIT
 ```
 
@@ -55,11 +60,19 @@ COMMIT
 | main (eth2) → Internet (eth0) | WAN | ALLOW | Main subnet outbound access |
 | main (eth2) → internal (eth1) | internal | ALLOW | Main to internal access |
 | internal (eth1) → main (eth2) | main | ALLOW | Internal to main access |
-| internal (eth1) → Internet (eth0) | WAN | DENY (implicit) | Block internal network from internet |
+| internal (eth1) → Internet (eth0) | WAN | ALLOW (NAT) | Package and Puppet downloads |
 
-### Associated Scripts
+Inter-zone routing is not permission to use every endpoint service. Puppet
+scopes K3s API `6443/tcp` to Internal, MariaDB NodePort `30306/tcp` to both lab
+CIDRs, and storage NFSv4 `2049/tcp` to configured frontend IPs only. Validate
+those TCP paths from allowed and denied sources; ICMP alone cannot prove the
+service policy. NodePort DNAT/FORWARD may bypass UFW INPUT, so those rules alone
+do not prove complete NodePort isolation.
 
-- `scripts/09_setup_ufw.sh` — Configuration of perimeter and nodal firewalls
+### Implementation
+
+- `internal/phases/ufw` (`cms-ha phase setup-ufw`) — re-injects the router NAT, reloads UFW and verifies the live router policies, forwarding and NAT. Per-node service rules are owned by Puppet (`role::base` and each role manifest), not by this phase.
+- `internal/phases/routerbootstrap` (`cms-ha phase bootstrap-router`) — sets the gateway addresses, IP forwarding and NAT.
 
 ### Verification
 
@@ -68,11 +81,14 @@ COMMIT
 ssh ubuntu@192.168.10.1 "sudo ufw status verbose"
 ssh ubuntu@192.168.10.1 "sudo iptables -t nat -L -n -v"
 
-# From a hot-desk node: should access the internet and the internal subnet
+# From a hot-desk node: should access the internet and reach permitted TCP
+# services on the internal subnet. Ping alone does not test the endpoint's
+# service-specific policy.
 ssh ubuntu@192.168.20.201 "sudo curl -s http://example.com"
-ssh ubuntu@192.168.20.201 "sudo ping -c 2 192.168.10.11"
+ssh ubuntu@192.168.20.201 "timeout 2 bash -c '</dev/tcp/192.168.10.11/22' && echo reachable"
 
-# From internal subnet: must not access the internet
-ssh ubuntu@192.168.10.11 "sudo curl -s --connect-timeout 5 http://example.com"  # Should fail
-ssh ubuntu@192.168.10.11 "sudo ping -c 2 192.168.20.100"  # Should work
+# From the internal subnet: should reach the internet through NAT (needed for
+# package/Puppet downloads) and the main-network VIP over HTTP/S.
+ssh ubuntu@192.168.10.11 "sudo curl -s --connect-timeout 5 http://example.com"
+ssh ubuntu@192.168.10.11 "curl -sS --connect-timeout 5 -o /dev/null -w '%{http_code}\n' http://192.168.20.100"
 ```

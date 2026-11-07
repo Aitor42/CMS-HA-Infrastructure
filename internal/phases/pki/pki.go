@@ -1,76 +1,136 @@
 package pki
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/retry"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
-// Phase implements the PKI setup phase
+// Phase implements the PKI setup phase.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
-// NewPhase creates a new PKI Phase
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+// NewPhase creates a new PKI Phase.
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-// Description returns the phase description
-func (p *Phase) Description() string {
-	return "Sets up Internal CA with step-ca"
-}
+// Description returns the phase description.
+func (p *Phase) Description() string { return catalog.PKI.Description }
 
-// Name returns the phase name
-func (p *Phase) Name() string {
-	return "Internal CA Setup"
-}
+// Name returns the phase name.
+func (p *Phase) Name() string { return catalog.PKI.Name }
 
-// Run runs the setup
+// Run installs step-ca, initialises the CA and distributes the load-balancer
+// certificate.
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
 	defer timer.End()
+
 	caPass := p.cfg.PKI.ProvisionerPassword
 	if caPass == "" {
 		return fmt.Errorf("pki.provisioner_password must be set in config.yaml so CA restarts use the same key password")
 	}
 
 	jumpIP := p.cfg.Nodes.Jumpstart.IP
-
-	logging.Info("Installing step-cli and step-ca on Jumpstart...")
-	installCmd := `set -e
-if ! command -v step >/dev/null 2>&1 || ! command -v step-ca >/dev/null 2>&1; then
-	ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-	wget -q "https://github.com/smallstep/cli/releases/latest/download/step-cli_${ARCH}.deb" -O /tmp/step-cli.deb
-	dpkg -i /tmp/step-cli.deb || apt-get install -f -y
-	rm -f /tmp/step-cli.deb
-
-	wget -q "https://github.com/smallstep/certificates/releases/latest/download/step-ca_${ARCH}.deb" -O /tmp/step-ca.deb
-	dpkg -i /tmp/step-ca.deb || apt-get install -f -y
-	rm -f /tmp/step-ca.deb
-fi`
-	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, installCmd); err != nil || code != 0 {
-		return fmt.Errorf("failed to install step-ca (exit %d): %v", code, err)
-	}
-
-	logging.Info("Initializing step-ca...")
-	caPort := p.cfg.PKI.CAPort
-	if caPort == 0 {
-		caPort = 8443
-	}
+	caPort := caPortOrDefault(p.cfg.PKI.CAPort)
 	caDomain := p.cfg.PKI.Domain
 	if caDomain == "" {
 		caDomain = "ca.internal.local"
 	}
+
+	if err := p.installStepTools(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.initCA(ctx, jumpIP, caPass, caPort, caDomain); err != nil {
+		return err
+	}
+	if err := p.installCAService(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.waitForCAHealth(ctx, jumpIP, caPort, "step-ca health check failed"); err != nil {
+		return err
+	}
+	if err := p.raiseProvisionerDurations(ctx, jumpIP, caDomain, caPort); err != nil {
+		return err
+	}
+	if err := p.distributeRootCA(ctx, jumpIP); err != nil {
+		return err
+	}
+	if err := p.issueLoadBalancerCertificates(ctx); err != nil {
+		return err
+	}
+
+	logging.Success("PKI Setup completed successfully.")
+	return nil
+}
+
+// installStepTools installs the pinned step-cli and step-ca releases.
+//
+// The release assets are pinned by pki.step_version / pki.step_ca_version.
+// Downloading whatever "latest" happens to point at made a fresh deploy
+// depend on that day's Smallstep release while the configuration claimed a
+// version, so a future release that changes the CLI surface (or the Debian
+// asset name) would break exactly the hosts that start from scratch.
+//
+// The asset name is not stable across releases: step-cli ships
+// step-cli_<v>-1_<arch>.deb while step-ca has published both
+// step-ca_<v>-1_<arch>.deb and step-ca_<v>_<arch>.deb, so every known shape
+// is tried and the version-independent alias is used only when the version
+// is left empty. A pin that cannot be downloaded is an error, not a reason
+// to install something else.
+func (p *Phase) installStepTools(ctx context.Context, jumpIP string) error {
+	logging.Info("Installing step-cli and step-ca on Jumpstart...")
+	installCmd := fmt.Sprintf(`set -e
+if ! command -v step >/dev/null 2>&1 || ! command -v step-ca >/dev/null 2>&1; then
+	ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+	install_deb() {
+		out="$1"; shift
+		for url in "$@"; do
+			if wget -q "$url" -O "$out"; then
+				dpkg -i "$out" || apt-get install -f -y
+				rm -f "$out"
+				return 0
+			fi
+			echo "  no such release asset: $url" >&2
+		done
+		return 1
+	}
+	install_deb /tmp/step-cli.deb %s
+	install_deb /tmp/step-ca.deb %s
+fi
+command -v step >/dev/null 2>&1 || { echo "step CLI missing after installation" >&2; exit 1; }
+command -v step-ca >/dev/null 2>&1 || { echo "step-ca missing after installation" >&2; exit 1; }`,
+		quoteURLs(stepReleaseURLs("cli", "step-cli", p.cfg.PKI.StepVersion)),
+		quoteURLs(stepReleaseURLs("certificates", "step-ca", p.cfg.PKI.StepCAVersion)))
+	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, installCmd); err != nil || code != 0 {
+		return fmt.Errorf("failed to install step-ca (exit %d): %v", code, err)
+	}
+	return nil
+}
+
+// initCA prepares the step directory, uploads the CA password and runs the
+// idempotent `step ca init` guarded by the root certificate.
+func (p *Phase) initCA(ctx context.Context, jumpIP, caPass string, caPort int, caDomain string) error {
+	logging.Info("Initializing step-ca...")
 
 	// Prepare step directory and write password file securely with 0600 permissions
 	if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, "mkdir -p /root/.step && chmod 700 /root/.step"); err != nil {
@@ -92,22 +152,11 @@ fi`
 	if initCode != 0 {
 		return fmt.Errorf("failed to initialize step-ca (exit %d): %v %s%s", initCode, err, strings.TrimSpace(initOut), strings.TrimSpace(initErr))
 	}
+	return nil
+}
 
-	// Raise the provisioner's x509 durations so the load-balancer certificate
-	// can outlive the verify threshold. step-ca defaults to 24h, which would
-	// make the "> 30 days" assertion impossible and force constant renewals.
-	// Best-effort: an older step CLI that rejects a flag must not abort the
-	// whole deploy, so log and continue.
-	certHours := p.cfg.LBTLSCertLifetimeHours()
-	durationsCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca provisioner update admin \
---x509-min-dur 24h --x509-default-dur %dh --x509-max-dur 8760h`, certHours)
-	if updOut, updErr, updCode, err := p.pool.RunCommand(ctx, jumpIP, durationsCmd); err != nil || updCode != 0 {
-		logging.Warn("Could not update CA provisioner durations; using CA defaults: %s%s",
-			strings.TrimSpace(updOut), strings.TrimSpace(updErr))
-	} else if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, "systemctl restart step-ca 2>/dev/null || true"); err != nil {
-		logging.Warn("Could not reload step-ca after updating provisioner durations: %v", err)
-	}
-
+// installCAService writes the systemd unit and enables it.
+func (p *Phase) installCAService(ctx context.Context, jumpIP string) error {
 	logging.Info("Starting step-ca service...")
 	serviceCmd := `cat << 'EOF' > /etc/systemd/system/step-ca.service
 [Unit]
@@ -127,16 +176,47 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 	if _, _, code, err := p.pool.RunCommand(ctx, jumpIP, serviceCmd); err != nil || code != 0 {
 		return fmt.Errorf("failed to install/enable step-ca systemd service (exit %d): %v", code, err)
 	}
+	return nil
+}
 
-	logging.Info("Waiting for CA health endpoint...")
-	err = retry.DoContext(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
+// waitForCAHealth polls the local health endpoint with the same budget for the
+// first start and for the restart that follows the provisioner update.
+func (p *Phase) waitForCAHealth(ctx context.Context, jumpIP string, caPort int, failure string) error {
+	err := retry.DoContext(ctx, retry.Config{MaxAttempts: 15, Interval: 2 * time.Second, Timeout: 60 * time.Second}, func(attemptCtx context.Context) error {
 		_, _, _, err := p.pool.RunCommand(attemptCtx, jumpIP, fmt.Sprintf("curl -kf https://localhost:%d/health", caPort))
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("step-ca health check failed: %w", err)
+		return fmt.Errorf("%s: %w", failure, err)
 	}
+	return nil
+}
 
+// raiseProvisionerDurations raises the provisioner's x509 durations so the
+// load-balancer certificate can outlive the verify threshold.
+//
+// This has to happen after the service is up: `step ca provisioner update`
+// is not an offline edit of ca.json, it talks to the CA's admin API, and the
+// CA only picks the new limits up on restart.
+func (p *Phase) raiseProvisionerDurations(ctx context.Context, jumpIP, caDomain string, caPort int) error {
+	certHours := p.cfg.LBTLSCertLifetimeHours()
+	durationsCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca provisioner update admin \
+--x509-min-dur 24h --x509-default-dur %dh --x509-max-dur %dh \
+--ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt`, certHours, config.MaxPKICertLifetimeHours, caDomain, caPort)
+	if updOut, updErr, updCode, err := p.pool.RunCommand(ctx, jumpIP, durationsCmd); err != nil || updCode != 0 {
+		return fmt.Errorf("failed to raise the CA provisioner x509 durations to %dh (exit %d): %v %s%s",
+			certHours, updCode, err, strings.TrimSpace(updOut), strings.TrimSpace(updErr))
+	}
+	if _, _, _, err := p.pool.RunCommand(ctx, jumpIP, "systemctl restart step-ca"); err != nil {
+		return fmt.Errorf("failed to restart step-ca after raising the certificate durations: %w", err)
+	}
+	logging.Info("Waiting for CA health endpoint after reloading the provisioner...")
+	return p.waitForCAHealth(ctx, jumpIP, caPort, "step-ca health check failed after reloading the provisioner")
+}
+
+// distributeRootCA copies the CA certificate to every other node and refreshes
+// its trust store.
+func (p *Phase) distributeRootCA(ctx context.Context, jumpIP string) error {
 	logging.Info("Distributing root CA cert to all nodes...")
 	caCert, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /root/.step/certs/root_ca.crt")
 	if err != nil {
@@ -150,11 +230,13 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 		}
 	}
 
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	certBytes := []byte(caCert)
+
+	p.saveLocalRootCA(certBytes)
 	for _, ip := range allIPs {
 		nodeIP := ip
-		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
 			if err := pool.CopyContent(c, nodeIP, certBytes, "/usr/local/share/ca-certificates/cms_root_ca.crt", 0644); err != nil {
 				return err
 			}
@@ -171,13 +253,28 @@ systemctl daemon-reload && systemctl enable --now step-ca`
 			return fmt.Errorf("failed to distribute root CA to %s: %w", r.Host, r.Err)
 		}
 	}
-
-	if err := p.issueLoadBalancerCertificates(ctx); err != nil {
-		return err
-	}
-
-	logging.Success("PKI Setup completed successfully.")
 	return nil
+}
+
+// saveLocalRootCA leaves a copy where the unprivileged deploy account can read
+// it. The traffic phase mounts it into the k6 container so the load test
+// verifies the lab's certificate chain instead of skipping TLS verification.
+func (p *Phase) saveLocalRootCA(certBytes []byte) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	dir := filepath.Join(home, ".cms-ha")
+	certPath := filepath.Join(dir, "cms_root_ca.crt")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		logging.Warn("Could not create %s for the root CA copy: %v", dir, err)
+		return
+	}
+	if err := os.WriteFile(certPath, certBytes, 0o644); err != nil {
+		logging.Warn("Could not save the root CA to %s: %v", certPath, err)
+		return
+	}
+	logging.Info("Root CA copy for the load test: %s", certPath)
 }
 
 // issueLoadBalancerCertificates issues the load-balancer certificate on the CA
@@ -202,19 +299,9 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	}
 	subject := dnsNames[0]
 
-	// The primary DNS name (dnsNames[0]) is passed positionally as the subject;
-	// the remaining DNS names, the VIP and every balancer address are added
-	// with --san.
-	sanFlags := strings.Builder{}
-	for _, san := range p.cfg.LBTLSSANs() {
-		if san == "" || san == subject {
-			continue
-		}
-		if ip := net.ParseIP(san); ip == nil && !validDNSName(san) {
-			return fmt.Errorf("refusing to use unsafe certificate SAN %q", san)
-		}
-		sanFlags.WriteString(" --san ")
-		sanFlags.WriteString(san)
+	sanFlags, err := p.lbCertSANFlags()
+	if err != nil {
+		return err
 	}
 
 	logging.Info("Issuing load-balancer certificate from the internal CA...")
@@ -222,33 +309,234 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 	if caDomain == "" {
 		caDomain = "ca.internal.local"
 	}
+	caPort := caPortOrDefault(p.cfg.PKI.CAPort)
+	if err := p.issueLBCertificate(ctx, jumpIP, subject, caDomain, caPort, certHours, sanFlags); err != nil {
+		return err
+	}
+
+	certPEM, keyPEM, err := p.readIssuedLBCertificate(ctx, jumpIP)
+	if err != nil {
+		return err
+	}
+	// Wipe the CA-host copies as soon as they have been read: the key must only
+	// live on the balancers, including when the validation below rejects it.
+	// The cleanup must outlive a cancelled deploy, otherwise the private key is
+	// left behind on the jumpstart when the caller gives up mid-phase.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if _, _, _, err := p.pool.RunCommand(cleanupCtx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key"); err != nil {
+			logging.Warn("Failed to remove the load-balancer key material from %s: %v", jumpIP, err)
+		}
+	}()
+
+	// Never install a certificate the balancer cannot actually serve. step-ca
+	// only adds the subject to the SAN extension when no --san flag is given,
+	// so a SAN flag bug or a misconfigured pki.cert_dns_names would otherwise
+	// reach the balancers unnoticed: nginx accepts the certificate, and the
+	// nginx-phase probe uses -k. Checking here fails the deploy on the CA host
+	// instead of serving a certificate that does not cover the VIP.
+	rootPEM, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /root/.step/certs/root_ca.crt")
+	if err != nil {
+		return fmt.Errorf("failed to read root CA: %w", err)
+	}
+	if err := validateIssuedCertificate(certPEM, keyPEM, rootPEM, p.cfg.LBTLSSANs(), time.Now()); err != nil {
+		return fmt.Errorf("refusing to install the load-balancer certificate: %w", err)
+	}
+
+	if err := p.installLBCertificate(ctx, lbs, certPEM, keyPEM); err != nil {
+		return err
+	}
+	if err := p.installLBEnvironment(ctx, lbs, caDomain, caPort); err != nil {
+		return err
+	}
+
+	logging.Success("Load-balancer certificate issued by the internal CA and distributed.")
+	return nil
+}
+
+// lbCertSANFlags builds the --san arguments and rejects anything that is not
+// an IP or a syntactically valid DNS name, because the value is interpolated
+// into the remote command.
+//
+// The primary DNS name (dnsNames[0]) is passed positionally as the subject,
+// but `step ca certificate` only puts the subject in the CommonName: it is
+// added to the SAN extension *only* when no --san flag is given at all. With
+// any --san present the subject has to be listed explicitly, otherwise the
+// certificate has no DNS SAN and every modern TLS client (which ignores the
+// CN) rejects it for the very name the balancer is meant to serve.
+func (p *Phase) lbCertSANFlags() (string, error) {
+	sanFlags := strings.Builder{}
+	for _, san := range p.cfg.LBTLSSANs() {
+		if san == "" {
+			continue
+		}
+		if ip := net.ParseIP(san); ip == nil && !validDNSName(san) {
+			return "", fmt.Errorf("refusing to use unsafe certificate SAN %q", san)
+		}
+		sanFlags.WriteString(" --san ")
+		sanFlags.WriteString(san)
+	}
+	return sanFlags.String(), nil
+}
+
+func (p *Phase) issueLBCertificate(ctx context.Context, jumpIP, subject, caDomain string, caPort, certHours int, sanFlags string) error {
 	issueCmd := fmt.Sprintf(`export STEPPATH=/root/.step && step ca certificate "%s" /tmp/cms-lb.crt /tmp/cms-lb.key \
 --ca-url "https://%s:%d" --root /root/.step/certs/root_ca.crt \
 --provisioner admin --password-file /root/.step/password.txt \
---not-after %dh --force%s`, subject, caDomain, caPortOrDefault(p.cfg.PKI.CAPort), certHours, sanFlags.String())
+--not-after %dh --force%s`, subject, caDomain, caPort, certHours, sanFlags)
 
 	if out, errOut, code, err := p.pool.RunCommand(ctx, jumpIP, issueCmd); err != nil || code != 0 {
 		return fmt.Errorf("failed to issue load-balancer certificate (exit %d): %v %s%s",
 			code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
 	}
+	return nil
+}
 
-	// Read certificate and key in a single session, separated by a marker.
+// readIssuedLBCertificate reads the certificate and key in a single session,
+// separated by a marker, so the CA host does not need a second round trip.
+func (p *Phase) readIssuedLBCertificate(ctx context.Context, jumpIP string) (string, string, error) {
 	bundle, _, _, err := p.pool.RunCommand(ctx, jumpIP, "cat /tmp/cms-lb.crt; printf '\\n===CMSKEY===\\n'; cat /tmp/cms-lb.key")
 	if err != nil {
-		return fmt.Errorf("failed to read issued certificate: %w", err)
+		return "", "", fmt.Errorf("failed to read issued certificate: %w", err)
 	}
 	certPEM, keyPEM, ok := strings.Cut(bundle, "===CMSKEY===")
 	certPEM = strings.TrimSpace(certPEM)
 	keyPEM = strings.TrimSpace(keyPEM)
 	if !ok || certPEM == "" || keyPEM == "" {
-		return fmt.Errorf("issued certificate or key is empty")
+		return "", "", fmt.Errorf("issued certificate or key is empty")
+	}
+	return certPEM, keyPEM, nil
+}
+
+// certClockSkew tolerates a CA host whose clock is slightly ahead of the
+// orchestrator when verifying the chain. Expiry is still checked against the
+// real time: the verify phase re-checks the installed certificate.
+const certClockSkew = 5 * time.Minute
+
+// validateIssuedCertificate refuses a certificate that is not a usable server
+// certificate for every SAN the balancers are meant to serve.
+//
+// The certificate is issued on the CA host and installed on the balancers, so
+// this is the last place where a SAN mistake is visible: nginx only checks that
+// the key matches, not that the certificate covers the name clients use, and
+// the nginx-phase probe connects with -k while the bootstrap certificate is
+// still in place.
+//
+// The certificate file contains the leaf followed by the intermediate CA, as
+// written by `step ca certificate`; rootPEM is the CA host's root certificate.
+// Verifying the chain here also rejects a certificate signed by a different CA
+// whose subject happens to match the configured name.
+func validateIssuedCertificate(certPEM, keyPEM, rootPEM string, sans []string, now time.Time) error {
+	chain, err := parseCertificateChain(certPEM)
+	if err != nil {
+		return err
+	}
+	cert := chain[0]
+	if cert.IsCA {
+		return fmt.Errorf("issued certificate is a CA certificate, not a server certificate")
+	}
+	if err := certificateMatchesKey(cert, keyPEM); err != nil {
+		return err
 	}
 
-	// Wipe the CA-host copies: the key now only lives on the balancers.
-	defer func() {
-		_, _, _, _ = p.pool.RunCommand(ctx, jumpIP, "rm -f /tmp/cms-lb.crt /tmp/cms-lb.key")
-	}()
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM([]byte(rootPEM)) {
+		return fmt.Errorf("internal root CA is not a valid PEM certificate")
+	}
+	intermediates := x509.NewCertPool()
+	for _, intermediate := range chain[1:] {
+		intermediates.AddCert(intermediate)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		CurrentTime:   now.Add(certClockSkew),
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return fmt.Errorf("issued certificate does not chain to the internal CA: %w", err)
+	}
 
+	for _, san := range sans {
+		if san == "" {
+			continue
+		}
+		// VerifyHostname ignores the CommonName and matches only SANs, which is
+		// exactly the modern TLS client behaviour this check must mirror.
+		if err := cert.VerifyHostname(san); err != nil {
+			return fmt.Errorf("issued certificate does not cover %q: %w", san, err)
+		}
+	}
+	return nil
+}
+
+// parseCertificateChain decodes every CERTIFICATE block in a PEM bundle. The
+// first certificate is the leaf; the rest are its intermediates.
+func parseCertificateChain(certPEM string) ([]*x509.Certificate, error) {
+	var chain []*x509.Certificate
+	rest := []byte(certPEM)
+	for {
+		block, remaining := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = remaining
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse issued certificate: %w", err)
+		}
+		chain = append(chain, cert)
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("issued certificate is not PEM encoded")
+	}
+	return chain, nil
+}
+
+// certificateMatchesKey reports whether keyPEM is the private key for cert, so
+// a mismatched pair never reaches a balancer.
+func certificateMatchesKey(cert *x509.Certificate, keyPEM string) error {
+	block, _ := pem.Decode([]byte(keyPEM))
+	if block == nil {
+		return fmt.Errorf("issued key is not PEM encoded")
+	}
+	var key any
+	var err error
+	switch block.Type {
+	case "PRIVATE KEY":
+		key, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "EC PRIVATE KEY":
+		key, err = x509.ParseECPrivateKey(block.Bytes)
+	default:
+		return fmt.Errorf("unsupported issued key type %q", block.Type)
+	}
+	if err != nil {
+		return fmt.Errorf("parse issued key: %w", err)
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return fmt.Errorf("issued key %T cannot sign", key)
+	}
+	certPub, err := x509.MarshalPKIXPublicKey(cert.PublicKey)
+	if err != nil {
+		return fmt.Errorf("marshal certificate public key: %w", err)
+	}
+	keyPub, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return fmt.Errorf("marshal private key public part: %w", err)
+	}
+	if !bytes.Equal(certPub, keyPub) {
+		return fmt.Errorf("issued certificate does not match its private key")
+	}
+	return nil
+}
+
+func (p *Phase) installLBCertificate(ctx context.Context, lbs []config.NodeDetail, certPEM, keyPEM string) error {
 	for _, lb := range lbs {
 		if lb.IP == "" {
 			continue
@@ -265,9 +553,53 @@ func (p *Phase) issueLoadBalancerCertificates(ctx context.Context) error {
 				lb.Name, code, err, strings.TrimSpace(out), strings.TrimSpace(errOut))
 		}
 	}
-
-	logging.Success("Load-balancer certificate issued by the internal CA and distributed.")
 	return nil
+}
+
+// installLBEnvironment writes the CA endpoint the PKI phase actually
+// provisioned next to the certificate. cms-tls-renew.sh sources this file, so a
+// non-default pki.domain/ca_port/ca_name reaches the renewal timer without
+// duplicating the configuration in Puppet.
+func (p *Phase) installLBEnvironment(ctx context.Context, lbs []config.NodeDetail, caDomain string, caPort int) error {
+	env := fmt.Sprintf("CMS_CA_URL=%s\nCMS_ROOT_CA=%s\nCMS_CA_NAME=%s\n",
+		shell.Quote(fmt.Sprintf("https://%s:%d", caDomain, caPort)),
+		shell.Quote("/usr/local/share/ca-certificates/cms_root_ca.crt"),
+		shell.Quote(p.cfg.PKICommonName()))
+	for _, lb := range lbs {
+		if lb.IP == "" {
+			continue
+		}
+		if err := p.pool.CopyContent(ctx, lb.IP, []byte(env), "/etc/cms-ha/pki.env", 0644); err != nil {
+			return fmt.Errorf("failed to write PKI environment on %s: %w", lb.Name, err)
+		}
+	}
+	return nil
+}
+
+// stepReleaseURLs returns the candidate download URLs for a step release. Both
+// known Debian asset shapes are returned for a pinned version; when the version
+// is empty the version-independent alias is used instead. ${ARCH} is expanded by
+// the remote shell, not here.
+func stepReleaseURLs(repo, asset, version string) []string {
+	v := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	base := fmt.Sprintf("https://github.com/smallstep/%s/releases", repo)
+	if v == "" {
+		return []string{fmt.Sprintf("%s/latest/download/%s_${ARCH}.deb", base, asset)}
+	}
+	return []string{
+		fmt.Sprintf("%s/download/v%s/%s_%s-1_${ARCH}.deb", base, v, asset, v),
+		fmt.Sprintf("%s/download/v%s/%s_%s_${ARCH}.deb", base, v, asset, v),
+	}
+}
+
+// quoteURLs renders candidate URLs for the remote shell, double-quoted so the
+// shell still expands ${ARCH} inside them.
+func quoteURLs(urls []string) string {
+	quoted := make([]string, 0, len(urls))
+	for _, u := range urls {
+		quoted = append(quoted, `"`+u+`"`)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // caPortOrDefault returns the CA port, applying the same 8443 default used

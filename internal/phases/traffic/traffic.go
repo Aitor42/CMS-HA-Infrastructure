@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,20 +15,51 @@ import (
 	cms "github.com/Aitor42/CMS-HA-Infrastructure"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/container"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/dashboards"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
 const (
 	// k6ScriptPath is the embedded k6 profile executed against the CMS.
 	k6ScriptPath = "templates/traffic/cms-smoke.js"
-	// hostCACertPath is the lab root CA installed by the PKI phase on the
-	// hypervisor. When present it is mounted into the k6 container so TLS is
+	// hostCACertPath is the lab root CA installed system-wide by the PKI
+	// phase. When present it is mounted into the k6 container so TLS is
 	// verified instead of skipped.
 	hostCACertPath = "/usr/local/share/ca-certificates/cms_root_ca.crt"
+	// hostCACertCopy is the copy the PKI phase leaves under the deploy
+	// account's HOME, which is readable without root.
+	hostCACertCopy = ".cms-ha/cms_root_ca.crt"
 	// containerCACert is the mount point of the root CA inside the container.
 	containerCACert = "/certs/cms_root_ca.crt"
 )
+
+// findHostCACert returns the first existing copy of the lab root CA, or "" when
+// the PKI phase has not run on this host.
+func findHostCACert() string {
+	return firstExistingFile(hostCACertCandidates())
+}
+
+// hostCACertCandidates lists the places the PKI phase may have left the root
+// CA, most privileged first.
+func hostCACertCandidates() []string {
+	candidates := []string{hostCACertPath}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, hostCACertCopy))
+	}
+	return candidates
+}
+
+// firstExistingFile returns the first path that exists, or "".
+func firstExistingFile(paths []string) string {
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return ""
+}
 
 // Options configuration for the traffic test.
 type Options struct {
@@ -66,7 +98,10 @@ func (t *Traffic) Run(ctx context.Context) error {
 	timer := logging.PhaseStart("Traffic Test Phase (k6)")
 	defer timer.End()
 
-	baseURL := resolveBaseURL(t.cfg, t.opts)
+	baseURL, err := resolveBaseURL(t.cfg, t.opts)
+	if err != nil {
+		return err
+	}
 	logging.Info("Target URL: %s", baseURL)
 
 	script, err := cms.TemplatesFS.ReadFile(k6ScriptPath)
@@ -77,6 +112,16 @@ func (t *Traffic) Run(ctx context.Context) error {
 		return err
 	}
 
+	// The dashboards are part of the deliverable: an operator opens Grafana to
+	// read the test that was just run. Every panel query is evaluated against
+	// Prometheus now that the k6 series exist, so a query naming a series k6
+	// never exports fails here instead of showing "No data" in the browser.
+	if t.cfg.Traffic.PrometheusRWURL != "" {
+		if err := t.checkDashboardData(ctx); err != nil {
+			return err
+		}
+	}
+
 	if t.opts.WithDB {
 		if err := t.runDBCheck(ctx); err != nil {
 			return err
@@ -85,25 +130,43 @@ func (t *Traffic) Run(ctx context.Context) error {
 	return nil
 }
 
+// checkDashboardData asserts that every panel of the shipped Grafana dashboards
+// resolves to at least one series in the Prometheus the load test streamed to.
+func (t *Traffic) checkDashboardData(ctx context.Context) error {
+	base := dashboards.PrometheusBaseURL(t.cfg.Traffic.PrometheusRWURL)
+	logging.Info("Checking the Grafana dashboards against Prometheus (%s)...", base)
+
+	report, err := dashboards.CheckPrometheus(ctx, base)
+	if err != nil {
+		return fmt.Errorf("dashboard data check failed: %w", err)
+	}
+	if !report.OK() {
+		return fmt.Errorf("dashboard data check failed: %s", report.Error())
+	}
+	logging.Success("Grafana dashboards: %d/%d panel queries return data", report.Queries, report.Queries)
+	return nil
+}
+
 // resolveBaseURL derives the entry point to exercise from the options and the
-// configured topology.
-func resolveBaseURL(cfg *config.Config, opts Options) string {
+// configured topology. It returns an error instead of synthesising an address
+// from a /24 assumption when the configuration does not identify one.
+func resolveBaseURL(cfg *config.Config, opts Options) (string, error) {
 	if opts.TargetIP != "" {
 		if strings.HasPrefix(opts.TargetIP, "http://") || strings.HasPrefix(opts.TargetIP, "https://") {
-			return opts.TargetIP
+			return opts.TargetIP, nil
 		}
-		return "https://" + opts.TargetIP
+		return "https://" + opts.TargetIP, nil
 	}
 	if opts.Mode == "internal" {
 		if len(cfg.Nodes.CMSFrontends) > 0 && cfg.Nodes.CMSFrontends[0].IP != "" {
-			return "http://" + cfg.Nodes.CMSFrontends[0].IP
+			return "http://" + cfg.Nodes.CMSFrontends[0].IP, nil
 		}
-		return "http://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.10.") + "101"
+		return "", fmt.Errorf("traffic mode \"internal\" requires nodes.cms_frontends[0].ip")
 	}
-	if cfg.LBVIP() != "" {
-		return "https://" + cfg.LBVIP()
+	if v := cfg.LBVIP(); v != "" {
+		return "https://" + v, nil
 	}
-	return "https://" + config.PrefixFromCIDR(cfg.Network.Main.CIDR, "192.168.20.") + "100"
+	return "", fmt.Errorf("traffic mode %q requires network.main.vip (the keepalived floating address)", opts.Mode)
 }
 
 // k6Run groups the parameters that shape the container invocation.
@@ -134,14 +197,24 @@ func buildArgs(image string, r k6Run) []string {
 		)
 	}
 	if r.rwURL != "" {
-		args = append(args, "-e", "K6_PROMETHEUS_RW_SERVER_URL="+r.rwURL)
+		args = append(args,
+			"-e", "K6_PROMETHEUS_RW_SERVER_URL="+r.rwURL,
+			// Remote write has no histogram support by default: k6 exports a
+			// gauge per requested trend statistic and defaults to p(99) only.
+			// The HA dashboard plots the three percentiles the reliability
+			// report quotes (p50/p95/p99), so ask for all of them instead of
+			// letting the median panel stay empty.
+			"-e", "K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99)",
+		)
 	}
 
 	args = append(args, image, "run")
 	if r.caCert == "" {
 		// No CA to mount: fall back to skipping TLS verification; the
 		// `cms-ha verify` command still asserts the certificate chain.
-		args = append(args, "--insecure")
+		// The flag is `--insecure-skip-tls-verify`: bare `--insecure` was
+		// removed from k6 long ago and only produced "unknown flag".
+		args = append(args, "--insecure-skip-tls-verify")
 	}
 	args = append(args, "--vus", strconv.Itoa(r.vus), "--duration", fmt.Sprintf("%ds", r.duration))
 	if r.rwURL != "" {
@@ -164,11 +237,9 @@ func (t *Traffic) runK6(ctx context.Context, baseURL string, script []byte) erro
 		image = t.cfg.K6Image()
 	}
 
-	caCert := ""
-	if _, statErr := os.Stat(hostCACertPath); statErr == nil {
-		caCert = hostCACertPath
-	} else if t.opts.Verbose {
-		logging.Warn("Root CA %s not found; k6 will skip TLS verification", hostCACertPath)
+	caCert := findHostCACert()
+	if caCert == "" && t.opts.Verbose {
+		logging.Warn("No copy of the lab root CA found; k6 will skip TLS verification")
 	}
 
 	args := buildArgs(image, k6Run{
@@ -202,12 +273,15 @@ func (t *Traffic) runK6(ctx context.Context, baseURL string, script []byte) erro
 // driver is embedded in the binary.
 func (t *Traffic) runDBCheck(ctx context.Context) error {
 	logging.Info("Direct MariaDB SQL check")
-	dbHost := config.PrefixFromCIDR(t.cfg.Network.Internal.CIDR, "192.168.10.") + "10"
-	masterHost := dbHost
-	if len(t.cfg.Nodes.Masters) > 0 && t.cfg.Nodes.Masters[0].IP != "" {
-		dbHost = t.cfg.Nodes.Masters[0].IP
-		masterHost = t.cfg.Nodes.Masters[0].IP
+	// The NodePort lives on the control-plane nodes. Dialling the jumpstart
+	// address when no master is configured would test the wrong host and report
+	// a misleading "database unreachable" error.
+	master, ok := t.cfg.FirstMaster()
+	if !ok {
+		return fmt.Errorf("DB direct check requires a master node with an address")
 	}
+	dbHost := master.IP
+	masterHost := master.IP
 	dbPort := t.cfg.Database.Port
 	if dbPort == 0 {
 		dbPort = 30306
@@ -242,7 +316,7 @@ func (t *Traffic) runDBCheck(ctx context.Context) error {
 	return nil
 }
 
-func newTrafficSSHPool(cfg *config.Config) (*ssh.Pool, error) {
+func newTrafficSSHPool(cfg *config.Config) (ssh.Executor, error) {
 	timeout := cfg.SSH.ConnectTimeout
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -267,15 +341,15 @@ func dialTCP(ctx context.Context, host string, port int, timeout time.Duration) 
 // testDBQueries runs a query against the MariaDB pod using the `mysql` client
 // that ships inside the pod image (reached through kubectl on a control-plane
 // node). A non-empty result proves WordPress data is loaded.
-func testDBQueries(ctx context.Context, pool *ssh.Pool, master, user, password, dbName string) error {
+func testDBQueries(ctx context.Context, pool ssh.Executor, master, user, password, dbName string) error {
 	const query = "SELECT option_value FROM wp_options LIMIT 5"
 	// Resolve the pod by label so the check does not hard-code the StatefulSet
 	// ordinal, then run the client inside it (the only place a mysql client is
 	// guaranteed to exist). MYSQL_PWD avoids the password landing in argv.
 	script := fmt.Sprintf(
-		"POD=$(kubectl get pod -n cms -l app=mariadb -o jsonpath='{.items[0].metadata.name}') && "+
+		"POD=$(kubectl get pod -n cms -l app=mariadb,role=database -o jsonpath='{.items[0].metadata.name}') && "+
 			"kubectl exec -n cms \"$POD\" -- env MYSQL_PWD=%s mysql -h 127.0.0.1 -P 3306 -u %s %s -N -B -e %s",
-		shellQuote(password), shellQuote(user), shellQuote(dbName), shellQuote(query))
+		shell.Quote(password), shell.Quote(user), shell.Quote(dbName), shell.Quote(query))
 
 	stdout, stderr, exitCode, err := pool.RunCommand(ctx, master, script)
 	if err != nil || exitCode != 0 {
@@ -285,9 +359,4 @@ func testDBQueries(ctx context.Context, pool *ssh.Pool, master, user, password, 
 		return fmt.Errorf("test query returned no data: wp_options is empty or the database is not loaded")
 	}
 	return nil
-}
-
-// shellQuote single-quotes s for a POSIX shell, escaping embedded quotes.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

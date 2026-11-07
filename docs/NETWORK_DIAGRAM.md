@@ -6,7 +6,7 @@ This document contains the technical architecture diagrams for the CMS high-avai
 
 ## 1. Complete Network Topology
 
-Physical and logical network segmentation: the two subnets, the router between them, every node with its address, and the jumpstart's second interface. The service flows between nodes are kept out of this diagram (they crossed each other) and are shown separately in [section 2](#2-service-architecture).
+Virtual subnet segmentation on one hypervisor (not redundant physical uplinks): the two subnets, the router between them, every node with its address, and the jumpstart's second interface. The service flows between nodes are kept out of this diagram (they crossed each other) and are shown separately in [section 2](#2-service-architecture).
 
 ```mermaid
 graph TB
@@ -66,7 +66,7 @@ graph TB
 
 | Symbol | Meaning |
 |:-------|:--------|
-| Solid line (`→` / `—`) | Subnet attachment / physical link |
+| Solid line (`→` / `—`) | Logical subnet attachment or traffic path, not proof of a redundant physical link |
 | Dotted line (`-.->`) | Secondary (dual-homed) interface |
 | Subnet label | `internal` / `main` — the network names used by `config.yaml` (`virbr-int` / `virbr-main`) |
 | `🔒` | Router / firewall |
@@ -80,6 +80,11 @@ graph TB
 | `💻` | Hot-desk workstation |
 
 The `~~~` (invisible) links inside the cluster, load-balancer and frontend groups only keep each group laid out on one row; they carry no meaning.
+
+Both libvirt bridges enable STP (`stp='on'`). The repository does not configure
+LACP, RSTP, bonded uplinks or an alternate physical cable path. The hypervisor,
+router and NFS storage VM remain shared availability dependencies; service/node
+failover must not be presented as physical-network redundancy.
 
 ---
 
@@ -108,7 +113,7 @@ graph LR
 
     subgraph DATA_LAYER["🗄 Data layer — internal"]
         MARIA["MariaDB 10.11 · K3s StatefulSet<br/>NodePort 30306 → .11 / .12"]
-        DRBD["DRBD 9 · Protocol C<br/>tcp/7788 · master1 ⇄ master2"]
+        DRBD["DRBD · Protocol C<br/>tcp/7788 · master1 ⇄ master2"]
     end
 
     subgraph STORAGE_LAYER["💾 NFS uploads — internal"]
@@ -127,9 +132,9 @@ graph LR
     ROUTER -->|"DNAT"| VIP
     VIP -->|"VRRP"| NGINX
     NGINX -->|"upstream :80"| APACHE
-    APACHE -->|"tcp/3306"| MARIA
+    APACHE -->|"tcp/30306 NodePort"| MARIA
     MARIA ---|"block device"| DRBD
-    APACHE -.->|"mount"| STORE
+    APACHE -.->|"hard NFSv4 · tcp/2049"| STORE
     PROM -.->|"scrape"| APACHE
     JS -.->|"PXE + Puppet"| APACHE
 ```
@@ -141,7 +146,7 @@ graph LR
 3. **Nginx** distributes the request between `main-cms1` and `main-cms2` using round-robin.
 4. The **Apache + WordPress** frontend processes the PHP request and queries **MariaDB** through the K3s **NodePort `30306`** on `internal-master1`/`internal-master2` (the frontend tries `.11` first and falls back to `.12`).
 5. **DRBD** maintains synchronous replication of MariaDB data between `internal-master1` and `internal-master2`.
-6. WordPress uploads live on the shared **NFS export** `internal-storage:/srv/nfs/wp-uploads`, mounted by both frontends, so either one can serve any request.
+6. WordPress uploads live on the shared **NFS export** `internal-storage:/srv/nfs/wp-uploads`, mounted by both frontends with `_netdev,auto,rw,hard,timeo=600,retrans=2,nfsvers=4`. The export and storage UFW `2049/tcp` rules allow only configured frontend IPs, not the whole Main subnet. Apache startup requires the expected writable hard export; the unmounted local directory is not writable by `www-data`. This avoids local upload divergence, but a storage outage can block hard-mount I/O on both frontends.
 
 ### Monitoring Flow
 
@@ -167,10 +172,11 @@ graph TD
         STEP00B["Step 00b · Batch PXE install all client VMs<br/>cms-ha vm install-batches"]
         WAIT_NODES["⏳ Wait for all VMs SSH"]
         STEP018["Step 01.8 · Repair SSH keys + Puppet CA<br/>cms-ha phase repair-ssh"]
+        STEP018B["Step 01.9 · Router gateway (addresses, forwarding, NAT)<br/>cms-ha phase bootstrap-router"]
     end
 
     subgraph CONFIG_MGMT["⚙ Configuration Management"]
-        STEP02["Step 02 · Puppet Server + Agent convergence<br/>cms-ha phase setup-puppet<br/>(includes hot-desk provisioning)"]
+        STEP02["Step 02 · Puppet Server + Agent convergence<br/>cms-ha phase setup-puppet<br/>(converges every node, including hot-desks)"]
     end
 
     subgraph HA_INFRA["🔧 HA Infrastructure"]
@@ -199,7 +205,8 @@ graph TD
     STEP015 --> STEP00B
     STEP00B --> WAIT_NODES
     WAIT_NODES --> STEP018
-    STEP018 --> STEP02
+    STEP018 --> STEP018B
+    STEP018B --> STEP02
     STEP02 --> STEP03
     STEP03 --> STEP035
     STEP035 --> STEP04
@@ -213,8 +220,9 @@ graph TD
 
 ### Deployment Sequence Notes
 
-- `cms-ha deploy` runs this whole sequence in one shot; the individual `cms-ha phase …` commands shown above are the equivalent for re-running a single phase.
+- `cms-ha deploy` runs this whole sequence in one shot; the individual `cms-ha phase …` commands shown above are the equivalent for re-running a single phase. Checkpoint keys distinguish repeated phases (`00-init-vms` for jumpstart, `00-init-vms-2` for clients). Resume requires the original executable, host and deployment inputs; `--from-phase` records skipped prerequisites as assumptions, not verified completions. See [MANUAL checkpoint migration](MANUAL.md#step-3-service-and-application-deployment).
 - The initial deployment requires launching the **Jumpstart node (Phase 00a)** first, as it serves as the provisioning server for all other clients.
 - **Phase 00b** is performed **sequentially in batches** (`cms-ha vm install-batches`) to prevent the host's physical memory (27 GB) from being exhausted by the OS installers' initial requirements.
-- The `cms-ha deploy --skip-vm-create` command orchestrates all phases from **Phase 01.8** onwards, once all client VMs are installed and running with optimised RAM.
+- `cms-ha deploy --skip-vm-create` drops the two VM-creation steps and starts with Cobbler; the remaining phases are idempotent and run on the already-installed VMs.
+- **Phase 01.9** comes before Puppet on purpose: every later phase installs packages from the internet, and the nodes only get there once the router owns its gateway addresses, has `net.ipv4.ip_forward=1` and MASQUERADEs both lab networks out of the WAN uplink.
 - Configuration phases (Puppet, DRBD, K3s, Nginx, UFW, Monitoring, and Internal CA) are **strictly sequential** due to mutual service dependencies.

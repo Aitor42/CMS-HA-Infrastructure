@@ -4,8 +4,8 @@
 
 - [x] List complete IP address inventory.
 - [x] Create operations and disaster recovery manual.
-- [x] Document final software and firmware baseline (versions + URLs).
-- [x] Prepare repository tagging for final delivery.
+- [x] Document implemented software pins/floors, unpinned dependencies and source URLs (not a measured runtime inventory).
+- [x] Implement prepublication CI/PXE gates for tagged delivery (a successful live run must be recorded separately).
 
 ---
 
@@ -29,6 +29,10 @@ Documented in [`docs/MANUAL.md`](../MANUAL.md), which covers:
 7. Failover and Disaster Recovery
 8. Lab Resume Procedure
 
+The manual also contains standalone migration notes for legacy checkpoints,
+restricted/pinned fencing keys, allowlisted hard NFS mounts, and bounded PHP /
+prefork settings; these do not require separate unfinished reports.
+
 ### Software Baseline
 
 Documented in [`docs/SOFTWARE_BASELINE.md`](../SOFTWARE_BASELINE.md), which records:
@@ -42,14 +46,21 @@ Documented in [`docs/NETWORK_DIAGRAM.md`](../NETWORK_DIAGRAM.md):
 - E2E service architecture and traffic flow diagram (Mermaid)
 - Automated deployment sequence chart (Mermaid)
 
-### Repository Tagging
+### Repository Tagging and Publication Gates
 
-```bash
-# Tag the final release:
-git add -A
-git commit -m "docs: final documentation and software baseline"
-git tag -a v2.1 -m "Final Release - Fake Enterprise CMS Infrastructure"
-```
+A pushed `v*` tag triggers `release.yml`. It calls reusable CI for that exact
+SHA, then the full hosted ISO/PXE integration workflow with chaos enabled and
+teardown required. Only after both succeed may the build/sign/publish job run;
+there is no post-publication PXE acceptance shortcut. CI Summary treats skipped
+and cancelled dependencies as unsuccessful.
+
+Hosted diagnostics and artifact uploads run after failures as well, before
+teardown, with 30-day retention. Check job conclusions and scenario verdicts,
+not just whether files exist. `--require-all` rejects `SKIP`; a JSON report marked
+`complete` can still contain failures. Neither whole-scenario timings nor the
+ephemeral database restore duration proves end-to-end CMS RTO. These are workflow
+contracts, not a claim that this revision has passed a runtime release gate.
+See [MANUAL integration guidance](../MANUAL.md#37-end-to-end-integration-test).
 
 ### Final Repository Structure
 
@@ -66,6 +77,7 @@ CMS-HA-Infrastructure/
 │   ├── PLAN.md                  # Comprehensive planning and inventory
 │   ├── MANUAL.md                # Operations and administration manual
 │   ├── SECURITY.md              # Access hardening and TOFU host-key model
+│   ├── LEGACY-V1-MAPPING.md     # v1 shell scripts → v2 commands
 │   ├── SOFTWARE_BASELINE.md     # Software version control baseline
 │   ├── NETWORK_DIAGRAM.md       # Architectural diagrams (Mermaid)
 │   └── phases/PHASE-00..11.md   # Project milestone documentation
@@ -82,6 +94,5 @@ CMS-HA-Infrastructure/
 │   ├── backups/                 # Backup and restore-drill CronJobs
 │   ├── monitoring/              # Prometheus RBAC for the cluster
 │   └── overlays/lab/            # Lab overlay (node affinity / labels patch)
-├── templates/                   # PXE, monitoring, DRBD, nginx and libvirt templates
-└── scripts/                     # Legacy Bash toolchain (v1, kept for reference)
+└── templates/                   # PXE, monitoring, DRBD, nginx and libvirt templates
 ```

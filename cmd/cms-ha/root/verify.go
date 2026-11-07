@@ -1,7 +1,7 @@
 package root
 
 import (
-	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/verify"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,7 @@ var verifyCmd = &cobra.Command{
 
 		lv := newLibvirtClient(cfg)
 
-		v := utils.NewVerifier(cfg, pool, lv)
+		v := verify.NewVerifier(cfg, pool, lv)
 		return v.VerifyAll(cmd.Context())
 	},
 }

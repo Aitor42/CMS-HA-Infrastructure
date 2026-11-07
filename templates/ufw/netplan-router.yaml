@@ -1,20 +1,45 @@
+# Netplan overlay for the perimeter router (ufw-router).
+#
+# Rendered by the Router Bootstrap phase and installed as
+# /etc/netplan/99-cms-router.yaml. It is the *only* netplan file left in
+# /etc/netplan. netplan emits one systemd-networkd unit per definition and
+# networkd picks the lexicographically first unit that matches a link, so the
+# installer's `all-en` definition (`Match Name=en*`, which sorts before these
+# per-MAC units) shadows them: a second definition for the same NIC is silently
+# ignored. That is how the router ended up with a dynamic 192.168.20.50 on the
+# main network and no gateway address at all.
+#
+# Why the router needs its own file: the shared client autoinstall brings every
+# interface up with DHCP, which on a three-NIC router means three DHCP leases
+# and three competing default routes — one of them pointing at the router
+# itself. The router is the gateway, so its addressing and default route must
+# be deterministic:
+#   * internal and main carry the static gateway addresses of their networks
+#     (the client subnets point their DHCP `option routers` at exactly these);
+#   * the WAN uplink keeps DHCP but wins the default route by metric, so
+#     forwarding to the internet is unambiguous, and it provides the router's
+#     DNS as well.
 network:
   version: 2
+  renderer: networkd
   ethernets:
     ${INT_NAME}:
       match:
-        macaddress: "52:54:00:10:01:02"
-      set-name: ${INT_NAME}
+        macaddress: "${INT_MAC}"
+      dhcp4: false
       addresses:
-        - 192.168.10.1/24
+        - ${INT_ADDR}
     ${MAIN_NAME}:
       match:
-        macaddress: "52:54:00:10:02:02"
-      set-name: ${MAIN_NAME}
+        macaddress: "${MAIN_MAC}"
+      dhcp4: false
       addresses:
-        - 192.168.20.1/24
+        - ${MAIN_ADDR}
     ${WAN_NAME}:
       match:
-        macaddress: "52:54:00:10:00:02"
-      set-name: ${WAN_NAME}
+        macaddress: "${WAN_MAC}"
       dhcp4: true
+      dhcp4-overrides:
+        route-metric: 50
+        use-dns: true
+      optional: true

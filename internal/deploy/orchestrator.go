@@ -25,6 +25,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/puppet"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/registernodes"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/repairssh"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/routerbootstrap"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/ufw"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
@@ -46,16 +47,61 @@ type DeployOpts struct {
 	Resume bool
 	// StateFile is the checkpoint path (defaults to DefaultStateFile).
 	StateFile string
+	// TimingsFile, when set, is where the per-phase timing report is written.
+	TimingsFile string
+	// ConfigFile is the configuration path recorded in the timing report.
+	ConfigFile string
+	// RunID identifies this invocation in logs, timings.json and the checkpoint.
+	// Empty means generate one from the current UTC time.
+	RunID string
+	// FastProvisioning uses the cloud image for the jumpstart and every client
+	// node. It is the opt-in fast path; PXE/Cobbler remains the default.
+	FastProvisioning bool
 }
 
 // Deploy runs the entire deployment pipeline.
-func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
-	timer := logging.PhaseStart("Full Infrastructure Deployment")
+func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) (retErr error) {
+	runID := opts.RunID
+	if runID == "" {
+		runID = newRunID()
+	}
+	logging.SetRunID(runID)
+	logging.Info("Deployment run ID: %s", runID)
+
+	timer := logging.PhaseStart(topLevelTimer)
 	defer timer.End()
+
+	var timings *timingsRecorder
+	if opts.TimingsFile != "" {
+		timings = newTimingsRecorder(opts.TimingsFile, opts.ConfigFile, runID, o.SSH)
+		defer func() {
+			status := "completed"
+			if retErr != nil {
+				status = "failed"
+			}
+			if err := timings.write(status); err != nil {
+				logging.Warn("could not write timings file %s: %v", opts.TimingsFile, err)
+			} else {
+				logging.Info("Timings written to %s", opts.TimingsFile)
+			}
+		}()
+	}
 
 	statePath := opts.StateFile
 	if statePath == "" {
 		statePath = DefaultStateFile
+	}
+
+	if !opts.DryRun {
+		lock, err := acquireStateLock(statePath)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := lock.Close(); err != nil {
+				logging.Warn("could not release state lock: %v", err)
+			}
+		}()
 	}
 
 	var state *State
@@ -64,15 +110,18 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		if state, err = LoadState(statePath); err != nil {
 			return err
 		}
-	}
-
-	if !opts.DryRun {
-		if err := o.preflightChecks(ctx); err != nil {
-			return fmt.Errorf("preflight checks failed: %w", err)
+		identity, err := deploymentIdentity(o.Cfg, opts)
+		if err != nil {
+			return err
 		}
+		if err := state.bindIdentity(identity, opts); err != nil {
+			return err
+		}
+		state.RunID = runID
 	}
 
 	phaseList := o.BuildPhaseList(opts)
+	keys := PhaseKeys(phaseList)
 	total := len(phaseList)
 
 	skip, reset, err := planRun(phaseList, opts, state)
@@ -80,8 +129,17 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		return err
 	}
 	if !opts.DryRun && state != nil {
+		if err := o.preflightChecks(ctx); err != nil {
+			return fmt.Errorf("preflight checks failed: %w", err)
+		}
 		if reset {
 			state.CompletedPhases = nil
+			state.AssumedPhases = nil
+			for _, key := range keys {
+				if skip[key] {
+					state.AssumedPhases = append(state.AssumedPhases, key)
+				}
+			}
 			state.Status = "running"
 			state.LastError = ""
 			state.StartedAt = time.Now().UTC()
@@ -95,42 +153,54 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		logging.Info("[%d/%d] Phase: %s — %s", i+1, total, phase.Name(), phase.Description())
 
 		if opts.DryRun {
+			timings.phase(phase.Name(), "dry-run", time.Time{}, 0, nil)
 			logging.Info("[DRY-RUN] Skipping execution of: %s", phase.Name())
 			continue
 		}
 
-		key := phaseKey(phase.Name())
+		key := keys[i]
 		if skip[key] {
-			logging.Info("Phase %s already completed (checkpoint); skipping.", phase.Name())
+			timings.phase(phase.Name(), "skipped", time.Time{}, 0, nil)
+			logging.Info("Phase %s recorded as completed or explicitly assumed (checkpoint); skipping.", key)
 			continue
 		}
 
-		if err := phase.Run(ctx); err != nil {
+		phaseStart := time.Now()
+		timings.setCurrent(phase.Name())
+		runErr := phase.Run(ctx)
+		timings.clearCurrent()
+
+		if runErr != nil {
+			timings.phase(phase.Name(), "failed", phaseStart, time.Since(phaseStart), runErr)
 			if state != nil {
 				state.Status = "failed"
-				state.LastError = err.Error()
+				state.LastError = runErr.Error()
 				if serr := state.Save(statePath); serr != nil {
 					logging.Warn("could not persist checkpoint %s: %v", statePath, serr)
 				} else {
 					logging.Warn("Checkpoint saved to %s; resume with `cms-ha deploy --resume`.", statePath)
 				}
 			}
-			return fmt.Errorf("phase %q failed: %w", phase.Name(), err)
+			return fmt.Errorf("phase %q failed: %w", phase.Name(), runErr)
 		}
+		timings.phase(phase.Name(), "ok", phaseStart, time.Since(phaseStart), nil)
 
 		if state != nil {
 			if err := state.MarkCompleted(statePath, key); err != nil {
-				logging.Warn("could not update checkpoint %s: %v", statePath, err)
+				return fmt.Errorf("phase %q completed but checkpoint could not be saved: %w", phase.Name(), err)
 			}
 		}
 
 		if o.Cfg.Deploy.StaggerDelay > 0 && i < total-1 {
+			staggerStart := time.Now()
 			logging.Info("Waiting %v before next phase...", o.Cfg.Deploy.StaggerDelay)
 			select {
 			case <-ctx.Done():
+				timings.step("stagger", staggerStart, time.Since(staggerStart))
 				return ctx.Err()
 			case <-time.After(o.Cfg.Deploy.StaggerDelay):
 			}
+			timings.step("stagger", staggerStart, time.Since(staggerStart))
 		}
 	}
 
@@ -138,7 +208,7 @@ func (o *Orchestrator) Deploy(ctx context.Context, opts DeployOpts) error {
 		state.Status = "completed"
 		state.LastError = ""
 		if err := state.Save(statePath); err != nil {
-			logging.Warn("could not persist checkpoint %s: %v", statePath, err)
+			return fmt.Errorf("deployment finished but final checkpoint could not be saved: %w", err)
 		}
 	}
 
@@ -151,17 +221,28 @@ func (o *Orchestrator) BuildPhaseList(opts DeployOpts) []phases.Phase {
 	var list []phases.Phase
 
 	if !opts.SkipVMCreate {
-		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{JumpstartOnly: true}))
+		jumpstartOpts := initvms.Options{JumpstartOnly: true}
+		if opts.FastProvisioning {
+			jumpstartOpts.JumpstartImage = "cloud"
+		}
+		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, jumpstartOpts))
 	}
 	list = append(list,
 		cobbler.NewPhase(o.Cfg, o.SSH),
 		registernodes.NewPhase(o.Cfg, o.SSH),
 	)
 	if !opts.SkipVMCreate {
-		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{NodesOnly: true}))
+		list = append(list, initvms.NewPhaseWithOpts(o.Cfg, o.SSH, o.Libvirt, initvms.Options{
+			NodesOnly:        true,
+			FastProvisioning: opts.FastProvisioning,
+		}))
 	}
 	list = append(list,
 		repairssh.NewPhase(o.Cfg, o.SSH),
+		// The router has to be routing and NATing before the Puppet phase
+		// downloads anything on the client nodes; see the phase's package
+		// documentation.
+		routerbootstrap.NewPhase(o.Cfg, o.SSH),
 		puppet.NewPhase(o.Cfg, o.SSH),
 		drbd.NewPhase(o.Cfg, o.SSH),
 		backup.NewPhase(o.Cfg),
@@ -219,7 +300,6 @@ func (o *Orchestrator) preflightChecks(ctx context.Context) error {
 		}
 	}
 
-	// Verify libvirt connectivity
 	if _, err := o.Libvirt.ListAll(ctx); err != nil {
 		return fmt.Errorf("libvirt not accessible at %s: %w", o.Cfg.VM.LibvirtURI, err)
 	}

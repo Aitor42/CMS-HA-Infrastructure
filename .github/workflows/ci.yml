@@ -1,10 +1,31 @@
 name: CI Pipeline
 
 on:
+  workflow_call:
   push:
     branches: ["main", "feature/rewrite-in-go"]
   pull_request:
     branches: ["main"]
+
+# Least privilege for every job that does not explicitly need more. The
+# security-scan job raises this to security-events: write for its SARIF upload.
+permissions:
+  contents: read
+
+# Tool versions are pinned here so a CI run is reproducible. Dependabot can
+# bump them deliberately; `@latest` and unversioned pip/gem installs are not
+# allowed in this workflow.
+env:
+  STATICCHECK_VERSION: "v0.8.2"
+  GOVULNCHECK_VERSION: "v1.9.0"
+  YAMLLINT_VERSION: "1.38.0"
+  ANSIBLE_CORE_VERSION: "2.21.5"
+  ANSIBLE_LINT_VERSION: "26.10.1"
+  PUPPET_LINT_VERSION: "5.1.1"
+  PUPPET_VERSION: "8.10.0"
+  ACTIONLINT_VERSION: "v1.7.12"
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -13,14 +34,22 @@ jobs:
   build-go:
     name: Build & Test Go CLI
     runs-on: ubuntu-latest
+    # Keep production builds static; the race step explicitly enables cgo.
+    env:
+      GOFLAGS: -trimpath
+      # Match the production binary, not the race detector's requirements.
+      CGO_ENABLED: "0"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: 'stable'
+          go-version-file: go.mod
           cache: true
 
       - name: Go vet
@@ -28,11 +57,14 @@ jobs:
 
       - name: Run staticcheck
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install "honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}"
           staticcheck ./...
 
       - name: Build check (all packages)
         run: go build ./...
+
+      - name: Check go.mod/go.sum are tidy
+        run: go mod tidy -diff
 
       - name: Build CLI binary
         run: |
@@ -46,20 +78,67 @@ jobs:
           sudo apt-get install -y libvirt-clients
 
       - name: Run unit tests with race detection
+        env:
+          CGO_ENABLED: "1"
         run: make test
 
+      - name: Generate coverage profile and enforce minimum
+        run: make coverage-check
+
+      - name: Fetch the pull-request base branch
+        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: Enforce changed-line coverage
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: make coverage-diff
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: error
+
   # ─────────────────────────────────────────────────────────────────────────────
-  # 2. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
+  # 2. GitHub Actions Workflow Linting
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint-actions:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run actionlint
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          actionlint
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. Shell Script Linting (ShellCheck) + Syntax Validation (bash -n)
   # ─────────────────────────────────────────────────────────────────────────────
   lint-shell:
     name: Lint Shell Scripts
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: ShellCheck — static analysis
-        uses: ludeeus/action-shellcheck@2.0.0
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           severity: warning
           scandir: .
@@ -92,10 +171,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install yamllint
-        run: pip install yamllint
+        run: pip install "yamllint==${YAMLLINT_VERSION}"
 
       - name: Yamllint — YAML syntax and style
         run: |
@@ -113,38 +194,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install kubeconform
         run: |
           KUBECONFORM_VERSION="v0.6.7"
-          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
-            | tar xz -C /usr/local/bin kubeconform
+          KUBECONFORM_SHA256="95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+          curl -fsSL --retry 3 \
+            -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  /tmp/kubeconform.tar.gz" | sha256sum -c -
+          tar xz -C /usr/local/bin -f /tmp/kubeconform.tar.gz kubeconform
 
       - name: Install kustomize
         run: |
           KUSTOMIZE_VERSION="v5.4.3"
-          curl -sSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" \
-            | tar xz -C /usr/local/bin kustomize
+          KUSTOMIZE_SHA256="3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+          curl -fsSL --retry 3 \
+            -o /tmp/kustomize.tar.gz \
+            "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
+          echo "${KUSTOMIZE_SHA256}  /tmp/kustomize.tar.gz" | sha256sum -c -
+          tar xz -C /usr/local/bin -f /tmp/kustomize.tar.gz kustomize
 
-      - name: Render kustomize roots (overlay/backups/jobs)
-        run: |
-          echo "Rendering kustomize roots..."
-          kustomize build kubernetes/overlays/lab > /dev/null
-          kustomize build kubernetes/backups    > /dev/null
-          kustomize build kubernetes/jobs       > /dev/null
-
-      - name: Validate Kubernetes manifests
-        run: |
-          echo "Validating Kubernetes manifests in kubernetes/..."
-          kubeconform \
-            -strict \
-            -summary \
-            -output json \
-            -skip Kustomization \
-            -ignore-filename-pattern '\.patch\.yaml$' \
-            -kubernetes-version 1.29.0 \
-            kubernetes/
+      - name: Validate rendered Kubernetes resources (non-empty, strict)
+        run: make lint-k8s
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 5. Puppet Manifest Validation
@@ -154,15 +229,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@26e5b7d197ebf60545ee9667bcbace0be11ccaec # v1
         with:
           ruby-version: '3.2'
 
       - name: Install puppet-lint
-        run: gem install puppet-lint
+        run: gem install puppet-lint --version "${PUPPET_LINT_VERSION}"
+
+      - name: Install Puppet (parser)
+        run: gem install puppet --version "${PUPPET_VERSION}" --no-document
 
       - name: Lint Puppet manifests
         run: |
@@ -172,6 +252,10 @@ jobs:
             --no-autoloader_layout-check \
             {} +
 
+      - name: Validate Puppet syntax
+        run: |
+          find puppet/ -name "*.pp" -print0 | xargs -0 -n1 puppet parser validate
+
   # ─────────────────────────────────────────────────────────────────────────────
   # 6. Ansible Validation (ansible-lint + playbook syntax check)
   # ─────────────────────────────────────────────────────────────────────────────
@@ -180,15 +264,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
 
       - name: Install ansible-core and ansible-lint
-        run: pip install ansible-core ansible-lint
+        run: |
+          pip install \
+            "ansible-core==${ANSIBLE_CORE_VERSION}" \
+            "ansible-lint==${ANSIBLE_LINT_VERSION}"
+
+      - name: Require exact collection versions
+        run: |
+          if grep -nE '^[[:space:]]*version:[[:space:]]*"?[^"]*[><=~^*]' ansible/requirements.yml; then
+            echo "::error::ansible/requirements.yml must pin exact collection versions"
+            exit 1
+          fi
 
       - name: Install required collections
         run: ansible-galaxy collection install -r ansible/requirements.yml
@@ -207,25 +303,29 @@ jobs:
             ansible/playbooks/provision.yml
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 7. Security Scanning — gosec + govulncheck + Trivy
+  # 7. Security Scanning — gosec + govulncheck + Gitleaks + Trivy
   #    Gate: no HIGH/CRITICAL findings in code (gosec), dependencies
-  #    (govulncheck/Trivy vuln) or secrets (Trivy). Kubernetes misconfig is
-  #    reported but not blocking (see docs/SECURITY.md).
+  #    (govulncheck/Trivy vuln) or committed secrets (Gitleaks/Trivy).
+  #    Kubernetes misconfig is reported but not blocking (see docs/SECURITY.md).
   # ─────────────────────────────────────────────────────────────────────────────
   security-scan:
-    name: Security Scan (gosec, govulncheck, Trivy)
+    name: Security Scan (gosec, govulncheck, Gitleaks, Trivy)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # gitleaks scans Git history; a shallow clone would hide it.
+          fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: 'stable'
+          go-version-file: go.mod
           cache: true
 
       - name: gosec — Go SAST (fails on HIGH)
@@ -241,17 +341,26 @@ jobs:
 
       - name: Upload gosec SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         with:
           sarif_file: gosec.sarif
 
       - name: govulncheck — reachable vulnerabilities in dependencies
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           govulncheck ./...
 
+      - name: Gitleaks — committed secrets
+        run: |
+          curl -fsSL --retry 3 \
+            -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar xz -C /usr/local/bin -f /tmp/gitleaks.tar.gz gitleaks
+          gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
       - name: Trivy — dependencies & secrets (BLOCKING on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -262,7 +371,7 @@ jobs:
           format: table
 
       - name: Trivy — Kubernetes misconfig (report only)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -279,6 +388,7 @@ jobs:
     if: always()
     needs:
       - build-go
+      - lint-actions
       - lint-shell
       - lint-yaml
       - validate-k8s
@@ -291,6 +401,7 @@ jobs:
         run: |
           echo "=== CI Pipeline Results ==="
           echo "build-go:           ${{ needs.build-go.result }}"
+          echo "lint-actions:       ${{ needs.lint-actions.result }}"
           echo "lint-shell:         ${{ needs.lint-shell.result }}"
           echo "lint-yaml:          ${{ needs.lint-yaml.result }}"
           echo "validate-k8s:      ${{ needs.validate-k8s.result }}"
@@ -298,17 +409,18 @@ jobs:
           echo "validate-ansible:   ${{ needs.validate-ansible.result }}"
           echo "security-scan:      ${{ needs.security-scan.result }}"
 
-          # Fail if any required job failed
+          # Skipped and cancelled dependencies are not successful checks.
           for result in \
             "${{ needs.build-go.result }}" \
+            "${{ needs.lint-actions.result }}" \
             "${{ needs.lint-shell.result }}" \
             "${{ needs.lint-yaml.result }}" \
             "${{ needs.validate-k8s.result }}" \
             "${{ needs.lint-puppet.result }}" \
             "${{ needs.validate-ansible.result }}" \
             "${{ needs.security-scan.result }}"; do
-            if [ "$result" = "failure" ]; then
-              echo "::error::One or more CI checks failed"
+            if [ "$result" != "success" ]; then
+              echo "::error::Every required CI check must succeed (got: $result)"
               exit 1
             fi
           done

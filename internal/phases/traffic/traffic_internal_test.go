@@ -1,6 +1,9 @@
 package traffic
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,18 +33,44 @@ func TestResolveBaseURL(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveBaseURL(testConfig(), tc.opts); got != tc.want {
+			got, err := resolveBaseURL(testConfig(), tc.opts)
+			if err != nil {
+				t.Fatalf("resolveBaseURL() error = %v", err)
+			}
+			if got != tc.want {
 				t.Fatalf("resolveBaseURL() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestResolveBaseURL_InternalFallback(t *testing.T) {
+func TestResolveBaseURL_RequiresAConfiguredTarget(t *testing.T) {
+	t.Run("internal without a frontend address", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.Nodes.CMSFrontends = nil
+		if _, err := resolveBaseURL(cfg, Options{Mode: "internal"}); err == nil || !strings.Contains(err.Error(), "cms_frontends") {
+			t.Fatalf("resolveBaseURL() error = %v, want the missing frontend error", err)
+		}
+	})
+	t.Run("external without a VIP", func(t *testing.T) {
+		cfg := testConfig()
+		cfg.Network.Main.VIP = ""
+		if _, err := resolveBaseURL(cfg, Options{Mode: "external"}); err == nil || !strings.Contains(err.Error(), "network.main.vip") {
+			t.Fatalf("resolveBaseURL() error = %v, want the missing VIP error", err)
+		}
+	})
+}
+
+func TestRunDBCheckRequiresAMaster(t *testing.T) {
 	cfg := testConfig()
-	cfg.Nodes.CMSFrontends = nil
-	if got := resolveBaseURL(cfg, Options{Mode: "internal"}); got != "http://192.168.20.101" {
-		t.Fatalf("internal fallback = %q, want http://192.168.20.101", got)
+	cfg.Database.Password = "secret"
+	traffic := New(cfg, Options{WithDB: true})
+
+	// Without a master the NodePort is not on the jumpstart address; guessing
+	// one would report a misleading "database unreachable" error.
+	err := traffic.runDBCheck(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires a master node") {
+		t.Fatalf("runDBCheck() = %v, want the missing-master error", err)
 	}
 }
 
@@ -63,6 +92,7 @@ func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
 		"-v " + hostCACertPath + ":" + containerCACert + ":ro",
 		"-e SSL_CERT_FILE=" + containerCACert,
 		"-e K6_PROMETHEUS_RW_SERVER_URL=http://192.168.10.20:9090/api/v1/write",
+		"-e K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99)",
 		"grafana/k6:0.55.0 run",
 		"--vus 7",
 		"--duration 90s",
@@ -72,8 +102,8 @@ func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
 			t.Errorf("args missing %q\nfull: %s", want, joined)
 		}
 	}
-	if strings.Contains(joined, "--insecure") {
-		t.Errorf("--insecure must not be set when a CA is mounted: %s", joined)
+	if strings.Contains(joined, "insecure-skip-tls-verify") {
+		t.Errorf("TLS verification must not be skipped when a CA is mounted: %s", joined)
 	}
 	if !strings.HasSuffix(joined, " -") {
 		t.Errorf("script must be read from stdin (trailing '-'): %s", joined)
@@ -89,16 +119,38 @@ func TestBuildArgs_NoCASkipsTLSVerification(t *testing.T) {
 	})
 	joined := strings.Join(args, " ")
 
-	if !strings.Contains(joined, "run --insecure") && !strings.Contains(joined, "run --insecure ") {
-		// --insecure must immediately follow `k6 run`.
-		if !strings.Contains(joined, "run --insecure --vus 5") {
-			t.Errorf("expected --insecure right after `run`: %s", joined)
-		}
+	// k6 removed the bare `--insecure` flag; the load test must use the
+	// documented `--insecure-skip-tls-verify`, right after `k6 run`.
+	if !strings.Contains(joined, "run --insecure-skip-tls-verify --vus 5") {
+		t.Errorf("expected --insecure-skip-tls-verify right after `run`: %s", joined)
 	}
 	if strings.Contains(joined, "SSL_CERT_FILE") {
 		t.Errorf("no CA should be mounted: %s", joined)
 	}
 	if strings.Contains(joined, "experimental-prometheus-rw") {
 		t.Errorf("no remote-write output when prometheus_rw_url is empty: %s", joined)
+	}
+}
+
+// TestFirstExistingFile covers the CA lookup the load test performs before it
+// mounts the certificate into the k6 container: the home copy the PKI phase
+// leaves for the unprivileged account must be used when it is there, and a
+// missing CA must fall through to skipping verification instead of failing.
+func TestFirstExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "present.crt")
+	if err := os.WriteFile(present, []byte("cert"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.crt")
+
+	if got := firstExistingFile([]string{missing, present}); got != present {
+		t.Errorf("firstExistingFile = %q, want %q", got, present)
+	}
+	if got := firstExistingFile([]string{missing}); got != "" {
+		t.Errorf("firstExistingFile with no match = %q, want empty", got)
+	}
+	if got := firstExistingFile(nil); got != "" {
+		t.Errorf("firstExistingFile(nil) = %q, want empty", got)
 	}
 }

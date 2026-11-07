@@ -5,12 +5,20 @@ token.txt
 .env.*
 *-secret.yaml
 
+# Hosted CI renders config.ci.yaml (no secrets) into this throwaway copy with
+# freshly generated credentials; it must never be committed.
+config.ci.local.yaml
+
 # Test files
 prueba
 
 # Go build output
 /cms-ha
+/dist/
 vendor/
+
+# Secret/key rotation backups
+config.yaml.bak-*
 
 # Age encryption keys
 *.age-key
@@ -44,6 +52,11 @@ ansible/.cache/
 # Orchestrator deployment checkpoint (resume state)
 deploy.state
 deploy.state.tmp
+deploy.state.lock
+coverage.out
 
 # Strix runs
 strix_runs/
+
+# Mimosa plugin local hook state (baselines, ledgers, reports)
+.mimosa/

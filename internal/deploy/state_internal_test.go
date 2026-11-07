@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
@@ -94,4 +96,63 @@ func TestPlanRun(t *testing.T) {
 			t.Fatal("expected an error when both flags are set")
 		}
 	})
+}
+
+func TestRepeatedPhaseCheckpointsAreIndependent(t *testing.T) {
+	list := []phases.Phase{fakePhase{"00-init-vms"}, fakePhase{"01-cobbler"}, fakePhase{"00-init-vms"}}
+	keys := PhaseKeys(list)
+	if strings.Join(keys, ",") != "00-init-vms,01-cobbler,00-init-vms-2" {
+		t.Fatalf("unexpected unique phase keys: %v", keys)
+	}
+	prior := &State{CompletedPhases: []string{"00-init-vms"}}
+	skip, _, err := planRun(list, DeployOpts{Resume: true}, prior)
+	if err != nil || !skip[keys[0]] || skip[keys[2]] {
+		t.Fatalf("jumpstart completion must not skip unfinished client provisioning: %v, %v", skip, err)
+	}
+	skip, reset, err := planRun(list, DeployOpts{FromPhase: "00-init-vms-2"}, prior)
+	if err != nil || !reset || !skip[keys[0]] || !skip[keys[1]] || skip[keys[2]] {
+		t.Fatalf("explicit repeated-phase restart must reset old progress: %v, %v", skip, err)
+	}
+}
+
+func TestResumePreservesExplicitlyAssumedPhases(t *testing.T) {
+	prior := &State{AssumedPhases: []string{"00-init-vms"}, CompletedPhases: []string{"drbd-setup"}}
+	path := filepath.Join(t.TempDir(), "deploy.state")
+	if err := prior.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip, reset, err := planRun(testPhases(), DeployOpts{Resume: true}, loaded)
+	if err != nil || reset || !skip["00-init-vms"] || !skip["drbd-setup"] || skip["kubernetes-setup"] {
+		t.Fatalf("resume lost explicit operator assumptions: %v, %v", skip, err)
+	}
+	if loaded.HasCompleted("00-init-vms") {
+		t.Fatal("operator assumption must not be presented as verified completion")
+	}
+}
+
+func TestNewRunID(t *testing.T) {
+	id := newRunID()
+	parts := strings.Split(id, "-")
+	if len(parts) != 2 || !strings.Contains(parts[0], "T") || len(parts[1]) != 6 {
+		t.Fatalf("unexpected run id %q", id)
+	}
+}
+
+func TestStateRunIDRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "deploy.state")
+	want := &State{Version: stateVersion, RunID: "run-123", Status: "running"}
+	if err := want.Save(path); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	got, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if got.RunID != want.RunID {
+		t.Fatalf("run_id = %q, want %q", got.RunID, want.RunID)
+	}
 }

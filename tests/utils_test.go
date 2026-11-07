@@ -2,14 +2,29 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/hypervisor"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/libvirt"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/utils"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/verify"
 )
+
+func newTestPool(t *testing.T) *ssh.Pool {
+	t.Helper()
+	s, err := ssh.NewPool(filepath.Join(t.TempDir(), "id_ed25519"), 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("new ssh pool: %v", err)
+	}
+	t.Cleanup(s.Close)
+	return s
+}
 
 func TestUtils_NewFailoverTester(t *testing.T) {
 	cfg := &config.Config{
@@ -34,7 +49,7 @@ func TestUtils_NewVerifier(t *testing.T) {
 	s := &ssh.Pool{}
 	l := libvirt.NewClient("qemu:///system")
 
-	v := utils.NewVerifier(cfg, s, l)
+	v := verify.NewVerifier(cfg, s, l)
 	if v == nil {
 		t.Fatalf("expected non-nil Verifier")
 	}
@@ -42,7 +57,7 @@ func TestUtils_NewVerifier(t *testing.T) {
 
 func TestUtils_FixBootOrderSkippingNonExistent(t *testing.T) {
 	l := libvirt.NewClient("test:///default")
-	err := utils.FixBootOrder(t.Context(), l, []string{"nonexistent-vm-9999"})
+	err := hypervisor.FixBootOrder(t.Context(), l, []string{"nonexistent-vm-9999"})
 	if err != nil {
 		t.Errorf("expected FixBootOrder to safely skip nonexistent VMs, got: %v", err)
 	}
@@ -63,7 +78,7 @@ func TestUtils_RecreateFailedVMsSafe(t *testing.T) {
 	// With the destructive pre-fix behavior this would have attempted to
 	// destroy/qemu-img-recreate the missing domains and could not have
 	// failed cleanly; it must now pass while touching nothing.
-	if err := utils.RecreateFailedVMs(t.Context(), cfg, l); err != nil {
+	if err := hypervisor.RecreateFailedVMs(t.Context(), cfg, l); err != nil {
 		t.Errorf("expected RecreateFailedVMs to skip missing VMs without error, got: %v", err)
 	}
 }
@@ -75,18 +90,50 @@ func TestUtils_CheckSSH_Concurrent(t *testing.T) {
 			Router:    config.NodeDetail{Name: "vm2", IP: "127.0.0.2"},
 		},
 	}
-	s, err := ssh.NewPool("/tmp/dummy_key", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("new ssh pool: %v", err)
-	}
-	defer s.Close()
+	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Runs concurrently across nodes and should not data race
+	// CheckSSH fans out across nodes; the race detector covers the shared pool.
 	_ = utils.CheckSSH(ctx, cfg, s, l)
+}
+
+func TestUtils_CollectSSHStatusJSONShape(t *testing.T) {
+	cfg := &config.Config{
+		Nodes: config.NodesConfig{
+			Jumpstart: config.NodeDetail{Name: "vm1", IP: "127.0.0.1"},
+			Router:    config.NodeDetail{Name: "vm2", IP: "127.0.0.2"},
+		},
+	}
+	s := newTestPool(t)
+	l := libvirt.NewClient("test:///default")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	results := utils.CollectSSHStatus(ctx, cfg, s, l)
+	if len(results) != 2 {
+		t.Fatalf("got %d rows, want 2", len(results))
+	}
+	data, err := json.Marshal(results)
+	if err != nil {
+		t.Fatalf("marshal SSH status: %v", err)
+	}
+	for _, field := range []string{`"name"`, `"ip"`, `"state"`, `"ssh"`, `"healthy"`} {
+		if !strings.Contains(string(data), field) {
+			t.Fatalf("JSON %s does not contain %s", data, field)
+		}
+	}
+}
+
+func TestUtils_WaitForAllSSH_NoNodes(t *testing.T) {
+	// A partial config with no named nodes must fail fast instead of blocking
+	// for the whole budget.
+	err := utils.WaitForAllSSH(t.Context(), &config.Config{}, newTestPool(t), time.Second)
+	if err == nil {
+		t.Fatal("expected an error when no node has an IP address")
+	}
 }
 
 func TestUtils_VerifyAll_Concurrent(t *testing.T) {
@@ -99,19 +146,18 @@ func TestUtils_VerifyAll_Concurrent(t *testing.T) {
 			Masters:   []config.NodeDetail{{Name: "master1", IP: "127.0.0.5"}},
 		},
 	}
-	s, err := ssh.NewPool("/tmp/dummy_key", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("new ssh pool: %v", err)
-	}
-	defer s.Close()
+	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
-	v := utils.NewVerifier(cfg, s, l)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	v := verify.NewVerifier(cfg, s, l)
+	// Some checks honour the context and only return when it expires, so this
+	// budget is the test's wall time. It only has to outlive the fan-out, not
+	// any real check: the dummy IPs make every probe fail immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	// VerifyAll runs all 8 phases concurrently. It will fail because dummy IPs are unreachable,
-	// but it must execute all phases without deadlocks, panics, or data races.
+	// VerifyAll runs every check concurrently. The dummy IPs make it fail, but
+	// it must complete without deadlocks, panics or data races.
 	if verr := v.VerifyAll(ctx); verr == nil {
 		t.Errorf("expected verification to fail with unreachable dummy nodes")
 	}
@@ -125,11 +171,7 @@ func TestUtils_FailoverTester_SkipConditions(t *testing.T) {
 			Workers:      []config.NodeDetail{{Name: "worker1"}}, // < 2
 		},
 	}
-	s, err := ssh.NewPool("/tmp/dummy_key", 100*time.Millisecond)
-	if err != nil {
-		t.Fatalf("new ssh pool: %v", err)
-	}
-	defer s.Close()
+	s := newTestPool(t)
 	l := libvirt.NewClient("test:///default")
 
 	ft := utils.NewFailoverTester(cfg, s, l)
@@ -152,7 +194,7 @@ func TestUtils_StopAllVMs_NoRunningVMs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	err := utils.StopAllVMs(ctx, cfg, l, utils.StopOptions{Timeout: 1 * time.Second})
+	err := hypervisor.StopAllVMs(ctx, cfg, l, hypervisor.StopOptions{Timeout: 1 * time.Second})
 	if err != nil {
 		t.Errorf("expected StopAllVMs to succeed when no VMs are running, got: %v", err)
 	}

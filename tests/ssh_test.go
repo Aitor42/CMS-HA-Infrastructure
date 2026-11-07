@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,7 +11,8 @@ import (
 
 func TestSSH_NewPoolLazyInit(t *testing.T) {
 	// Creating a pool with a non-existent key should succeed without crashing (lazy key loading)
-	pool, err := ssh.NewPool("/tmp/non_existent_key_12345", 2*time.Second)
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	pool, err := ssh.NewPool(keyPath, 2*time.Second)
 	if err != nil {
 		t.Fatalf("expected NewPool to succeed in lazy mode, got: %v", err)
 	}
@@ -27,7 +29,8 @@ func TestSSH_NewPoolLazyInit(t *testing.T) {
 }
 
 func TestSSH_RunParallelAggregation(t *testing.T) {
-	pool, err := ssh.NewPool("/tmp/non_existent_key_12345", 1*time.Second)
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	pool, err := ssh.NewPool(keyPath, 1*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected pool error: %v", err)
 	}
@@ -56,7 +59,8 @@ func TestSSH_RunParallelAggregation(t *testing.T) {
 
 func TestSSH_RunCommandStdinRejectsNilWriter(t *testing.T) {
 	// A nil stdout writer must fail fast, before any connection attempt.
-	pool, err := ssh.NewPool("/tmp/non_existent_key_12345", time.Second)
+	keyPath := filepath.Join(t.TempDir(), "id_ed25519")
+	pool, err := ssh.NewPool(keyPath, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected pool error: %v", err)
 	}

@@ -24,11 +24,23 @@ const DefaultStateFile = "deploy.state"
 // (notably re-running VM creation and the Puppet convergence).
 type State struct {
 	Version         int       `json:"version"`
+	RunID           string    `json:"run_id,omitempty"`
+	Identity        *Identity `json:"identity,omitempty"`
 	Status          string    `json:"status"` // running | completed | failed
 	StartedAt       time.Time `json:"started_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 	CompletedPhases []string  `json:"completed_phases"`
-	LastError       string    `json:"last_error,omitempty"`
+	// AssumedPhases were explicitly skipped by --from-phase, not verified.
+	AssumedPhases []string `json:"assumed_phases,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+}
+
+// newRunID returns a sortable, unique-enough identifier for one deploy
+// invocation. The timestamp makes runs easy to order in an artifact list; the
+// nanosecond suffix keeps two runs started in the same second distinct.
+func newRunID() string {
+	now := time.Now().UTC()
+	return fmt.Sprintf("%s-%06d", now.Format("20060102T150405Z"), now.Nanosecond()%1000000)
 }
 
 // LoadState reads a checkpoint file. A missing file is not an error: it returns
@@ -100,11 +112,19 @@ func phaseKey(name string) string {
 	return strings.Trim(nonAlnum.ReplaceAllString(strings.ToLower(name), "-"), "-")
 }
 
-// PhaseKeys returns the run keys of every phase, in execution order.
+// PhaseKeys returns unique run keys, even when a phase is instantiated twice
+// (init-vms creates jumpstart first, then client nodes later in the pipeline).
 func PhaseKeys(list []phases.Phase) []string {
 	keys := make([]string, 0, len(list))
+	used := make(map[string]bool, len(list))
 	for _, p := range list {
-		keys = append(keys, phaseKey(p.Name()))
+		base := phaseKey(p.Name())
+		key := base
+		for suffix := 2; used[key]; suffix++ {
+			key = fmt.Sprintf("%s-%d", base, suffix)
+		}
+		used[key] = true
+		keys = append(keys, key)
 	}
 	return keys
 }
@@ -129,6 +149,9 @@ func planRun(list []phases.Phase, opts DeployOpts, prior *State) (skip map[strin
 			for _, key := range prior.CompletedPhases {
 				skip[key] = true
 			}
+			for _, key := range prior.AssumedPhases {
+				skip[key] = true
+			}
 		}
 		return skip, false, nil
 
@@ -137,12 +160,15 @@ func planRun(list []phases.Phase, opts DeployOpts, prior *State) (skip map[strin
 		if want == "" {
 			return nil, false, fmt.Errorf("--from-phase requires a phase name")
 		}
-		for i, p := range list {
-			if phaseKey(p.Name()) == want {
-				for _, before := range list[:i] {
-					skip[phaseKey(before.Name())] = true
+		keys := PhaseKeys(list)
+		for i, key := range keys {
+			if key == want {
+				for _, before := range keys[:i] {
+					skip[before] = true
 				}
-				return skip, false, nil
+				// Do not let old completions hide a new failure when this
+				// explicitly restarted suffix is resumed later.
+				return skip, true, nil
 			}
 		}
 		return nil, false, fmt.Errorf("unknown phase %q (valid phases: %s)", opts.FromPhase, strings.Join(PhaseKeys(list), ", "))

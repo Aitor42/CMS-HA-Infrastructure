@@ -21,6 +21,7 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/puppet"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/registernodes"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/repairssh"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/routerbootstrap"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/traffic"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/ufw"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
@@ -60,6 +61,7 @@ func TestPhases_MetadataAndInstantiation(t *testing.T) {
 		{"01-setup-cobbler", cobbler.NewPhase(cfg, pool)},
 		{"02-register-nodes", registernodes.NewPhase(cfg, pool)},
 		{"03-repair-ssh", repairssh.NewPhase(cfg, pool)},
+		{"Router Bootstrap", routerbootstrap.NewPhase(cfg, pool)},
 		{"04-setup-puppet", puppet.NewPhase(cfg, pool)},
 		{"DRBD Setup", drbd.NewPhase(cfg, pool)},
 		{"Kubernetes Setup", kubernetes.NewPhase(cfg, pool)},
@@ -141,6 +143,88 @@ func repoFile(t *testing.T, rel string) string {
 	return filepath.Join(root, rel)
 }
 
+func TestPhases_CMSFrontendPHPPatch(t *testing.T) {
+	// The "php2shell" remote code executions (CVE-2026-109618 and
+	// CVE-2026-109619, published 2026-10-21) are fixed by a PHP package
+	// upgrade that nothing else in the stack would apply on its own, and the
+	// mitigations the PHP team asks for are a web server configuration. Both
+	// have to live in the manifest, so a frontend that missed them is
+	// exposed even though the site keeps answering.
+	cmsManifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/cms_frontend.pp"))
+	if err != nil {
+		t.Fatalf("failed to read cms_frontend.pp: %v", err)
+	}
+	cmsContent := string(cmsManifest)
+	for _, expected := range []string{
+		// The patched Ubuntu revision of the PHP 8.3 branch. Ubuntu backports
+		// the upstream fix, so the upstream version stays 8.3.6.
+		"8.3.6-0ubuntu0.24.04.13",
+		"php8.3-cli",
+		"php8.3-common",
+		"libapache2-mod-php8.3",
+		// No space after the operator: Puppet parses the value as a Debian
+		// version range and rejects ">= 1.2.3", then hands the whole string
+		// to apt-get as a literal version.
+		`">=${php_patched_version}"`,
+		// The cache refresh must consider every pinned binary package, not
+		// only the CLI: Apache loads libapache2-mod-php8.3.
+		"for p in php8.3-cli php8.3-common libapache2-mod-php8.3; do",
+		// Session hardening and finite resource limits accompany, rather than
+		// replace, the mandatory patched package versions above.
+		"session.upload_progress.enabled",
+		"php_admin_value memory_limit 128M",
+		"/etc/apache2/mods-available/mpm_prefork.conf",
+		"StartServers 2",
+		"MinSpareServers 1",
+		"MaxSpareServers 2",
+		"ServerLimit 4",
+		"MaxRequestWorkers 4",
+		"MaxConnectionsPerChild 500",
+		"php_admin_flag session.upload_progress.enabled Off",
+		"post_max_size",
+		"LimitRequestBody",
+		"/etc/php/8.3/apache2/conf.d/99-cms-ha-php-hardening.ini",
+		"/etc/apache2/conf-available/php-hardening.conf",
+		// Deployed is not enough: the verification reads the enabled path,
+		// so the manifest must also run a2enconf.
+		"a2enconf php-hardening",
+		"/etc/apache2/conf-enabled/php-hardening.conf",
+	} {
+		if !strings.Contains(cmsContent, expected) {
+			t.Errorf("expected cms_frontend.pp to contain %q", expected)
+		}
+	}
+
+	if strings.Contains(cmsContent, "php_admin_value memory_limit -1") {
+		t.Error("the frontend must not disable PHP's memory limit")
+	}
+	prefork := puppetResourceBlock(t, cmsContent, "file { '/etc/apache2/mods-available/mpm_prefork.conf':")
+	for _, setting := range []string{"ServerLimit 4", "MaxRequestWorkers 4", "StartServers 2", "MinSpareServers 1", "MaxSpareServers 2"} {
+		if !strings.Contains(prefork, setting) || strings.Count(cmsContent, setting) != 1 {
+			t.Errorf("%q must be defined exactly once, in the standard prefork config", setting)
+		}
+	}
+	hardening := puppetResourceBlock(t, cmsContent, "file { '/etc/apache2/conf-available/php-hardening.conf':")
+	if strings.Contains(hardening, "ServerLimit") || strings.Contains(hardening, "MaxRequestWorkers") {
+		t.Error("PHP hardening must not duplicate the packaged prefork configuration")
+	}
+
+	// The request size is bounded at the proxy as well: the frontends answer
+	// the internet directly too, so the limit cannot live in one layer only.
+	for _, path := range []string{
+		"puppet/modules/role/files/nginx/cms-lb.conf",
+		"templates/nginx/cms-lb.conf",
+	} {
+		conf, err := os.ReadFile(repoFile(t, path))
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", path, err)
+		}
+		if !strings.Contains(string(conf), "client_max_body_size 32m") {
+			t.Errorf("expected %s to bound the request size at 32m", path)
+		}
+	}
+}
+
 func TestPhases_NFSStorageManifests(t *testing.T) {
 	// Verify role::storage manifest exists and contains critical configurations
 	storageManifest, err := os.ReadFile(repoFile(t, "puppet/modules/role/manifests/storage.pp"))
@@ -181,7 +265,10 @@ func TestPhases_NFSStorageManifests(t *testing.T) {
 	for _, expected := range []string{
 		"'nfs-common'",
 		"/var/www/html/wp-content/uploads",
-		"192.168.10.15:/srv/nfs/wp-uploads",
+		// The storage address comes from Hiera (generated from config.yaml),
+		// not from a hardcoded default-lab address.
+		"lookup('cms_ha::storage_ip'",
+		"${storage_ip}:/srv/nfs/wp-uploads",
 		"fstype  => 'nfs'",
 		"nfsvers=4",
 		"Mount['/var/www/html/wp-content/uploads']",

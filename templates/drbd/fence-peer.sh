@@ -33,13 +33,24 @@ log() { echo "[FENCE $(date '+%F %T')] $*"; }
 # is_off: true when the hypervisor reports the domain as stopped or crashed.
 is_off() {
   local state
-  state="$(eval "${FENCE_STATE_COMMAND//"{domain}"/$DOMAIN}" 2>/dev/null || true)"
-  echo "$state" | grep -qiE 'shut off|crash'
+  state="$(timeout "$FENCE_TIMEOUT" bash -c "${FENCE_STATE_COMMAND//"{domain}"/$DOMAIN}" 2>/dev/null)" || return 1
+  [[ "$state" =~ ^[[:space:]]*(shut[[:space:]]off|crashed)[[:space:]]*$ ]]
 }
 
 if [ -z "$DOMAIN" ]; then
   log "ERROR: no peer domain specified (set PEER_DOMAIN in $CONF or pass it as an argument)"
   exit 2
+fi
+
+# Domain names are substituted into administrator-owned shell snippets below.
+# Reject shell syntax, options, whitespace and additional arguments first.
+if [ "$#" -gt 1 ] || [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+  log "ERROR: invalid peer domain"
+  exit 2
+fi
+if [[ ! "$FENCE_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+  log "ERROR: invalid fencing timeout"
+  exit 3
 fi
 
 if [ -z "${FENCE_COMMAND:-}" ] || [ -z "${FENCE_STATE_COMMAND:-}" ]; then

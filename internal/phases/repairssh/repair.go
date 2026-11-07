@@ -11,22 +11,24 @@ import (
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/config"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/logging"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/phases/catalog"
+	"github.com/Aitor42/CMS-HA-Infrastructure/internal/shell"
 	"github.com/Aitor42/CMS-HA-Infrastructure/internal/ssh"
 )
 
+// Phase repairs SSH access and redistributes the deploy key.
 type Phase struct {
 	cfg  *config.Config
-	pool *ssh.Pool
+	pool ssh.Executor
 }
 
-func NewPhase(cfg *config.Config, pool *ssh.Pool) phases.Phase {
+// NewPhase creates a new SSH-repair Phase.
+func NewPhase(cfg *config.Config, pool ssh.Executor) phases.Phase {
 	return &Phase{cfg: cfg, pool: pool}
 }
 
-func (p *Phase) Name() string { return "03-repair-ssh" }
-func (p *Phase) Description() string {
-	return "Repair SSH connectivity and distribute keys across all nodes"
-}
+func (p *Phase) Name() string        { return catalog.RepairSSH.Name }
+func (p *Phase) Description() string { return catalog.RepairSSH.Description }
 
 func (p *Phase) Run(ctx context.Context) error {
 	timer := logging.PhaseStart(p.Name())
@@ -80,79 +82,21 @@ func (p *Phase) cleanKnownHosts(ips []string) error {
 
 	var firstErr error
 	for _, knownHostsPath := range paths {
-		if err := removeHostsFromKnownHosts(knownHostsPath, ips); err != nil && firstErr == nil {
+		if err := ssh.RemoveHostsFromKnownHosts(knownHostsPath, ips); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
 
-func removeHostsFromKnownHosts(knownHostsPath string, ips []string) error {
-	data, err := os.ReadFile(filepath.Clean(knownHostsPath)) // #nosec G304 -- operator's own ssh known_hosts paths
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-
-	lines := strings.Split(string(data), "\n")
-	var newLines []string
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			newLines = append(newLines, line)
-			continue
-		}
-		fields := strings.Fields(trimmed)
-		if len(fields) == 0 {
-			newLines = append(newLines, line)
-			continue
-		}
-		hostPart := fields[0]
-		match := false
-		for _, ip := range ips {
-			if ip != "" && hostMatchesIP(hostPart, ip) {
-				match = true
-				break
-			}
-		}
-		if !match {
-			newLines = append(newLines, line)
-		}
-	}
-
-	return os.WriteFile(filepath.Clean(knownHostsPath), []byte(strings.Join(newLines, "\n")), 0600) // #nosec G703 G304 -- safely write cleaned known_hosts in user ssh dir
-}
-
-func hostMatchesIP(hostToken, targetIP string) bool {
-	hostToken = strings.TrimPrefix(hostToken, "@cert-authority ")
-	hostToken = strings.TrimPrefix(hostToken, "@revoked ")
-	parts := strings.Split(hostToken, ",")
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == targetIP {
-			return true
-		}
-		if strings.HasPrefix(p, "[") && strings.Contains(p, "]:") {
-			idx := strings.Index(p, "]:")
-			if p[1:idx] == targetIP {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error {
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, n := range nodes {
 		node := n // capture loop variable
 		if node.IP == "" {
 			continue
 		}
-		tasks[node.IP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[node.IP] = func(c context.Context, pool ssh.Executor) error {
 			cmd := fmt.Sprintf("hostnamectl set-hostname %s", node.FQDN)
 			_, _, code, err := pool.RunCommand(c, node.IP, cmd)
 			if err != nil || code != 0 {
@@ -177,26 +121,15 @@ func (p *Phase) setHostnames(ctx context.Context, nodes []config.NodeSpec) error
 // configuration (it adds 127.0.1.1 and the hot-desk entries); keep the two in
 // sync by hand when adding nodes.
 func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) error {
-	var sb strings.Builder
-	sb.WriteString("127.0.0.1 localhost\n")
-	for _, n := range nodes {
-		if n.IP != "" && n.FQDN != "" {
-			if n.Name == "jumpstart" {
-				sb.WriteString(fmt.Sprintf("%s %s %s puppet\n", n.IP, n.FQDN, n.Name))
-			} else {
-				sb.WriteString(fmt.Sprintf("%s %s %s\n", n.IP, n.FQDN, n.Name))
-			}
-		}
-	}
-	hostsContent := sb.String()
+	hostsContent := bootstrapHostsContent(nodes, p.cfg.Nodes.Jumpstart.IP, p.cfg.Nodes.Jumpstart.Name)
 
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	for _, n := range nodes {
 		node := n
 		if node.IP == "" {
 			continue
 		}
-		tasks[node.IP] = func(c context.Context, pool *ssh.Pool) error {
+		tasks[node.IP] = func(c context.Context, pool ssh.Executor) error {
 			return pool.CopyContent(c, node.IP, []byte(hostsContent), "/etc/hosts", 0644)
 		}
 	}
@@ -210,20 +143,39 @@ func (p *Phase) generateHosts(ctx context.Context, nodes []config.NodeSpec) erro
 	return nil
 }
 
+// bootstrapHostsContent renders the pre-Puppet /etc/hosts. The jumpstart entry
+// is identified by its configured IP or name, not the literal "jumpstart":
+// renamed deployments still need the `puppet` alias that agents use.
+func bootstrapHostsContent(nodes []config.NodeSpec, jumpstartIP, jumpstartName string) string {
+	var sb strings.Builder
+	sb.WriteString("127.0.0.1 localhost\n")
+	for _, n := range nodes {
+		if n.IP == "" || n.FQDN == "" {
+			continue
+		}
+		isJumpstart := (jumpstartIP != "" && n.IP == jumpstartIP) ||
+			(jumpstartName != "" && n.Name == jumpstartName)
+		if isJumpstart {
+			sb.WriteString(fmt.Sprintf("%s %s %s puppet\n", n.IP, n.FQDN, n.Name))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s %s %s\n", n.IP, n.FQDN, n.Name))
+		}
+	}
+	return sb.String()
+}
+
 func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) error {
 	jumpstartIP := p.cfg.Nodes.Jumpstart.IP
 	if jumpstartIP == "" {
 		return fmt.Errorf("jumpstart IP is empty")
 	}
 
-	// Check if jumpstart has an ssh key, if not generate it
 	checkCmd := "if [ ! -f /root/.ssh/id_ed25519 ]; then mkdir -p /root/.ssh && chmod 700 /root/.ssh && ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519; fi"
 	_, _, code, err := p.pool.RunCommand(ctx, jumpstartIP, checkCmd)
 	if err != nil || code != 0 {
 		return fmt.Errorf("failed to ensure jumpstart ssh key (exit %d): %v", code, err)
 	}
 
-	// Read jumpstart public key
 	pubKeyStr, _, code, err := p.pool.RunCommand(ctx, jumpstartIP, "cat /root/.ssh/id_ed25519.pub")
 	if err != nil || code != 0 {
 		return fmt.Errorf("failed to read jumpstart public key (exit %d): %v", code, err)
@@ -233,28 +185,21 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		return fmt.Errorf("jumpstart public key is empty")
 	}
 
-	tasks := make(map[string]func(ctx context.Context, pool *ssh.Pool) error)
+	tasks := make(map[string]func(ctx context.Context, pool ssh.Executor) error)
 	// Inter-node SSH must use the non-root deploy account: the installers
 	// disable direct root logins (PermitRootLogin no), so authorising the
-	// jumpstart key for root would be dead weight.
+	// jumpstart key for root would be dead weight. Resolve the account's home
+	// from the passwd database instead of assuming /home/<user>: a custom
+	// ssh.user with a different home (or root, whose home is /root) would
+	// otherwise receive the key in a directory the account cannot use.
 	deployUser := p.cfg.SSHUser()
-	deployHome := "/home/" + deployUser
-	if deployUser == "root" {
-		deployHome = "/root"
-	}
 	for _, n := range nodes {
 		if n.IP == jumpstartIP || n.IP == "" {
 			continue
 		}
 		nodeIP := n.IP
-		tasks[nodeIP] = func(c context.Context, pool *ssh.Pool) error {
-			cmd := fmt.Sprintf(`
-				mkdir -p %[1]s/.ssh
-				chmod 700 %[1]s/.ssh
-				grep -qxF '%[2]s' %[1]s/.ssh/authorized_keys 2>/dev/null || echo '%[2]s' >> %[1]s/.ssh/authorized_keys
-				chmod 600 %[1]s/.ssh/authorized_keys
-				chown -R %[3]s:%[3]s %[1]s/.ssh 2>/dev/null || true
-			`, deployHome, pubKeyStr, deployUser)
+		tasks[nodeIP] = func(c context.Context, pool ssh.Executor) error {
+			cmd := authorizedKeyScript(deployUser, pubKeyStr)
 			_, _, code, err := pool.RunCommand(c, nodeIP, cmd)
 			if err != nil || code != 0 {
 				return fmt.Errorf("failed to add pubkey on %s (exit %d): %v", nodeIP, code, err)
@@ -270,4 +215,29 @@ func (p *Phase) propagateSSHKeys(ctx context.Context, nodes []config.NodeSpec) e
 		}
 	}
 	return nil
+}
+
+// authorizedKeyScript installs the deploy key without assuming that the
+// account's primary group has the same name. Custom accounts often use a
+// different primary group, and `chown user:user` then fails even though the
+// account and its home are valid.
+func authorizedKeyScript(deployUser, pubKey string) string {
+	return fmt.Sprintf(`
+				set -eu
+				deploy_entry=$(getent passwd %[1]s | head -n 1)
+				if [ -z "$deploy_entry" ]; then
+					echo "deploy account %[1]s does not exist on $(hostname)" >&2
+					exit 1
+				fi
+				deploy_home=$(printf '%%s\n' "$deploy_entry" | cut -d: -f6)
+				deploy_group=$(printf '%%s\n' "$deploy_entry" | cut -d: -f4)
+				if [ -z "$deploy_home" ] || [ -z "$deploy_group" ]; then
+					echo "deploy account %[1]s has no usable home or primary group on $(hostname)" >&2
+					exit 1
+				fi
+				install -d -m 700 -o %[1]s -g "$deploy_group" "$deploy_home/.ssh"
+				grep -qxF %[2]s "$deploy_home/.ssh/authorized_keys" 2>/dev/null || printf '%%s\n' %[2]s >> "$deploy_home/.ssh/authorized_keys"
+				chmod 600 "$deploy_home/.ssh/authorized_keys"
+				chown %[1]s:"$deploy_group" "$deploy_home/.ssh/authorized_keys"
+			`, shell.Quote(deployUser), shell.Quote(pubKey))
 }

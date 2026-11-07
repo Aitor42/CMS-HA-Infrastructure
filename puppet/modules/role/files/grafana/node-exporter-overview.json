@@ -143,17 +143,23 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
             ]
           },
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "UP", "color": "green" }, "1": { "text": "DOWN", "color": "red" } } }
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "DOWN", "color": "red" },
+                "1": { "text": "UP", "color": "green" }
+              }
+            }
           ]
         },
         "overrides": []
       },
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
       "id": 5,
       "targets": [
         {
@@ -167,7 +173,7 @@
       "type": "timeseries",
       "options": {
         "tooltip": { "mode": "multi" },
-        "legend": { "displayMode": "list", "placement": "bottom" }
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] }
       }
     }
   ],

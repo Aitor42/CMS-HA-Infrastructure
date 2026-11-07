@@ -35,7 +35,7 @@ node /^main-cms/ {
   include role::cms_frontend
 }
 
-# Hot-desk workstations (DHCP-provisioned, base config only)
+# Hot-desk workstations (DHCP-provisioned, XFCE desktop via role::hotdesk)
 node /^main-hotdesk/ {
   include role::hotdesk
 }

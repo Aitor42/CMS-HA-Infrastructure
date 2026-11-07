@@ -1,47 +1,63 @@
-# PHASE 10 — TrafficMix, End-to-End Tests, and Jumpstart Shutdown
+# PHASE 10 — Traffic, End-to-End Tests, and Jumpstart Shutdown
 
 ## Objectives to Achieve
 
-- [x] Test traffic generation with TrafficMix from the WAN subnet.
-- [x] Run database queries or management scripts from the integrated hot-desks.
-- [x] Shut down the Jumpstart node and demonstrate full system survival.
+- [x] Generate HTTP load against the CMS.
+- [x] Run the functional end-to-end checks.
+- [ ] Record a jumpstart-shutdown run proving the stack keeps serving (procedure below; implementation alone is not evidence).
 
 ---
 
 ## Technical Implementation
 
-### TrafficMix Script
+### Load profile (`cms-ha traffic`)
 
-> **Current implementation:** `cms-ha traffic` runs a **k6** profile
-> (`templates/traffic/cms-smoke.js`) inside a pinned `grafana/k6` container and
-> reports RPS, p95/p99 and error rate (optionally streamed to Prometheus).
-> ```bash
-> ./cms-ha traffic --external --duration 120
-> ./cms-ha traffic --internal --duration 60 --with-db
-> ```
-> The v1 shell script `scripts/11_traffic_mix.sh` shown below is **deprecated**
-> (reference only, see `scripts/README.md`).
+`cms-ha traffic` runs a k6 profile (`templates/traffic/cms-smoke.js`) inside a
+pinned `grafana/k6` container and reports RPS, p50/p95/p99 and error rate. With
+`traffic.prometheus_rw_url` set in `config.yaml`, the metrics stream into
+Prometheus and appear on the HA Overview dashboard during the run.
 
-The legacy script `scripts/11_traffic_mix.sh` generates simulated traffic against the CMS web infrastructure. It supports two modes:
-
-**External Mode** (simulates client traffic from the Internet):
 ```bash
-./scripts/11_traffic_mix.sh --external --target <ROUTER_WAN_IP> --duration 120
+# Through the keepalived VIP (default)
+./cms-ha traffic --duration 120
+
+# From the internal network against a CMS frontend, plus a DB round-trip
+./cms-ha traffic --internal --with-db
 ```
 
-**Internal Mode** (runs locally from a hot-desk node):
-```bash
-./scripts/11_traffic_mix.sh --internal --duration 60 --with-db
-```
+### Functional checks (`cms-ha verify`, phase 10)
 
-### Types of Generated Traffic
+`cms-ha verify` adds application-level checks on top of the HTTP checks of
+phase 08, so a green run proves the stack *works*, not only that its units are
+active. `tests/integration/run.sh --with-traffic` adds a short k6 profile after
+it, so CI gates on both.
 
-| Traffic Type | Tool Used | Description |
-|:-------------|:----------|:------------|
-| WordPress Pages | `curl` | HTTP GET requests to `/`, `/wp-login.php`, `/?s=query`, `/feed/`, REST API |
-| Concurrent Load | `ab` (ApacheBench) | Concurrent requests sent to the load balancer |
-| POST Forms | `curl` | Authentication attempts, search POST requests |
-| Database Queries | `mysql` | Direct `SELECT`, `SHOW TABLES` on the MariaDB NodePort |
+| Check | What it proves |
+|:------|:---------------|
+| `CMS pages` | `/wp-login.php` returns the credential form, `/feed/` generates an RSS/Atom document from the database, an asset referenced by the home page is served, and plain HTTP redirects to HTTPS |
+| `CMS REST API` | `/wp-json/` lists its namespaces, `/wp-json/wp/v2/posts` returns the post `wp core install` created, and that post's permalink renders as HTML through the VIP |
+| `CMS frontends` | Each frontend's own `wp-cli` finds WordPress installed and counts posts, and the uploads directory is the NFS export instead of local disk |
+| `PHP security patch` | Each frontend meets the configured PHP package floor, disables upload-progress tracking, enforces Apache `memory_limit 128M` and uses prefork `ServerLimit 4` / `MaxRequestWorkers 4` in the enabled configurations |
+| `Load balancers` | Each load balancer answers the site directly, so a broken backup node does not stay hidden behind the VIP |
+| `MariaDB` | The NodePort is reachable and a SQL round-trip reads `wp_posts`/`wp_options` and writes a throwaway table, proving the database accepts writes |
+| `Backup store` | A cluster node reaches the Garage S3 API on the hypervisor (expects `403`), so a host-only store fails here instead of in the nightly backup |
+| `Prometheus probes` | The alert rules are loaded and every `blackbox_exporter` probe of the VIP and the frontends reports success |
+| `Grafana` | The datasource and at least one dashboard are provisioned |
+
+### Acceptance and Timing Scope
+
+The integration driver uses `test failover --require-all` with combined
+stdout/stderr logs and `failover.json`. A `SKIP` is missing coverage and fails
+acceptance; partial or failed runs are not passes merely because artifacts exist.
+Scenario durations include preflight and node restoration, not the CMS outage
+interval. The backup restore duration includes S3 download and ephemeral DB
+recovery/validation, not production CMS recovery. Neither metric proves CMS RTO.
+
+On a release tag, reusable CI and the full hosted ISO/PXE gate must succeed
+against that SHA **before** build/sign/publication. Chaos and teardown are
+required; cloud iteration or provision-only runs do not replace this gate.
+Hosted diagnostics and uploads run even after failure, before teardown, with
+30-day retention. See [MANUAL integration guidance](../MANUAL.md#37-end-to-end-integration-test).
 
 ### Jumpstart Node Shutdown Test
 
@@ -53,30 +69,18 @@ ssh ubuntu@192.168.10.11 "sudo -H kubectl get nodes"
 # 2. Shut down the jumpstart provisioning node
 sudo virsh shutdown jumpstart
 
-# 3. Verify that the entire CMS infrastructure CONTINUES functioning
-curl -sk https://192.168.20.100/           # CMS remains accessible
-ssh ubuntu@192.168.10.11 "sudo -H kubectl get nodes"  # K3s cluster operational
-ssh ubuntu@192.168.10.11 "sudo -H kubectl get pods -n cms"  # MariaDB running
+# 3. Verify that the CMS keeps serving
+curl -sk https://192.168.20.100/                             # CMS accessible
+ssh ubuntu@192.168.10.11 "sudo -H kubectl get nodes"         # cluster operational
+ssh ubuntu@192.168.10.11 "sudo -H kubectl get pods -n cms"   # MariaDB running
 
 # 4. Generate post-shutdown traffic
-./scripts/11_traffic_mix.sh --internal --duration 30
+./cms-ha traffic --internal --duration 30
 ```
 
 ### Expected Results
 
-- The CMS continues responding normally after shutting down the jumpstart server.
-- Prometheus/Grafana metrics continue to be scraped and displayed.
-- The K3s cluster remains fully operational with all 4 nodes.
-- Only node provisioning capability (Cobbler/PXE) is offline.
-
-### Verification
-
-```bash
-# View TrafficMix report
-./scripts/11_traffic_mix.sh --internal --duration 60
-
-# The script outputs:
-# - Total requests executed
-# - Successful vs failed requests
-# - Request rate (reqs/sec) if ab is used
-```
+- The CMS keeps responding after the jumpstart server is shut down.
+- Prometheus/Grafana keep scraping and displaying metrics.
+- All five K3s nodes stay `Ready`.
+- Provisioning (Cobbler/PXE), Puppet Server, internal DNS/NTP and step-ca are offline; existing CMS service may continue, but configuration convergence and certificate renewal require jumpstart. Restore it before maintenance/resume.

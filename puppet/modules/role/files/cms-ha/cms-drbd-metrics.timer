@@ -1,0 +1,11 @@
+[Unit]
+Description=Publish DRBD replication health to node_exporter every minute
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=1min
+AccuracySec=1s
+Unit=cms-drbd-metrics.service
+
+[Install]
+WantedBy=timers.target
