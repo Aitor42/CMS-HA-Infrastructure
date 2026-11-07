@@ -177,15 +177,24 @@ follow-up that needs a live cluster to validate safely.
    *No direct root access*). Mitigated by the dedicated account, key-only auth,
    disabled root logins and sudo logging.
 2. **Kubernetes `misconfig` HIGH findings (Trivy `KSV-0014`, `KSV-0118`)** on
-   the MariaDB StatefulSet and the backup/restore CronJobs. The official
-   `mariadb` image needs a **writable root filesystem** and a **root
-   entrypoint** (it chowns the datadir and then drops to `mysql`), so
-   `readOnlyRootFilesystem: true` / `runAsNonRoot: true` cannot be added
+   the MariaDB StatefulSet, the database-init Job and the backup/restore
+   CronJobs. The official `mariadb` image needs a **writable root filesystem**
+   and a **root entrypoint** (it chowns the datadir and then drops to `mysql`),
+   so `readOnlyRootFilesystem: true` / `runAsNonRoot: true` cannot be added
    safely without a live cluster to validate the datadir ownership and the
-   emptyDir mounts. The scan stays **enabled and visible** (report-only) so the
-   debt is not hidden; hardening is a follow-up to be done against real
-   hardware.
-3. **Fencing trust path.** The automatic path authenticates as the current OS
+   emptyDir mounts. The upload/restore containers also write a root-owned
+   node-exporter textfile, so they run as root by design. The scan stays
+   **enabled and visible** (report-only) so the debt is not hidden; hardening
+   is a follow-up to be done against real hardware. Trivy also scans
+   `kubernetes/overlays/lab/mariadb-labels.patch.yaml` as if it were a complete
+   StatefulSet; that `KSV-0118` is a partial-file false positive, because the
+   real security context would be inherited from the base manifest the patch
+   overlays.
+3. **Prometheus RBAC is deliberately minimal.** The ClusterRole grants only
+   `get` on `nodes/metrics` plus the `/metrics` non-resource URL. It does not
+   grant `nodes/proxy`, pod/service/endpoint discovery or any write access:
+   Prometheus uses static targets and talks to the kubelet directly on `:10250`.
+4. **Fencing trust path.** The automatic path authenticates as the current OS
    account on the hypervisor. Its dedicated key has a forced command and
    forwarding/PTY restrictions; only exact `destroy`/`domstate` requests for
    the two DRBD peers are allowed (not the third quorum-only master). Host keys are pinned from trusted local
@@ -193,11 +202,11 @@ follow-up that needs a live cluster to validate safely.
    sudo rights are still required; a dedicated account and narrow sudo policy
    remain recommended deployment-specific hardening. Custom commands are not
    covered by the automatic restrictions. See the [fencing migration procedure](MANUAL.md#71-master-1-failure-drbdk3s-primary).
-4. **Resource limits are not a complete DoS defense.** PHP is limited to 128M
+5. **Resource limits are not a complete DoS defense.** PHP is limited to 128M
    per request and Apache prefork to four workers. Native allocations, other
    services and workload behavior still need measurement. Package patching is
    required regardless of those limits; HTTP body size does not bound memory.
-5. **VM disk images are mode `0600` and rely on libvirt dynamic ownership.**
+6. **VM disk images are mode `0600` and rely on libvirt dynamic ownership.**
    The deploy account and the qemu account are different users. The init-vms
    preflight reads `/etc/libvirt/qemu.conf` and fails if `dynamic_ownership` is
    explicitly disabled; libvirt then chowns each disk to qemu when the domain
@@ -206,7 +215,7 @@ follow-up that needs a live cluster to validate safely.
    `vm.storage_dir`, so disks created by `virt-install` inherit the same
    protection. A multi-user host that cannot use dynamic ownership must
    replace this with an ACL scoped to the qemu account.
-6. **K3s still uses the upstream `https://get.k3s.io` setup script.** The
+7. **K3s still uses the upstream `https://get.k3s.io` setup script.** The
    binary itself is now pinned to `v1.29.9+k3s1`, downloaded directly from the
    release, verified against a SHA-256 in the repository, and installed before
    the script runs; `INSTALL_K3S_SKIP_DOWNLOAD=true` prevents the script from
