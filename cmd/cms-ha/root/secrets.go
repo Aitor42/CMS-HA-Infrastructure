@@ -163,7 +163,7 @@ database/WordPress/CA credentials with their own procedures after rekeying.`,
 			if err != nil {
 				return fmt.Errorf("read config before rotation: %w", err)
 			}
-			if err := os.WriteFile(backupPath, configData, 0600); err != nil {
+			if err := os.WriteFile(backupPath, configData, 0600); err != nil { // #nosec G703 -- backup path is derived from the operator-supplied config path
 				return fmt.Errorf("back up config to %s: %w", backupPath, err)
 			}
 
@@ -276,7 +276,7 @@ func installPendingAgeKey(pendingPath, publicKey string) (installed, backup stri
 	if err := os.Chmod(defaultKey, 0600); err != nil {
 		return defaultKey, backup, fmt.Errorf("secure installed age key: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(keyDir, "age.pub"), []byte(publicKey+"\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(keyDir, "age.pub"), []byte(publicKey+"\n"), 0600); err != nil { // #nosec G703 -- key directory is the operator's config directory
 		return defaultKey, backup, fmt.Errorf("write age public key: %w", err)
 	}
 	return defaultKey, backup, nil

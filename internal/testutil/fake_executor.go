@@ -151,6 +151,11 @@ func (f *FakeExecutor) CopyDir(_ context.Context, host, localDir, remoteDir stri
 	f.mu.Lock()
 	f.CopiedDirs = append(f.CopiedDirs, Command{Host: host, Cmd: localDir + " -> " + remoteDir})
 	f.mu.Unlock()
+	root, err := os.OpenRoot(localDir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	return filepath.Walk(localDir, func(localPath string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -162,7 +167,7 @@ func (f *FakeExecutor) CopyDir(_ context.Context, host, localDir, remoteDir stri
 		if err != nil {
 			return err
 		}
-		content, err := os.ReadFile(filepath.Clean(localPath)) // #nosec G304 -- test helper reading a test path
+		content, err := root.ReadFile(rel)
 		if err != nil {
 			return err
 		}

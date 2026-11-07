@@ -738,10 +738,11 @@ func fenceSafePath(path string, directory, private bool) error {
 	if !ok {
 		return fmt.Errorf("cannot read ownership for fencing path: %s", path)
 	}
-	uid := uint32(os.Getuid())
+	uid := int64(os.Getuid())
+	ownerUID := int64(stat.Uid)
 	unsafeMode := info.Mode().Perm()&0022 != 0
 
-	if info.Mode()&os.ModeSymlink != 0 || info.IsDir() != directory || (!directory && !info.Mode().IsRegular()) || unsafeMode || (private && stat.Uid != uid) || (!private && stat.Uid != uid && stat.Uid != 0) {
+	if info.Mode()&os.ModeSymlink != 0 || info.IsDir() != directory || (!directory && !info.Mode().IsRegular()) || unsafeMode || (private && ownerUID != uid) || (!private && ownerUID != uid && ownerUID != 0) {
 		return fmt.Errorf("unsafe fencing path (ownership, type or permissions): %s", path)
 	}
 	if private && !directory && info.Mode().Perm()&0077 != 0 {

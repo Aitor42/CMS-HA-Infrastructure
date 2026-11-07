@@ -124,7 +124,9 @@ func planCobblerNetwork(detail config.NetworkDetail, defaultDomain string) (cobb
 }
 
 func ipv4String(v uint32) string {
-	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return net.IP(b[:]).String()
 }
 
 // cobblerTemplateReplacer builds the renderer used for both uploaded template

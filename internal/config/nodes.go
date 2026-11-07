@@ -134,15 +134,15 @@ func HostAddress(cidr string, offset uint32) (string, error) {
 	network := binary.BigEndian.Uint32(ip)
 	mask := binary.BigEndian.Uint32(ipnet.Mask)
 	broadcast := network | ^mask
-	addr := uint64(network) + uint64(offset)
-	if offset == 0 || addr <= uint64(network) || addr >= uint64(broadcast) {
+	addr := network + offset
+	if offset == 0 || addr <= network || addr >= broadcast {
 		first, last, _, rangeErr := UsableHostRange(cidr)
 		if rangeErr != nil {
 			return "", rangeErr
 		}
 		return "", fmt.Errorf("offset %d is outside the usable range of %q (%s-%s)", offset, cidr, first, last)
 	}
-	return formatIPv4(uint32(addr)), nil
+	return formatIPv4(addr), nil
 }
 
 // UsableHostRange returns the first and last usable IPv4 host addresses of an
@@ -169,7 +169,9 @@ func UsableHostRange(cidr string) (first, last string, prefix int, err error) {
 }
 
 func formatIPv4(v uint32) string {
-	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v)).String()
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return net.IP(b[:]).String()
 }
 
 // PrimaryLB returns the first load balancer node (the keepalived MASTER
