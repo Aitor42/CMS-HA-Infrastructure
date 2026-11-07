@@ -152,6 +152,11 @@ func readProfile(path, module string) (map[string][]block, error) {
 	defer f.Close()
 
 	out := make(map[string][]block)
+	// -coverpkg=./... profiles the same source span once per test binary, so
+	// a line can appear several times with different counts. Keep the highest
+	// count per span; otherwise a package that merely imports the file but
+	// never executes that line would mask the test binary that did.
+	index := make(map[string]map[[2]int]int)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -187,6 +192,18 @@ func readProfile(path, module string) (map[string][]block, error) {
 				file = rel
 			}
 		}
+		key := [2]int{start, end}
+		if indexes := index[file]; indexes != nil {
+			if i, ok := indexes[key]; ok {
+				if count > out[file][i].count {
+					out[file][i].count = count
+				}
+				continue
+			}
+		} else {
+			index[file] = make(map[[2]int]int)
+		}
+		index[file][key] = len(out[file])
 		out[file] = append(out[file], block{start: start, end: end, count: count})
 	}
 	if err := scanner.Err(); err != nil {

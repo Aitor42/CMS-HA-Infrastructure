@@ -40,6 +40,32 @@ func TestReadProfile(t *testing.T) {
 	}
 }
 
+func TestReadProfileMergesDuplicateSpans(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "coverage.out")
+	content := "mode: set\n" +
+		"github.com/Aitor42/CMS-HA-Infrastructure/internal/config/a.go:10.1,12.2 2 0\n" +
+		"github.com/Aitor42/CMS-HA-Infrastructure/internal/config/a.go:10.1,12.2 2 3\n" +
+		"github.com/Aitor42/CMS-HA-Infrastructure/internal/config/a.go:20.1,22.2 1 1\n" +
+		"github.com/Aitor42/CMS-HA-Infrastructure/internal/config/a.go:20.1,22.2 1 0\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	got, err := readProfile(path, "github.com/Aitor42/CMS-HA-Infrastructure")
+	if err != nil {
+		t.Fatalf("readProfile: %v", err)
+	}
+	blocks := got["internal/config/a.go"]
+	if len(blocks) != 2 {
+		t.Fatalf("got %d blocks, want 2 merged spans: %+v", len(blocks), blocks)
+	}
+	if blocks[0] != (block{start: 10, end: 12, count: 3}) {
+		t.Fatalf("first block = %+v, want highest count 3", blocks[0])
+	}
+	if blocks[1] != (block{start: 20, end: 22, count: 1}) {
+		t.Fatalf("second block = %+v, want highest count 1", blocks[1])
+	}
+}
+
 func TestChangedCoverageMissingProfile(t *testing.T) {
 	tests := []struct {
 		name, path, source string
