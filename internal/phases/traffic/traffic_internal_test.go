@@ -75,7 +75,7 @@ func TestRunDBCheckRequiresAMaster(t *testing.T) {
 }
 
 func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
-	args := buildArgs("grafana/k6:0.55.0", k6Run{
+	args := buildArgs("grafana/k6:2.3.0", k6Run{
 		baseURL:  "https://192.168.20.100",
 		vhost:    "cms.example.test",
 		caCert:   hostCACertPath,
@@ -93,7 +93,7 @@ func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
 		"-e SSL_CERT_FILE=" + containerCACert,
 		"-e K6_PROMETHEUS_RW_SERVER_URL=http://192.168.10.20:9090/api/v1/write",
 		"-e K6_PROMETHEUS_RW_TREND_STATS=p(50),p(95),p(99)",
-		"grafana/k6:0.55.0 run",
+		"grafana/k6:2.3.0 run",
 		"--vus 7",
 		"--duration 90s",
 		"--out experimental-prometheus-rw",
@@ -111,7 +111,7 @@ func TestBuildArgs_WithCAStreamsToPrometheus(t *testing.T) {
 }
 
 func TestBuildArgs_NoCASkipsTLSVerification(t *testing.T) {
-	args := buildArgs("grafana/k6:0.55.0", k6Run{
+	args := buildArgs("grafana/k6:2.3.0", k6Run{
 		baseURL:  "https://192.168.20.100",
 		vhost:    "cms.example.test",
 		vus:      5,

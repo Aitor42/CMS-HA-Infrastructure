@@ -159,7 +159,7 @@ class role::monitor {
   # Refresh the Grafana index whenever the installed version is not the pinned
   # one. Checking only that the package is present made a pin change install
   # from a stale index (or fail because the version was not in it yet).
-  $grafana_version = '13.2.4'
+  $grafana_version = '13.3.0'
 
   exec { 'grafana-apt-update':
     command => '/usr/bin/apt-get update',

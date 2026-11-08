@@ -214,7 +214,7 @@ type BackupConfig struct {
 	// Engine selects the object-store implementation. Only "garage" is
 	// supported today; "" disables backup provisioning entirely.
 	Engine string `yaml:"engine"`
-	// GarageVersion is the pinned image tag (e.g. "v2.4.1").
+	// GarageVersion is the pinned image tag (e.g. "v2.5.0").
 	GarageVersion string `yaml:"garage_version"`
 	// DataDir is the hypervisor directory holding Garage data/metadata. It must
 	// live outside the DRBD device so a split-brain cannot take the copies.

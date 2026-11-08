@@ -21,7 +21,7 @@ func TestTraffic_VHostDefault(t *testing.T) {
 
 func TestTraffic_K6ImageDefault(t *testing.T) {
 	cfg := &config.Config{}
-	if got := cfg.K6Image(); got != "grafana/k6:0.55.0" {
+	if got := cfg.K6Image(); got != "grafana/k6:2.3.0" {
 		t.Fatalf("K6Image() default = %q", got)
 	}
 	cfg.Traffic.K6Version = "0.60.0"

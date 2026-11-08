@@ -6,7 +6,7 @@
 # the infrastructure. Run `make help` to see all available commands.
 #
 # Prerequisites:
-#   - Go 1.26+ installed
+#   - Go 1.27+ installed
 #   - KVM/QEMU + libvirt installed on the host
 #   - SSH key at ~/.ssh/id_ed25519_gar
 #   - Ubuntu 24.04 Server ISO (for initial deployment only)
@@ -313,7 +313,7 @@ lint-k8s: ## Validate non-empty rendered Kustomize roots with kubeconform
 	for root in overlays/lab backups jobs monitoring; do \
 		echo "  · $(K8S_DIR)/$$root"; \
 		kustomize build "$(K8S_DIR)/$$root" > "$$tmp/rendered.yaml"; \
-		kubeconform -strict -summary -output json -kubernetes-version 1.29.0 "$$tmp/rendered.yaml" > "$$tmp/result.json" || { cat "$$tmp/result.json"; exit 1; }; \
+		kubeconform -strict -summary -output json -kubernetes-version 1.37.2 "$$tmp/rendered.yaml" > "$$tmp/result.json" || { cat "$$tmp/result.json"; exit 1; }; \
 		cat "$$tmp/result.json"; \
 		python3 -c 'import json, sys; s = json.load(open(sys.argv[1]))["summary"]; ok = s["valid"] > 0 and all(s[k] == 0 for k in ("invalid", "errors", "skipped")); sys.exit(0 if ok else "Expected >0 valid resources and no invalid, errored or skipped resources")' "$$tmp/result.json"; \
 	done

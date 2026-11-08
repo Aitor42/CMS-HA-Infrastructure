@@ -13,7 +13,7 @@
 ### Monitor Node (192.168.10.20)
 
 - **Prometheus 2.x:** Metrics collection (scraping) and storage engine
-- **Grafana 13.2.4:** Data visualization and dashboard platform
+- **Grafana 13.3.0:** Data visualization and dashboard platform
 
 ### node_exporter
 

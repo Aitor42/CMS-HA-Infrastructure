@@ -23,11 +23,11 @@ This project covers the **design, implementation, and automated provisioning** o
 | **Database** | MariaDB 10.11 image pinned by digest | WordPress-compatible database; data replicated at the block layer, not multiple SQL writers |
 | **Web Server (Frontends)** | Apache 2.4.x + PHP 8.3.x | Native WordPress compatibility (`.htaccess`, `mod_rewrite`), mature module ecosystem |
 | **Load Balancer** | Nginx, Ubuntu APT package | Reverse proxy with passive upstream failure checks and a keepalived VIP |
-| **Container Orchestrator** | K3s v1.29.9+k3s1 | Lightweight Kubernetes distribution, ideal for resource-constrained environments |
+| **Container Orchestrator** | K3s v1.37.2+k3s1 | Lightweight Kubernetes distribution, ideal for resource-constrained environments |
 | **Block Replication** | DRBD kernel module + APT utilities | Synchronous Protocol C replication; end-to-end data durability/RPO must be validated under the specified failures |
 | **Bare-metal Provisioning** | Cobbler, APT package | PXE + autoinstall for fully unattended Ubuntu deployment across all nodes |
 | **Configuration Management** | Puppet 8.x | Declarative, idempotent configuration with an agent/server model |
-| **Observability** | Prometheus (APT) + Grafana 13.2.4 | Industry-standard monitoring stack with exporters for every service layer |
+| **Observability** | Prometheus (APT) + Grafana 13.3.0 | Industry-standard monitoring stack with exporters for every service layer |
 | **Firewall** | UFW | iptables abstraction layer — auditable, scriptable, and easy to maintain |
 
 The network is segmented into two subnets (`internal` and `main`) connected by a UFW router/firewall. The Jumpstart node (Cobbler + Puppet Server) has dual-homed presence in both networks to provision all nodes.
@@ -89,16 +89,16 @@ The entire deployment is executed from a **single entry point**: `./cms-ha deplo
 
 | Technology | Version | Role in the Project |
 |:-----------|:--------|:--------------------|
-| **Go CLI (`cms-ha`)**| 1.26+ | Unified CLI orchestrator, connection pooling & concurrency manager |
+| **Go CLI (`cms-ha`)**| 1.27+ | Unified CLI orchestrator, connection pooling & concurrency manager |
 | **Cobbler** | APT package (not pinned) | Zero-touch bare-metal provisioning (PXE + autoinstall) |
 | **Puppet** | 8.x | Idempotent configuration management (server + agents) |
 | **Nginx** | Ubuntu APT package (not pinned) | Reverse proxy load balancing with health checks |
-| **K3s** | v1.29.9+k3s1 | Lightweight Kubernetes HA clustering |
+| **K3s** | v1.37.2+k3s1 | Lightweight Kubernetes HA clustering |
 | **MariaDB** | 10.11.x | SQL database for WordPress (Kubernetes StatefulSet) |
 | **WordPress** | Unpinned bootstrap archive | Content Management System (CMS) |
 | **Apache** | 2.4.x | Web server for CMS frontends |
 | **Prometheus** | Ubuntu APT package (not pinned) | Infrastructure and service metrics collection |
-| **Grafana** | 13.2.4 | Metrics visualisation and operational dashboards |
+| **Grafana** | 13.3.0 | Metrics visualisation and operational dashboards |
 | **UFW** | — | Network segmentation and per-node firewalling |
 | **DRBD** | Kernel module + APT utilities (not version-pinned) | High availability — synchronous block-level replication |
 

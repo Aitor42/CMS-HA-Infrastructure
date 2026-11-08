@@ -10,9 +10,9 @@ import (
 )
 
 func TestEtcdMemberNames(t *testing.T) {
-	out := "master1 Ready control-plane,etcd,master 5m v1.29.9+k3s1\n" +
-		"master2 Ready control-plane,etcd,master 5m v1.29.9+k3s1\n" +
-		"stale-node Ready control-plane,etcd,master 5m v1.29.9+k3s1\n" +
+	out := "master1 Ready control-plane,etcd,master 5m v1.37.2+k3s1\n" +
+		"master2 Ready control-plane,etcd,master 5m v1.37.2+k3s1\n" +
+		"stale-node Ready control-plane,etcd,master 5m v1.37.2+k3s1\n" +
 		"\n   \n"
 	members := etcdMemberNames(out)
 	for _, want := range []string{"master1", "master2", "stale-node"} {
@@ -63,7 +63,7 @@ func TestIsTransientAPIError(t *testing.T) {
 func TestK3sInstallCommandPinsVerifiedBinary(t *testing.T) {
 	cmd := k3sInstallCommand("server --cluster-init", "", false)
 	for _, want := range []string{
-		"v1.29.9%2Bk3s1/k3s",
+		"v1.37.2%2Bk3s1/k3s",
 		k3sSHA256,
 		"sha256sum -c -",
 		"install -m 0755 \"$tmp\" /usr/local/bin/k3s",
@@ -168,10 +168,10 @@ func TestJoinWorkersResolvesFlannelPerWorker(t *testing.T) {
 }
 
 func TestReadyNodeNames(t *testing.T) {
-	out := "master1 Ready control-plane,etcd 1m v1.29.9+k3s1\n" +
-		"master2 NotReady control-plane,etcd 1m v1.29.9+k3s1\n" +
-		"worker1 Ready <none> 1m v1.29.9+k3s1\n" +
-		"worker2 Ready,SchedulingDisabled <none> 1m v1.29.9+k3s1\n" +
+	out := "master1 Ready control-plane,etcd 1m v1.37.2+k3s1\n" +
+		"master2 NotReady control-plane,etcd 1m v1.37.2+k3s1\n" +
+		"worker1 Ready <none> 1m v1.37.2+k3s1\n" +
+		"worker2 Ready,SchedulingDisabled <none> 1m v1.37.2+k3s1\n" +
 		"\n"
 	ready := readyNodeNames(out)
 	if !ready["master1"] || !ready["worker1"] || !ready["worker2"] {

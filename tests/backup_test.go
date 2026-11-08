@@ -56,7 +56,7 @@ func TestConfig_BackupDefaultsAndValidation(t *testing.T) {
 		if got := cfg.BackupRetentionDays(); got != 7 {
 			t.Errorf("BackupRetentionDays() = %d, want 7", got)
 		}
-		if got := cfg.GarageImage(); got != "dxflrs/garage:v2.4.1" {
+		if got := cfg.GarageImage(); got != "dxflrs/garage:v2.5.0" {
 			t.Errorf("GarageImage() = %q", got)
 		}
 		if got := cfg.BackupDataDir(); got != "/var/lib/cms-garage" {

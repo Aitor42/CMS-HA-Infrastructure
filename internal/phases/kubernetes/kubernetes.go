@@ -27,8 +27,8 @@ const apiRetryBudget = 3 * time.Minute
 // runs the server/agent, but INSTALL_K3S_SKIP_DOWNLOAD=true forces it to use
 // this already-verified binary instead of resolving a channel at runtime.
 const (
-	k3sVersion = "v1.29.9+k3s1"
-	k3sSHA256  = "1d09adc906c16afbc69963b22070401f3c29a2c336368582f92b4330f0c89197"
+	k3sVersion = "v1.37.2+k3s1"
+	k3sSHA256  = "265b3ee6a3198ef14033c63ef46cbb32370d83795199fb6d1b01f21575eddbda"
 )
 
 // k3sInstallCommand downloads the pinned K3s binary, verifies its SHA-256 and

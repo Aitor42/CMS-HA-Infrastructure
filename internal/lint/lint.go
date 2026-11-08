@@ -87,7 +87,7 @@ func RunLints(ctx context.Context, opts Options) error {
 		{
 			name:    "kubeconform",
 			cmd:     "kubeconform",
-			args:    []string{"-strict", "-summary", "-skip", "Kustomization", "-ignore-filename-pattern", `\.patch\.yaml$`, "-kubernetes-version", "1.29.0", k8sDir},
+			args:    []string{"-strict", "-summary", "-skip", "Kustomization", "-ignore-filename-pattern", `\.patch\.yaml$`, "-kubernetes-version", "1.37.2", k8sDir},
 			enabled: (opts.All || opts.K8s) && dirExists(k8sDir),
 		},
 		{

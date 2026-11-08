@@ -4,7 +4,7 @@
 
 [![Stack](https://img.shields.io/badge/Stack-Cobbler_%7C_Puppet_%7C_K3s_%7C_DRBD_%7C_Prometheus-0078D4?style=for-the-badge)](docs/SOFTWARE_BASELINE.md)
 [![Nodes](https://img.shields.io/badge/Nodes-16_VMs-green?style=for-the-badge)]()
-[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=for-the-badge&logo=go)](cmd/cms-ha/)
+[![Go](https://img.shields.io/badge/Go-1.27+-00ADD8?style=for-the-badge&logo=go)](cmd/cms-ha/)
 [![IaC](https://img.shields.io/badge/IaC-Ansible_%7C_Go_CLI-blueviolet?style=for-the-badge)](ansible/)
 [![CI](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=for-the-badge)](.github/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
@@ -132,7 +132,7 @@ graph TB
 | Operating System | Ubuntu Server | 24.04 LTS | Base OS for all nodes |
 | Bare-metal Provisioning | Cobbler | APT package (not pinned) | PXE + autoinstall for unattended deployment |
 | Configuration Management | Puppet | 8.x | Declarative, agent-based configuration |
-| Container Orchestration | K3s | v1.29.9+k3s1 | Lightweight Kubernetes for HA clustering |
+| Container Orchestration | K3s | v1.37.2+k3s1 | Lightweight Kubernetes for HA clustering |
 | Database | MariaDB | 10.11.x | StatefulSet inside K3s cluster |
 | CMS | WordPress | `latest.tar.gz` at bootstrap (not pinned) | Content Management System |
 | Web Server | Apache | Ubuntu APT package (not pinned) | CMS frontend server with PHP 8.3 |
@@ -140,10 +140,10 @@ graph TB
 | Block Replication | DRBD | Kernel module + APT utilities (not version-pinned) | Synchronous Protocol C replication |
 | Metrics Collection | Prometheus | Ubuntu APT package (not pinned) | Time-series monitoring with exporters |
 | Alerting | Prometheus alert rules (19) + Alertmanager | Ubuntu APT packages (not pinned) | Availability, DRBD/etcd quorum, keepalived, service & backup health; routed and deduplicated by Alertmanager |
-| Dashboards | Grafana | 13.2.4 | Metrics visualisation and dashboards |
+| Dashboards | Grafana | 13.3.0 | Metrics visualisation and dashboards |
 | Firewall | UFW | — | Perimeter and per-node iptables rules |
 | PKI / TLS | step-ca | 0.30.2 | Internal Certificate Authority |
-| Infrastructure Provisioning (optional) | Ansible + community.libvirt | CI: ansible-core 2.21.5; collection ≥ 1.2.0 | Optional declarative network/VM creation; default is Go `init-vms` |
+| Infrastructure Provisioning (optional) | Ansible + community.libvirt | CI: ansible-core 2.22.0; collection 2.4.0 | Optional declarative network/VM creation; default is Go `init-vms` |
 | Virtualisation | KVM / QEMU / libvirt | — | Hypervisor and VM management |
 
 > Full software inventory with versions, dependencies, and download URLs: [`docs/SOFTWARE_BASELINE.md`](docs/SOFTWARE_BASELINE.md)
@@ -225,7 +225,7 @@ CMS-HA-Infrastructure/
 ### Prerequisites
 
 - Linux host (AMD64) with **KVM/QEMU** and **libvirt** installed
-- **Go 1.26+** (for building from source) or download the pre-built binary
+- **Go 1.27+** (for building from source) or download the pre-built binary
 - At least **16 GB RAM** (27 GB recommended for full deployment)
 - Ubuntu 24.04 Server ISO
 - SSH key pair for cluster management
@@ -379,7 +379,7 @@ Example output from a fully converged environment:
 ✓ Phase 05 - Prometheus & Grafana: [PASS]
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
-✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v13.2.4))
+✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v13.3.0))
 ✓ Phase 10 - Stack functional checks (CMS pages, REST API, frontends, load balancers, MariaDB, backup store, probes, Grafana): [PASS]
 ✓ Completed phase: Infrastructure Verification in 21.37s
 ```

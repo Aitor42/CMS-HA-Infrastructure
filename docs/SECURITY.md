@@ -110,7 +110,7 @@ misconfiguration findings blocking.
 
 Dependencies are kept current: `golang.org/x/crypto` is pinned at **v0.56.0**
 or newer, which clears GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`).
-`go.mod` requires Go **1.26**.
+`go.mod` requires Go **1.27**.
 
 ---
 
@@ -216,7 +216,7 @@ follow-up that needs a live cluster to validate safely.
    protection. A multi-user host that cannot use dynamic ownership must
    replace this with an ACL scoped to the qemu account.
 7. **K3s still uses the upstream `https://get.k3s.io` setup script.** The
-   binary itself is now pinned to `v1.29.9+k3s1`, downloaded directly from the
+   binary itself is now pinned to `v1.37.2+k3s1`, downloaded directly from the
    release, verified against a SHA-256 in the repository, and installed before
    the script runs; `INSTALL_K3S_SKIP_DOWNLOAD=true` prevents the script from
    resolving a different patch. The remaining risk is the setup script itself
