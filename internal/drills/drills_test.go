@@ -101,3 +101,73 @@ func TestRunDrillsSkipsTheBackupDrillWhenBackupsAreDisabled(t *testing.T) {
 		}
 	}
 }
+
+// stubLBProbe replaces the reachability probe with a stub and restores the
+// production one when the test finishes.
+func stubLBProbe(t *testing.T, stub func(ctx context.Context, lbIP, vhost string) bool) {
+	t.Helper()
+	previous := lbProbe
+	lbProbe = stub
+	t.Cleanup(func() { lbProbe = previous })
+}
+
+func TestWaitLBAnswersRetriesUntilTheBalancerAnswers(t *testing.T) {
+	// The first probe can land inside the nginx reload window right after the
+	// renewal (run 42482654972); the drill must poll, not fail on the first
+	// unanswered attempt.
+	attempts := 0
+	stubLBProbe(t, func(context.Context, string, string) bool {
+		attempts++
+		return attempts >= 3
+	})
+
+	if !waitLBAnswers(t.Context(), "192.168.20.104", "cms.fake-enterprise.com", 10*time.Second, time.Millisecond) {
+		t.Fatal("waitLBAnswers() = false, want it to succeed once the balancer answers")
+	}
+	if attempts < 3 {
+		t.Errorf("probe attempts = %d, want at least the 3 retries", attempts)
+	}
+}
+
+func TestWaitLBAnswersReportsUnreachableAfterTheBudget(t *testing.T) {
+	stubLBProbe(t, func(context.Context, string, string) bool { return false })
+
+	if waitLBAnswers(t.Context(), "192.168.20.104", "cms.fake-enterprise.com", 50*time.Millisecond, time.Millisecond) {
+		t.Fatal("waitLBAnswers() = true, want false when the balancer never answers")
+	}
+}
+
+func TestRunTLSRenewalDrillRotatesTheCertificateAndWaitsForHTTPS(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Nodes.LBs = []config.NodeDetail{{Name: "main-lb2", IP: "192.168.20.104"}}
+	serials := 0
+	fake := &testutil.FakeExecutor{RunFunc: func(_ context.Context, _, cmd string) (string, string, int, error) {
+		switch {
+		case strings.Contains(cmd, "openssl x509"):
+			serials++
+			if serials == 1 {
+				return "serial=0aaaaa", "", 0, nil
+			}
+			return "serial=0bbbbb", "", 0, nil
+		case strings.Contains(cmd, "cms-tls-renew.sh"):
+			return "cms-tls-renew: certificate renewed and nginx reloaded", "", 0, nil
+		default:
+			return "", "", 0, nil
+		}
+	}}
+	stubLBProbe(t, func(context.Context, string, string) bool { return true })
+
+	if err := runTLSRenewalDrill(t.Context(), cfg, fake); err != nil {
+		t.Fatalf("runTLSRenewalDrill() = %v", err)
+	}
+	commands := make([]string, 0, len(fake.Commands))
+	for _, c := range fake.Commands {
+		commands = append(commands, c.Cmd)
+	}
+	if len(commands) != 4 {
+		t.Fatalf("commands = %d (%v), want serial, renew, serial and is-active", len(commands), commands)
+	}
+	if !strings.Contains(commands[1], "RENEW_FORCE=1") {
+		t.Errorf("renewal command = %q, want the forced production script", commands[1])
+	}
+}

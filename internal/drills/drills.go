@@ -146,6 +146,39 @@ func deleteJob(ctx context.Context, pool ssh.Executor, host, name string) {
 	}
 }
 
+// lbProbe is a variable so tests can stub reachability; production always
+// probes with httpcheck.LBReachable.
+var lbProbe = httpcheck.LBReachable
+
+// The renewal reloads nginx before the drill asserts HTTPS. A single probe
+// raced the reload window once and failed the drill although the certificate
+// had already rotated (run 42482654972), so the steady-state assertion polls
+// within a budget instead.
+const (
+	probeBudget   = 30 * time.Second
+	probeInterval = 2 * time.Second
+)
+
+// waitLBAnswers polls the reachability probe until the balancer answers or
+// the budget is spent, logging each attempt that has not answered yet.
+func waitLBAnswers(ctx context.Context, lbIP, vhost string, budget, interval time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	for {
+		if lbProbe(ctx, lbIP, vhost) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		logging.Warn("%s did not answer HTTPS yet; retrying for %s", lbIP, time.Until(deadline).Round(time.Second))
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(interval):
+		}
+	}
+}
+
 // runTLSRenewalDrill runs the production renewal script on a balancer in forced
 // mode, so the CA is really contacted over mTLS and the certificate is really
 // rotated. The backup balancer is used so the VIP holder keeps serving the
@@ -177,6 +210,9 @@ func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool ssh.Execut
 	if err != nil || code != 0 {
 		return fmt.Errorf("TLS renewal failed on %s (exit %d): %v\n%s", lb.Name, code, err, combined)
 	}
+	// The output is what the timer would log; keep it in drills.log so a
+	// later assertion failure carries the renewal's own evidence.
+	logging.Info("Drill: renewal output on %s: %s", lb.Name, combined)
 	if strings.Contains(combined, "not renewed") {
 		return fmt.Errorf("TLS renewal on %s did not rotate the certificate:\n%s", lb.Name, combined)
 	}
@@ -190,8 +226,8 @@ func runTLSRenewalDrill(ctx context.Context, cfg *config.Config, pool ssh.Execut
 	if _, _, code, err := pool.RunCommand(ctx, lb.IP, "systemctl is-active nginx"); err != nil || code != 0 {
 		return fmt.Errorf("nginx is not active on %s after the certificate renewal", lb.Name)
 	}
-	if !httpcheck.LBReachable(ctx, lb.IP, cfg.TrafficVHost()) {
-		return fmt.Errorf("%s does not answer HTTPS after the certificate renewal", lb.Name)
+	if !waitLBAnswers(ctx, lb.IP, cfg.TrafficVHost(), probeBudget, probeInterval) {
+		return fmt.Errorf("%s does not answer HTTPS within %s after the certificate renewal", lb.Name, probeBudget)
 	}
 	logging.Success("Drill: %s rotated its certificate over mTLS and reloaded nginx", lb.Name)
 	return nil
