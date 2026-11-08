@@ -63,16 +63,30 @@ class role::loadbalancer (
   # step CLI is required to renew the CA-issued certificate. Pinned to the same
   # release as pki.step_version in config.yaml (keep the two in sync): the
   # version-independent "latest" alias would silently change what a fresh
-  # balancer installs. `set -e` plus the trailing `test -x` keep a failed
-  # download from exiting 0 and re-running on every convergence.
+  # balancer installs. Download with retries and verify the published SHA-256:
+  # a single transient GitHub/CDN failure must not fail the whole deploy (it
+  # did once on the nightly run), and a truncated/corrupted .deb must never be
+  # installed. `set -e` plus the trailing `test -x` keep a failed download from
+  # exiting 0 and re-running on every convergence.
+  # `$ARCH`/`$SHA` are bash variables, not Puppet facts: the command is a
+  # single-quoted string so Puppet leaves them for the remote shell.
+  # lint:ignore:single_quote_string_with_variables
   exec { 'install-step-cli':
-    command => '/bin/bash -c "set -e; wget -q https://github.com/smallstep/cli/releases/download/v0.31.0/step-cli_0.31.0-1_$(dpkg --print-architecture).deb -O /tmp/step-cli.deb; \
+    command => '/bin/bash -c "set -e; \
+      ARCH=$(dpkg --print-architecture); \
+      case $ARCH in amd64) SHA=dbea61cba1854e07625d8f064d83441c7f9232edd9440bc08a78614dcc8232fc ;; \
+        arm64) SHA=04e93161210667587e5f5c966a46ce09b15a7acca9c1b263fd0d639be72ba670 ;; \
+        *) echo unsupported architecture: $ARCH >&2; exit 1 ;; esac; \
+      wget -q --tries=5 --timeout=30 --waitretry=5 --retry-connrefused \
+        https://github.com/smallstep/cli/releases/download/v0.31.0/step-cli_0.31.0-1_${ARCH}.deb -O /tmp/step-cli.deb; \
+      echo $SHA  /tmp/step-cli.deb | sha256sum -c -; \
       dpkg -i /tmp/step-cli.deb || apt-get install -f -y; rm -f /tmp/step-cli.deb; test -x /usr/bin/step"',
     creates => '/usr/bin/step',
     path    => ['/usr/bin', '/bin', '/usr/sbin', '/sbin'],
     timeout => 300,
     require => Package['nginx'],
   }
+  # lint:endignore
 
   file { '/usr/local/bin/cms-tls-renew.sh':
     ensure  => file,
