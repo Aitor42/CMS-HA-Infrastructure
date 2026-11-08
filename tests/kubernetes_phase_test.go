@@ -44,7 +44,7 @@ func TestKubernetesPhaseRun(t *testing.T) {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
-				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+				return "master1 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nworker1 Ready <none> 1m v1.37.2+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
 			default:
@@ -121,7 +121,7 @@ func TestKubernetesPhaseIgnoresStaleEtcdNode(t *testing.T) {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
-				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+				return "master1 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nworker1 Ready <none> 1m v1.37.2+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				// A stale object from an earlier failed join must not hide a
 				// missing configured member: the phase checks expected names,
@@ -181,7 +181,7 @@ func TestKubernetesPhaseLabelsActualDRBDPrimary(t *testing.T) {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
-				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+				return "master1 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nworker1 Ready <none> 1m v1.37.2+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
 			default:
@@ -212,7 +212,7 @@ func TestKubernetesPhaseReportsPrimaryLabelFailure(t *testing.T) {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
-				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+				return "master1 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nworker1 Ready <none> 1m v1.37.2+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
 			default:
@@ -241,7 +241,7 @@ func TestKubernetesPhaseReportsServerJoinFailure(t *testing.T) {
 			case strings.Contains(cmd, "cat /var/lib/rancher/k3s/server/node-token"):
 				return "K10test::server:token\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes --no-headers"):
-				return "master1 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.29.9+k3s1\nworker1 Ready <none> 1m v1.29.9+k3s1\n", "", 0, nil
+				return "master1 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster2 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nmaster3 Ready control-plane,etcd,master 1m v1.37.2+k3s1\nworker1 Ready <none> 1m v1.37.2+k3s1\n", "", 0, nil
 			case strings.Contains(cmd, "kubectl get nodes -l node-role.kubernetes.io/etcd"):
 				return "master1 Ready control-plane,etcd\nmaster2 Ready control-plane,etcd\nmaster3 Ready control-plane,etcd\n", "", 0, nil
 			default:

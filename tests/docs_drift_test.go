@@ -50,6 +50,18 @@ func TestDocumentationTracksPinnedVersions(t *testing.T) {
 	if !strings.Contains(baseline, "| **K3s** | "+k3sVersion[1]+" |") {
 		t.Fatalf("SOFTWARE_BASELINE.md does not list the pinned K3s version %s", k3sVersion[1])
 	}
+	// The manifest validators must target the same Kubernetes minor as the
+	// pinned K3s release; validating against an older schema hides fields that
+	// the deployed API server would reject.
+	kubeVersion := strings.TrimPrefix(strings.Split(k3sVersion[1], "+")[0], "v")
+	for name, body := range map[string]string{
+		"Makefile":              makefile,
+		"internal/lint/lint.go": read("internal/lint/lint.go"),
+	} {
+		if !strings.Contains(body, kubeVersion) {
+			t.Fatalf("%s does not validate manifests against Kubernetes %s", name, kubeVersion)
+		}
+	}
 
 	readme := read("README.md")
 	for _, stale := range []string{"viper", "internal/templates"} {

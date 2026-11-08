@@ -63,7 +63,7 @@ func runtimeLog(t *testing.T) string {
 func TestGarageRunArgsUseHostNetwork(t *testing.T) {
 	p := &Phase{cfg: testConfig()}
 	joined := strings.Join(p.garageRunArgs(
-		"dxflrs/garage:v2.4.1",
+		"dxflrs/garage:v2.5.0",
 		"/var/lib/cms-garage",
 		"/var/lib/cms-garage/garage.toml",
 		"/var/lib/cms-garage/garage.env",

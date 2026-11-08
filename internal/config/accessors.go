@@ -158,7 +158,7 @@ func (c *Config) FenceCommandsChecked() (off, state string, err error) {
 func (c *Config) K6Image() string {
 	version := c.Traffic.K6Version
 	if version == "" {
-		version = "0.55.0"
+		version = "2.3.0"
 	}
 	return "grafana/k6:" + version
 }
@@ -186,7 +186,7 @@ func (c *Config) BackupEngine() string {
 func (c *Config) GarageImage() string {
 	version := c.Backup.GarageVersion
 	if version == "" {
-		version = "v2.4.1"
+		version = "v2.5.0"
 	}
 	return "dxflrs/garage:" + version
 }

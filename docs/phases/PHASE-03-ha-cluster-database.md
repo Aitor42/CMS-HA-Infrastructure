@@ -21,7 +21,7 @@
 | internal-worker2 | 192.168.10.14 | Agent |
 
 **Installation:**
-- Master 1: the orchestrator downloads the pinned `v1.29.9+k3s1` binary, verifies its SHA-256, installs it, and runs the upstream setup script with `INSTALL_K3S_SKIP_DOWNLOAD=true` and `INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption --node-external-ip 192.168.10.11 --flannel-iface <internal NIC>"` (Secret encryption at rest is enabled from cluster init). The NIC is not hardcoded: before installing, the node runs `ip -o -4 addr show` and selects the interface that owns its configured internal address, so a guest whose NIC order differs (or that has extra networks) still points Flannel at the correct link. The install aborts if no interface owns that address.
+- Master 1: the orchestrator downloads the pinned `v1.37.2+k3s1` binary, verifies its SHA-256, installs it, and runs the upstream setup script with `INSTALL_K3S_SKIP_DOWNLOAD=true` and `INSTALL_K3S_EXEC="server --cluster-init --secrets-encryption --node-external-ip 192.168.10.11 --flannel-iface <internal NIC>"` (Secret encryption at rest is enabled from cluster init). The NIC is not hardcoded: before installing, the node runs `ip -o -4 addr show` and selects the interface that owns its configured internal address, so a guest whose NIC order differs (or that has extra networks) still points Flannel at the correct link. The install aborts if no interface owns that address.
 - Master 2: joins the existing cluster with `--server https://192.168.10.11:6443 --token-file /root/.k3s-join-token` — the join token is uploaded to each joining node as a file with `0600` permissions and never placed on the command line (an argv value would be readable by every local user via `/proc/*/cmdline`). It resolves its own Flannel interface the same way.
 - Master 3: joins as an additional control-plane **server** with the same command, giving the embedded etcd cluster an odd quorum (3 members tolerate 1 failure). It carries no DRBD disk. After all servers join, the phase verifies that the number of nodes labelled `node-role.kubernetes.io/etcd` equals the configured master count — K3s runs etcd inside the server process, so its members are control-plane nodes, not kube-system pods.
 - Workers: join as agents with `K3S_TOKEN_FILE=/root/.k3s-join-token`, so the agent reads the token directly from the protected 0600 file. The secret is never expanded into argv or the systemd environment file. Each worker resolves the Flannel interface from its own internal address before the agent starts, and its join is validated per node (SSH error **and** exit code); a failed join aborts the phase.
@@ -29,7 +29,7 @@
 ### MariaDB Database and Replication (DRBD)
 
 - **Deployed as:** StatefulSet in namespace `cms` of the K3s cluster with 1 replica.
-- **Image:** `mariadb:10.11@sha256:0d0945c57f75b3a3b9ebe71aedaaad005fa5305054e8fca3d2e42a8c92b43b5e` (pinned by digest so a re-tagged `10.11` cannot change the deployed bits).
+- **Image:** `mariadb:10.11@sha256:d769e37960821dfdcf096954f6e7ac89f747e116c1bba98e48edd265dfc7deae` (pinned by digest so a re-tagged `10.11` cannot change the deployed bits).
 - **HA Storage (DRBD):** 3 GiB PersistentVolume (type `hostPath` pointing to `/mnt/data/mariadb`).
   - The `/mnt/data/mariadb` directory is the mount point of the DRBD resource `cms_data` (synchronous block-level replication on `/dev/drbd0` over the `/dev/vdb` disk between the two DRBD master nodes, `internal-master1` and `internal-master2`; the third control-plane server carries no DRBD disk).
   - Only the promoted primary master (`internal-master1` by default) mounts the DRBD volume.
@@ -60,7 +60,7 @@ device**, in an S3-compatible **Garage** store running as a container on the
 hypervisor (`backup` phase), on a data volume under `backup.data_dir`
 (default `/var/lib/cms-garage`).
 
-- **Store:** Garage v2.4.1 (`dxflrs/garage`), single-node/`--default-bucket`,
+- **Store:** Garage v2.5.0 (`dxflrs/garage`), single-node/`--default-bucket`,
   running on the **host network** and bound to the hypervisor's internal
   address (`192.168.10.254:3900`), never on the WAN; the RPC, web and admin
   APIs stay on loopback. Host networking is deliberate: Docker's port

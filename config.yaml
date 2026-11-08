@@ -254,7 +254,7 @@ backup:
   # never takes the copies with it. Set engine: "" to disable provisioning.
   engine: "garage"
   # Pinned image tag (no floating tags).
-  garage_version: "v2.4.1"
+  garage_version: "v2.5.0"
   # Hypervisor directory for Garage data + metadata (outside the DRBD device).
   data_dir: "/var/lib/cms-garage"
   # S3 API port, bound on the hypervisor's internal address only (host network).
@@ -275,7 +275,7 @@ traffic:
   # Load/smoke generator. The custom in-process HTTP generator was replaced by
   # k6, run from a pinned container on the hypervisor (docker/podman required).
   # Pinned image tag (no floating tags).
-  k6_version: "0.55.0"
+  k6_version: "2.3.0"
   # Stream k6 metrics to Prometheus through its remote-write endpoint so RPS,
   # p95/p99 and error rate show up in Grafana. Empty disables the output.
   prometheus_rw_url: "http://192.168.10.20:9090/api/v1/write"

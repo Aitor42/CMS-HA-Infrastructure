@@ -53,7 +53,7 @@ spec:
           initContainers:
             # Dump the database onto the shared staging volume.
             - name: mysqldump
-              image: mariadb:10.11@sha256:0d0945c57f75b3a3b9ebe71aedaaad005fa5305054e8fca3d2e42a8c92b43b5e
+              image: mariadb:10.11@sha256:d769e37960821dfdcf096954f6e7ac89f747e116c1bba98e48edd265dfc7deae
               imagePullPolicy: IfNotPresent
               env:
                 - name: MYSQL_ROOT_PASSWORD
@@ -116,7 +116,7 @@ spec:
             # Upload the fresh dump to the off-DRBD S3 bucket and publish the
             # success metric for the alerting rules.
             - name: upload
-              image: rclone/rclone:1.68.2@sha256:74c51b8817e5431bd6d7ed27cb2a50d8ee78d77f6807b72a41ef6f898845942b
+              image: rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
               imagePullPolicy: IfNotPresent
               securityContext:
                 runAsUser: 0

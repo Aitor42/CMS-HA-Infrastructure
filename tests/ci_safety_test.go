@@ -417,7 +417,7 @@ func TestCISafetyRenderedKubernetes(t *testing.T) {
 			case "render failure":
 				render = "exit 23"
 			}
-			validate := `[[ "$*" == '-strict -summary -output json -kubernetes-version 1.29.0 '* ]] || exit 24
+			validate := `[[ "$*" == '-strict -summary -output json -kubernetes-version 1.37.2 '* ]] || exit 24
 file="${@: -1}"
 [[ "$file" == */rendered.yaml && -f "$file" ]] || exit 25
 while IFS= read -r line; do [[ "$line" != 'kind: Namespace' ]] || found=1; done < "$file"

@@ -125,7 +125,7 @@ func TestPKIAccessors(t *testing.T) {
 
 func TestTrafficAndBackupAccessors(t *testing.T) {
 	c := &Config{}
-	if got := c.K6Image(); got != "grafana/k6:0.55.0" {
+	if got := c.K6Image(); got != "grafana/k6:2.3.0" {
 		t.Fatalf("default k6 image = %q", got)
 	}
 	if got := c.TrafficVHost(); got != "cms.fake-enterprise.com" {
@@ -137,7 +137,7 @@ func TestTrafficAndBackupAccessors(t *testing.T) {
 	if got := c.BackupEngine(); got != "garage" {
 		t.Fatalf("default backup engine = %q", got)
 	}
-	if got := c.GarageImage(); got != "dxflrs/garage:v2.4.1" {
+	if got := c.GarageImage(); got != "dxflrs/garage:v2.5.0" {
 		t.Fatalf("default garage image = %q", got)
 	}
 	if got := c.BackupDataDir(); got != "/var/lib/cms-garage" {

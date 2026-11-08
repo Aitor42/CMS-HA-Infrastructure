@@ -19,9 +19,11 @@ env:
   STATICCHECK_VERSION: "v0.8.2"
   GOVULNCHECK_VERSION: "v1.9.0"
   YAMLLINT_VERSION: "1.38.0"
-  ANSIBLE_CORE_VERSION: "2.21.5"
-  ANSIBLE_LINT_VERSION: "26.10.1"
+  ANSIBLE_CORE_VERSION: "2.22.0"
+  ANSIBLE_LINT_VERSION: "26.11.0"
   PUPPET_LINT_VERSION: "5.1.1"
+  # Puppet 8.10 is validated upstream against Ruby 3.2; keep the parser on the
+  # interpreter the agent actually ships with instead of chasing Ruby releases.
   PUPPET_VERSION: "8.10.0"
   ACTIONLINT_VERSION: "v1.7.12"
   GITLEAKS_VERSION: "8.30.1"
@@ -200,8 +202,8 @@ jobs:
 
       - name: Install kubeconform
         run: |
-          KUBECONFORM_VERSION="v0.6.7"
-          KUBECONFORM_SHA256="95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+          KUBECONFORM_VERSION="v0.8.0"
+          KUBECONFORM_SHA256="9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
           curl -fsSL --retry 3 \
             -o /tmp/kubeconform.tar.gz \
             "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
@@ -210,8 +212,8 @@ jobs:
 
       - name: Install kustomize
         run: |
-          KUSTOMIZE_VERSION="v5.4.3"
-          KUSTOMIZE_SHA256="3669470b454d865c8184d6bce78df05e977c9aea31c30df3c669317d43bcc7a7"
+          KUSTOMIZE_VERSION="v5.8.3"
+          KUSTOMIZE_SHA256="cb9e31198d3f63b44848bd0afc4c8efc56e6cfef9c93a4a39a211940e6decd61"
           curl -fsSL --retry 3 \
             -o /tmp/kustomize.tar.gz \
             "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz"
@@ -271,7 +273,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: '3.12'
+          python-version: '3.13'
 
       - name: Install ansible-core and ansible-lint
         run: |
@@ -330,12 +332,10 @@ jobs:
 
       - name: gosec — Go SAST (fails on HIGH)
         run: |
-          # Pin to the commit that bumps golang.org/x/tools: the v2.29.0
-          # release cannot load the export data of the current Go stable
-          # toolchain and reports spurious "type errors" for every package
-          # (exit 1 with no findings). Revert to @latest once a tagged
-          # release includes the fix.
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261015133444-707f2271f665
+          # v2.30.0 includes the golang.org/x/tools bump that fixes the export
+          # data error reported by v2.29.0; the previous pseudo-version pinned
+          # that same commit. Verified locally against the current toolchain.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           gosec -severity high -confidence medium -exclude-dir=tests -fmt sarif -out gosec.sarif ./...
           echo "✔ gosec: no HIGH findings"
 
@@ -362,6 +362,7 @@ jobs:
       - name: Trivy — dependencies & secrets (BLOCKING on HIGH/CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.76.2
           scan-type: fs
           scan-ref: .
           scanners: vuln,secret
@@ -373,6 +374,7 @@ jobs:
       - name: Trivy — Kubernetes misconfig (report only)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.76.2
           scan-type: fs
           scan-ref: .
           scanners: misconfig
