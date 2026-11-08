@@ -17,12 +17,13 @@ func TestPhase04AcceptsConfiguredNodesAndTheMariaDBPod(t *testing.T) {
 			Workers: []config.NodeDetail{{Name: "w1", IP: "192.168.10.13"}},
 		},
 	}
+	var gotCmd string
 	fake := &testutil.FakeExecutor{
 		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
 			if strings.Contains(cmd, "---CMS_DELIM---") {
+				gotCmd = cmd
 				return "m1 Ready control-plane,etcd\nw1 Ready worker\nstale Ready worker\n" +
-					"---CMS_DELIM---\nRunning\n---CMS_DELIM---\n" +
-					"m1 Ready control-plane,etcd\nstale Ready control-plane,etcd\n", "", 0, nil
+					"---CMS_DELIM---\nRunning\n", "", 0, nil
 			}
 			return "", "", 0, nil
 		},
@@ -32,6 +33,46 @@ func TestPhase04AcceptsConfiguredNodesAndTheMariaDBPod(t *testing.T) {
 	res := v.phase04(t.Context())
 	if !res.Pass {
 		t.Fatalf("phase04() = %+v, want a pass despite the stale node object", res)
+	}
+	// One listing must carry both the readiness and the etcd membership: a
+	// second selector call starved the retry budget once (run 42496928670).
+	if strings.Count(gotCmd, "get nodes") != 1 {
+		t.Errorf("phase04 command = %q, want exactly one kubectl get nodes call", gotCmd)
+	}
+	if strings.Contains(gotCmd, "node-role.kubernetes.io/etcd") {
+		t.Errorf("phase04 command = %q, want no dedicated etcd selector call", gotCmd)
+	}
+}
+
+func TestPhase04RetriesATransientSSHFailure(t *testing.T) {
+	cfg := &config.Config{
+		Nodes: config.NodesConfig{
+			Masters: []config.NodeDetail{{Name: "m1", IP: "192.168.10.11"}},
+			Workers: []config.NodeDetail{{Name: "w1", IP: "192.168.10.13"}},
+		},
+	}
+	attempts := 0
+	fake := &testutil.FakeExecutor{
+		RunFunc: func(_ context.Context, _ string, cmd string) (string, string, int, error) {
+			attempts++
+			if attempts == 1 {
+				// What a CPU-starved master looks like from the SSH layer.
+				return "", "", 0, errors.New("ssh: context deadline exceeded")
+			}
+			if strings.Contains(cmd, "---CMS_DELIM---") {
+				return "m1 Ready control-plane,etcd\nw1 Ready worker\n---CMS_DELIM---\nRunning\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+	v := &Verifier{cfg: cfg, ssh: fake}
+
+	res := v.phase04(t.Context())
+	if !res.Pass {
+		t.Fatalf("phase04() = %+v, want a pass after the transient SSH failure", res)
+	}
+	if attempts < 2 {
+		t.Errorf("RunCommand attempts = %d, want the transient failure to be retried", attempts)
 	}
 }
 
@@ -43,9 +84,12 @@ func TestReadyNodeNames(t *testing.T) {
 }
 
 func TestEtcdMemberNames(t *testing.T) {
-	got := etcdMemberNames("m1 Ready control-plane,etcd\nstale Ready control-plane,etcd\n")
-	if !got["m1"] || !got["stale"] || len(got) != 2 {
-		t.Fatalf("etcdMemberNames() = %v", got)
+	got := etcdMemberNames("m1 Ready control-plane,etcd\n" +
+		"m2 NotReady control-plane,etcd\n" +
+		"stale Ready control-plane,etcd\n" +
+		"w1 Ready worker\n")
+	if !got["m1"] || !got["m2"] || !got["stale"] || got["w1"] || len(got) != 3 {
+		t.Fatalf("etcdMemberNames() = %v, want the etcd-labeled nodes regardless of Ready and no workers", got)
 	}
 }
 
