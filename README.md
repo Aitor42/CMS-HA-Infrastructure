@@ -189,6 +189,13 @@ CMS-HA-Infrastructure/
 │   ├── verify/                      # Infrastructure and functional health checks
 │   ├── drills/                      # Backup/restore, TLS renewal and alert checks
 │   ├── utils/                       # Failover scenarios, repair and status
+│   ├── ansible/                     # Renders the Ansible provisioning inputs from config.yaml
+│   ├── container/                   # Locates docker/podman for the pinned tool images
+│   ├── dashboards/                  # Grafana dashboards and their query checks
+│   ├── httpcheck/                   # HTTP probe shared by verify and the drills
+│   ├── prom/                        # Minimal Prometheus HTTP API client for checks
+│   ├── shell/                       # POSIX shell command building and quoting helpers
+│   ├── testutil/                    # Shared test doubles (FakeExecutor and friends)
 │   └── phases/                      # Phase implementations (one package per phase)
 │       ├── initvms/                 # 00 — VM creation (libvirt/cloud-init/PXE)
 │       ├── cobbler/                 # 01 — Cobbler PXE server setup
@@ -362,26 +369,27 @@ Run the comprehensive, parallel health verifier:
 ```bash
 # Supported: runs 10 checks in parallel; the end-to-end check adds a short
 # request burst through the load-balancer VIP and functional checks of the CMS
-# features, the database round-trip and the monitoring probes, so the run takes
-# seconds
+# features, the database round-trip and the monitoring probes, so a full run
+# takes on the order of a minute
 ./cms-ha verify
 ```
 
-Example output from a fully converged environment:
+Example output from a fully converged environment (the 13-VM hosted lab of the
+integration run; the full 16-node lab adds the three hotdesks):
 
 ```text
 ℹ Starting phase: Infrastructure Verification
-✓ Phase 00 - Libvirt VMs & Networks: [PASS] (16 running VMs)
-✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 15)
-✓ Phase 02 - Puppet Server & Certs: [PASS] (Certs: 15)
-✓ Phase 03 - Nginx & Apache & SSL: [PASS]
-✓ Phase 04 - K3s & MariaDB Pod: [PASS]
-✓ Phase 05 - Prometheus & Grafana: [PASS]
+✓ Phase 00 - Libvirt VMs & Networks: [PASS] (13 running VMs)
+✓ Phase 01 - Cobbler Services & Systems: [PASS] (Systems: 12)
+✓ Phase 02 - Puppet Server & Certs: [PASS] (Certs: 14)
+✓ Phase 03 - Nginx & Apache & SSL: [PASS] (certificate issued by "CMS Local CA", valid > 30 days, chain and 4 SANs verified)
+✓ Phase 04 - K3s & MariaDB Pod: [PASS] (ready nodes: 5/5, etcd members: 3/3, MariaDB: true)
+✓ Phase 05 - Prometheus & Grafana: [PASS] (services active, Grafana health OK, Prometheus and Alertmanager ready, alert rules loaded)
 ✓ Phase 06 - Router UFW & IP Forward: [PASS]
 ✓ Phase 07 - DRBD Status: [PASS] (Verified on 192.168.10.11)
-✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (CMS: 100/100 requests OK (100%), Prometheus: healthy, 9 target(s) up, Grafana: database ok (v13.3.0))
-✓ Phase 10 - Stack functional checks (CMS pages, REST API, frontends, load balancers, MariaDB, backup store, probes, Grafana): [PASS]
-✓ Completed phase: Infrastructure Verification in 21.37s
+✓ Phase 08 - End-to-end HTTP (CMS, Grafana, Prometheus): [PASS] (Grafana: database ok (v13.3.0), Prometheus: healthy, 27 target(s) up, CMS: 100/100 requests OK (100%))
+✓ Phase 10 - Stack functional checks (CMS, database, probes): [PASS] (CMS pages: login form 200, feed 200, asset 200, http->https 301, CMS REST API: 5 namespace(s), 1 post(s), permalink /hello-world/ 200, CMS frontends: 192.168.20.101: 1 post(s), uploads on nfs4; 192.168.20.102: 1 post(s), uploads on nfs4, PHP security patch: 192.168.20.101: php 8.3.6-0ubuntu0.24.04.13 patched (3 packages), mod_php hardened; 192.168.20.102: php 8.3.6-0ubuntu0.24.04.13 patched (3 packages), mod_php hardened, Load balancers: 192.168.20.103: HTTP 200, 192.168.20.104: HTTP 200, MariaDB: NodePort 30306 open, wp_posts=4, wp_options=129, write round-trip ok, Backup store: internal-master1 reaches the S3 API at http://192.168.10.254:3900, Prometheus probes: 19 rule(s) in 4 group(s), 3/3 blackbox probes up, DRBD and keepalived metrics present, Grafana: datasource Prometheus (prometheus-cms-infra), 2 dashboard(s) loaded, home = CMS HA — DRBD / etcd / LB overview, 26 panel queries)
+✓ Completed phase: Infrastructure Verification in 1m 13.30s
 ```
 
 ### Configuration Validation
@@ -583,7 +591,7 @@ dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 | [NETWORK_DIAGRAM.md](docs/NETWORK_DIAGRAM.md) | Network topology and service architecture diagrams |
 | [SECURITY.md](docs/SECURITY.md) | Non-root access, host-key pinning and CI scanning model |
 | [RELEASING.md](docs/RELEASING.md) | Tagged releases, checksums, SBOMs and Cosign verification |
-
+| [LEGACY-V1-MAPPING.md](docs/LEGACY-V1-MAPPING.md) | v1 shell scripts → v2 command mapping (legacy scripts removed) |
 | [schema/config.schema.json](schema/config.schema.json) | Generated JSON Schema for `config.yaml` (autocomplete and pre-deploy validation) |
 | [phases/](docs/phases/) | Per-phase technical documentation |
 
@@ -599,7 +607,7 @@ The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pul
 | Workflow Lint | actionlint + yamllint | Workflow syntax and pinned-action hygiene |
 | Shell Lint | ShellCheck + `bash -n` | All `.sh` scripts |
 | YAML Lint | yamllint | Kubernetes manifests, monitoring configs |
-| K8s Validation | Kustomize + kubeconform | Non-empty rendered manifests against v1.29 schemas; invalid, errored or skipped resources fail |
+| K8s Validation | Kustomize + kubeconform | Non-empty rendered manifests against v1.37.2 schemas; invalid, errored or skipped resources fail |
 | Puppet Lint | puppet-lint + `puppet parser validate` | All `.pp` manifests |
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
 | Security Scan | gosec + govulncheck + Gitleaks + Trivy | Go SAST, dependency CVEs, committed secrets, secrets/misconfig |
