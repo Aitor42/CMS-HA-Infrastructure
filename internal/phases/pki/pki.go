@@ -96,7 +96,8 @@ func (p *Phase) Run(ctx context.Context) error {
 // step-ca_<v>-1_<arch>.deb and step-ca_<v>_<arch>.deb, so every known shape
 // is tried and the version-independent alias is used only when the version
 // is left empty. A pin that cannot be downloaded is an error, not a reason
-// to install something else.
+// to install something else. Each attempt retries transient GitHub/CDN
+// failures; a single failed connection must not abort a whole deployment.
 func (p *Phase) installStepTools(ctx context.Context, jumpIP string) error {
 	logging.Info("Installing step-cli and step-ca on Jumpstart...")
 	installCmd := fmt.Sprintf(`set -e
@@ -105,7 +106,7 @@ if ! command -v step >/dev/null 2>&1 || ! command -v step-ca >/dev/null 2>&1; th
 	install_deb() {
 		out="$1"; shift
 		for url in "$@"; do
-			if wget -q "$url" -O "$out"; then
+			if wget -q --tries=5 --timeout=30 --waitretry=5 --retry-connrefused "$url" -O "$out"; then
 				dpkg -i "$out" || apt-get install -f -y
 				rm -f "$out"
 				return 0
