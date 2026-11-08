@@ -296,10 +296,13 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 
 	// Query the exact StatefulSet pod, not every pod carrying app=mariadb:
 	// backup and restore CronJob pods share that label and can be Running
-	// while the database itself is Pending or CrashLooping. The etcd listing is
-	// parsed by name below; piping it through `wc -l` would also count a stale
-	// node object left behind by an earlier join.
-	cmd := `kubectl --request-timeout=10s get nodes --no-headers; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.status.phase}' 2>/dev/null || true; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get nodes -l node-role.kubernetes.io/etcd --no-headers`
+	// while the database itself is Pending or CrashLooping. The etcd members
+	// come from the ROLES column of the same nodes listing instead of a
+	// second selector call: three kubectl starts on a CPU-starved master
+	// blew the whole retry budget once (run 42496928670), and every extra
+	// round-trip widens that window. Parsing by name still keeps a stale
+	// node object from being mistaken for a live member.
+	cmd := `kubectl --request-timeout=10s get nodes --no-headers; echo "---CMS_DELIM---"; kubectl --request-timeout=10s get pod mariadb-0 -n cms -o jsonpath='{.status.phase}' 2>/dev/null || true`
 
 	expectedNodes := make([]config.NodeDetail, 0, len(v.cfg.Nodes.Masters)+len(v.cfg.Nodes.Workers))
 	expectedNodes = append(expectedNodes, v.cfg.Nodes.Masters...)
@@ -316,19 +319,18 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 	// A k3s restart - the process can be lost to the OOM killer on the small CI
 	// guests - leaves the API server unreachable for a few seconds. A single
 	// shot would fail the whole verification for that blip, so retry within a
-	// bounded budget, mirroring the deploy phase's own etcd check.
-	_ = retry.DoContext(ctx, retry.Config{MaxAttempts: 20, Interval: 3 * time.Second, MaxInterval: 6 * time.Second, Timeout: 90 * time.Second}, func(attemptCtx context.Context) error {
+	// bounded budget, mirroring the deploy phase's own etcd check (3 minutes):
+	// under the parallel verify storm a small master can starve kubectl well
+	// past the 10s request timeouts (run 42496928670). Timeout is the overall
+	// budget shared by every attempt, not a per-attempt deadline.
+	_ = retry.DoContext(ctx, retry.Config{MaxAttempts: 40, Interval: 3 * time.Second, MaxInterval: 6 * time.Second, Timeout: 3 * time.Minute}, func(attemptCtx context.Context) error {
 		out, errOut, code, err := v.ssh.RunCommand(attemptCtx, v.cfg.Nodes.Masters[0].IP, cmd)
 		parts := strings.Split(out, "---CMS_DELIM---")
 		nodesOut := out
 		podOut := ""
-		etcdOut := ""
 		if len(parts) >= 2 {
 			nodesOut = parts[0]
 			podOut = strings.TrimSpace(parts[1])
-		}
-		if len(parts) >= 3 {
-			etcdOut = parts[2]
 		}
 
 		ready := readyNodeNames(nodesOut)
@@ -347,7 +349,7 @@ func (v *Verifier) phase04(ctx context.Context) CheckResult {
 		// keeps etcd inside the server process, so members are the nodes
 		// carrying the etcd role label rather than kube-system pods. Extra
 		// stale node objects are tolerated.
-		members := etcdMemberNames(etcdOut)
+		members := etcdMemberNames(nodesOut)
 		etcdMembers = 0
 		var missingEtcd []string
 		for _, node := range v.cfg.Nodes.Masters {
@@ -410,14 +412,18 @@ func readyNodeNames(out string) map[string]bool {
 	return ready
 }
 
-// etcdMemberNames returns the node names carrying the etcd role label. The
-// name is enough; a stale object with the label must not make a missing member
-// look present, so callers compare against the configured names.
+// etcdMemberNames returns the node names carrying the etcd role label, parsed
+// from a plain `kubectl get nodes --no-headers` listing: the ROLES column
+// (fields[2]) of the same listing the readiness count uses. Selecting with the
+// label would duplicate the listing as a second kubectl start, which a
+// CPU-starved master may not answer in time; a stale object with the label
+// must not make a missing member look present, so callers compare against the
+// configured names.
 func etcdMemberNames(out string) map[string]bool {
 	members := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 0 {
+		if len(fields) < 3 || !strings.Contains(fields[2], "etcd") {
 			continue
 		}
 		members[fields[0]] = true
