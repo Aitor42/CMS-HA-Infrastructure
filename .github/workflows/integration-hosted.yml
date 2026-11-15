@@ -2,7 +2,13 @@ name: Integration (KVM lab, hosted)
 
 # Free, GitHub-hosted counterpart of the self-hosted `Integration (KVM lab)`
 # gate: it runs the same deploy -> verify -> DRBD failover pipeline, but on a
-# standard `ubuntu-latest` runner instead of a dedicated lab host.
+# standard `ubuntu-24.04` runner instead of a dedicated lab host.
+#
+# Pin the runner image instead of tracking `ubuntu-latest`: the lab depends on
+# 24.04 host packages and network behaviour and was measured on them, while
+# `ubuntu-latest` was moved to Ubuntu 26.04 on 2026-11-14 and the `qemu-kvm`
+# transitional package no longer exists there. Bump this deliberately, after a
+# full integration run on the new image.
 #
 # Why it can work at all (measured on 2026-10-18, see the probe in git history):
 #   * hosted Linux runners do expose /dev/kvm — nested virtualisation was
@@ -112,7 +118,7 @@ env:
 jobs:
   integration:
     name: Deploy + verify + failover (hosted)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
 
     steps:
@@ -208,10 +214,14 @@ jobs:
             echo "::error::apt-get update failed and no unreachable third-party source could be disabled"
             exit 1
           fi
+          # `qemu-system-x86` is the real package on both 24.04 and 26.04;
+          # `qemu-kvm` is only a transitional alias and is absent from 26.04.
+          # Ubuntu's libvirt modular daemons pull in the rest of the stack.
           sudo DEBIAN_FRONTEND=noninteractive timeout 900 \
             apt-get "${APT_OPTS[@]}" install -y -qq \
-            qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients virtinst \
-            xorriso dnsmasq-base bridge-utils openssh-server python3-yaml acl >/dev/null
+            qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients \
+            virtinst xorriso dnsmasq-base bridge-utils openssh-server \
+            python3-yaml acl >/dev/null
 
           # /dev/kvm is present but owned root:kvm with mode 0660. Grant the
           # runner an ACL instead of making the device world-writable.

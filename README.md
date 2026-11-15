@@ -569,7 +569,7 @@ The driver saves `failover.json` and requires every chaos scenario to run. Its
 optional k6 step runs **before**, not during, chaos. Scenario durations include
 preflight and node restoration, not the measured CMS outage or RTO.
 
-The same driver also runs on a standard `ubuntu-latest` runner through
+The same driver also runs on a standard `ubuntu-24.04` runner through
 `.github/workflows/integration-hosted.yml` (nightly, push, manual dispatch and a reusable pre-publication release gate). Hosted runners do
 expose nested KVM, so the lab is genuinely virtualised, but it is small — 4
 vCPU and 15 GiB of RAM — which is why that workflow deploys `config.ci.yaml`
@@ -612,7 +612,7 @@ The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pul
 | Ansible Validate | `ansible-lint` + `--syntax-check` | Playbooks, roles and inventory |
 | Security Scan | gosec + govulncheck + Gitleaks + Trivy | Go SAST, dependency CVEs, committed secrets, secrets/misconfig |
 | Integration (KVM lab) | `tests/integration/run.sh` | Self-hosted `kvm` runner: deploy + verify + 5 failover scenarios (manual dispatch) |
-| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-latest` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (push to `main`, nightly cloud, release PXE, manual dispatch) |
+| Integration (hosted) | `tests/integration/run.sh` | `ubuntu-24.04` nested KVM: deploy + verify + traffic + drills + failover on the reduced topology (push to `main`, nightly cloud, release PXE, manual dispatch) |
 | Release | CI + ISO/PXE integration + GoReleaser + Syft + Cosign | Tag `v*`: CI and full PXE gate on the tagged SHA before publication; archives, checksums, SBOMs and keyless signature (see `docs/RELEASING.md`) |
 
 ---
