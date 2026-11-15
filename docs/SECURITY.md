@@ -110,7 +110,10 @@ misconfiguration findings blocking.
 
 Dependencies are kept current: `golang.org/x/crypto` is pinned at **v0.56.0**
 or newer, which clears GO-2026-6354 / GO-2026-6355 (DoS in `x/crypto/ssh`).
-`go.mod` requires Go **1.27**.
+`go.mod` requires Go **1.27.4**, the first patch release that fixes
+GO-2026-6859 (HTTP/1 server crash from a `MaxBytesReader` header race in
+`net/http`). The patch level is part of the directive so `go-version-file`
+in CI and any local build use the fixed standard library.
 
 ---
 

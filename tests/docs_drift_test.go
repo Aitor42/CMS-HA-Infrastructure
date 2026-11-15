@@ -23,13 +23,17 @@ func TestDocumentationTracksPinnedVersions(t *testing.T) {
 	}
 
 	goMod := read("go.mod")
-	goVersion := regexp.MustCompile(`(?m)^go\s+(\d+\.\d+)`).FindStringSubmatch(goMod)
+	// The patch level is part of the security floor: go-version-file feeds it
+	// to every CI job, so an implicit patch would build an unfixed standard
+	// library. Require an explicit x.y.z directive.
+	goVersion := regexp.MustCompile(`(?m)^go\s+(\d+\.\d+\.\d+)\s*$`).FindStringSubmatch(goMod)
 	if len(goVersion) != 2 {
-		t.Fatal("could not parse the Go version from go.mod")
+		t.Fatal("go.mod must pin an explicit Go patch version (go x.y.z)")
 	}
+	goMinor := goVersion[1][:strings.LastIndex(goVersion[1], ".")]
 	makefile := read("Makefile")
-	if !strings.Contains(makefile, "Go "+goVersion[1]+"+") {
-		t.Fatalf("Makefile prerequisites do not mention Go %s+", goVersion[1])
+	if !strings.Contains(makefile, "Go "+goMinor+"+") {
+		t.Fatalf("Makefile prerequisites do not mention Go %s+", goMinor)
 	}
 
 	monitor := read("puppet/modules/role/manifests/monitor.pp")
@@ -38,6 +42,9 @@ func TestDocumentationTracksPinnedVersions(t *testing.T) {
 		t.Fatal("could not parse the pinned Grafana package version")
 	}
 	baseline := read("docs/SOFTWARE_BASELINE.md")
+	if !strings.Contains(baseline, "| **cms-ha (Go CLI)** | Go "+goVersion[1]+" |") {
+		t.Fatalf("SOFTWARE_BASELINE.md does not list the pinned Go version %s", goVersion[1])
+	}
 	if !strings.Contains(baseline, "| **Grafana** | "+grafana[1]+" |") {
 		t.Fatalf("SOFTWARE_BASELINE.md does not list Grafana %s", grafana[1])
 	}
