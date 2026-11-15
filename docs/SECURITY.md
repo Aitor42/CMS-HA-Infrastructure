@@ -115,6 +115,13 @@ GO-2026-6859 (HTTP/1 server crash from a `MaxBytesReader` header race in
 `net/http`). The patch level is part of the directive so `go-version-file`
 in CI and any local build use the fixed standard library.
 
+Application payloads follow the same rule: `role::cms_frontend` downloads a
+versioned WordPress archive (`wordpress-7.1.4.tar.gz`) and verifies its pinned
+SHA-256 before extraction, instead of following `latest.tar.gz`. That keeps a
+frontend build reproducible and stops a new upstream release, which may change
+the archive layout or raise the required PHP version, from landing in the
+middle of a deploy.
+
 ---
 
 ## 4. PHP runtime patching (CVE-2026-109618 / CVE-2026-109619)

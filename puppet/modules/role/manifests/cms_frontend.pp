@@ -284,21 +284,38 @@ class role::cms_frontend {
   # ---------------------------------------------------------------------------
   # WORDPRESS — Download and extract (idempotent via creates guard)
   # ---------------------------------------------------------------------------
+  # Pin the release instead of tracking wordpress.org/latest.tar.gz: that URL
+  # is a moving target, so a new upstream release can raise the required PHP
+  # version, change the archive layout or land between the two frontends of one
+  # deploy, and the old code accepted any readable tarball left in /tmp. Fetch
+  # the versioned archive and verify its SHA-256. Bump this together with
+  # docs/SOFTWARE_BASELINE.md; the docs-drift test enforces the pair.
+  $wordpress_version = '7.1.4'
+  $wordpress_sha256  = '881e53a4681ff2cd911651b11cccdede5ae477ddf0765af5d6a1a8b219a1d835'
+  $wordpress_url     = "https://wordpress.org/wordpress-${wordpress_version}.tar.gz"
+  $wordpress_tarball = "/tmp/wordpress-${wordpress_version}.tar.gz"
+  $wordpress_marker  = "/tmp/wordpress-${wordpress_version}.extracted"
+  # sha256sum reads "<digest>  <file>" from stdin; --status makes it a silent
+  # predicate, so an archive that is present but corrupt is downloaded again.
+  $wordpress_verify  = "/bin/bash -c 'echo \"${wordpress_sha256}  ${wordpress_tarball}\" | /usr/bin/sha256sum -c --status -'"
+
   exec { 'wordpress-download':
-    command => '/bin/rm -f /tmp/wordpress-latest.tar.gz && /usr/bin/wget -q --timeout=30 --tries=3 -O /tmp/wordpress-latest.tar.gz https://wordpress.org/latest.tar.gz',
-    unless  => '/bin/tar -tzf /tmp/wordpress-latest.tar.gz >/dev/null 2>&1',
+    command => "/usr/bin/wget -q --timeout=30 --tries=3 -O ${wordpress_tarball} ${wordpress_url}",
+    unless  => $wordpress_verify,
     require => Package['wget'],
   }
 
   exec { 'wordpress-extract':
-    command => '/bin/tar -xzf /tmp/wordpress-latest.tar.gz -C /tmp/',
-    creates => '/tmp/wordpress/wp-config-sample.php',
+    command => "/bin/bash -c '/bin/rm -rf /tmp/wordpress && /bin/tar -xzf ${wordpress_tarball} -C /tmp && /bin/touch ${wordpress_marker}'",
+    creates => $wordpress_marker,
     require => Exec['wordpress-download'],
   }
 
   # Copy over the tree instead of deleting /var/www/html first. The uploads
   # directory is an NFS mount and wp-config.php contains generated secrets;
-  # a re-run of this resource must not wipe either of them.
+  # a re-run of this resource must not wipe either of them. The creates guard
+  # also means a later `$wordpress_version` bump does not rewrite an existing
+  # tree: run the core upgrade in WordPress (or with WP-CLI) on legacy nodes.
   exec { 'wordpress-deploy':
     command => '/bin/cp -a /tmp/wordpress/. /var/www/html/ && \
                 /bin/chown -R www-data:www-data /var/www/html/',
