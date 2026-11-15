@@ -37,7 +37,9 @@ jobs:
   release:
     name: Build, sign and publish
     needs: [ci, integration-pxe]
-    runs-on: ubuntu-latest
+    # Pin the image instead of tracking `ubuntu-latest` (moved to Ubuntu 26.04
+    # on 2026-11-14): a release must not change toolchain because the label did.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write

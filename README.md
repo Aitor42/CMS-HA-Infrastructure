@@ -134,7 +134,7 @@ graph TB
 | Configuration Management | Puppet | 8.x | Declarative, agent-based configuration |
 | Container Orchestration | K3s | v1.37.2+k3s1 | Lightweight Kubernetes for HA clustering |
 | Database | MariaDB | 10.11.x | StatefulSet inside K3s cluster |
-| CMS | WordPress | `latest.tar.gz` at bootstrap (not pinned) | Content Management System |
+| CMS | WordPress | 7.1.4 (pinned archive, SHA-256 verified) | Content Management System |
 | Web Server | Apache | Ubuntu APT package (not pinned) | CMS frontend server with PHP 8.3 |
 | Load Balancer | Nginx | Ubuntu APT package (not pinned) | Reverse proxy with passive upstream failure checks |
 | Block Replication | DRBD | Kernel module + APT utilities (not version-pinned) | Synchronous Protocol C replication |
@@ -599,7 +599,7 @@ dispatch with `jumpstart_image=iso` and `fast_provisioning=false`.
 
 ## CI Pipeline
 
-The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pull requests targeting `main`:
+The GitHub Actions CI validates pushes to `main`/`feature/rewrite-in-go` and pull requests targeting `main`, and reruns the same pipeline weekly on `main` so new dependency or Go standard-library advisories surface even when nobody pushes:
 
 | Job | Tool | Scope |
 |:----|:-----|:------|

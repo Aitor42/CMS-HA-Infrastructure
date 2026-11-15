@@ -6,11 +6,24 @@ on:
     branches: ["main", "feature/rewrite-in-go"]
   pull_request:
     branches: ["main"]
+  # Scheduled runs only cover the default branch. They exist so a new Go
+  # standard-library advisory (the risk that turned `security-scan` red on
+  # 2026-11-15: GO-2026-6859, fixed by the go.mod patch bump) is reported even
+  # when nobody has pushed for a while: govulncheck fails on push, so the
+  # weekly run is what keeps an idle `main` honest.
+  schedule:
+    - cron: '0 5 * * 1'
 
 # Least privilege for every job that does not explicitly need more. The
 # security-scan job raises this to security-events: write for its SARIF upload.
 permissions:
   contents: read
+
+# Runner images are pinned instead of tracking `ubuntu-latest`: the label was
+# moved to Ubuntu 26.04 on 2026-11-14, and a silent host-package/toolchain
+# change would alter CI results without a commit. Bump deliberately, after a
+# full run on the new image (the integration gate pins its own image in
+# integration-hosted.yml for the same reason).
 
 # Tool versions are pinned here so a CI run is reproducible. Dependabot can
 # bump them deliberately; `@latest` and unversioned pip/gem installs are not
@@ -35,7 +48,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   build-go:
     name: Build & Test Go CLI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Keep production builds static; the race step explicitly enables cgo.
     env:
       GOFLAGS: -trimpath
@@ -65,8 +78,22 @@ jobs:
       - name: Build check (all packages)
         run: go build ./...
 
+      - name: Cross-compile for linux/arm64 (release target)
+        env:
+          CGO_ENABLED: "0"
+        run: GOOS=linux GOARCH=arm64 go build ./...
+
       - name: Check go.mod/go.sum are tidy
         run: go mod tidy -diff
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l cmd internal tools tests)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
 
       - name: Build CLI binary
         run: |
@@ -76,8 +103,10 @@ jobs:
 
       - name: Install libvirt clients (virsh for the test driver)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-clients
+          # Retries keep a flaky archive mirror from reddening an otherwise
+          # unrelated pull request.
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y -o Acquire::Retries=3 libvirt-clients
 
       - name: Run unit tests with race detection
         env:
@@ -109,7 +138,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   lint-actions:
     name: Lint GitHub Actions workflows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -132,7 +161,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   lint-shell:
     name: Lint Shell Scripts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -170,7 +199,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   lint-yaml:
     name: Lint YAML Manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -193,7 +222,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   validate-k8s:
     name: Validate Kubernetes Manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -228,7 +257,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   lint-puppet:
     name: Validate Puppet Manifests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -263,7 +292,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   validate-ansible:
     name: Validate Ansible
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -312,7 +341,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   security-scan:
     name: Security Scan (gosec, govulncheck, Gitleaks, Trivy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       security-events: write
@@ -397,7 +426,7 @@ jobs:
       - lint-puppet
       - validate-ansible
       - security-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check results
         run: |
