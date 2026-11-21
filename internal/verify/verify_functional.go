@@ -29,9 +29,14 @@ const (
 	// answers in milliseconds; the timeout only exists so that a black-holed
 	// entry point cannot stall the whole verification.
 	functionalTimeout = 30 * time.Second
-	// functionalDBTimeout bounds the database round-trip, which runs through
-	// SSH and `kubectl exec` and is therefore slower than a direct connection.
-	functionalDBTimeout = 60 * time.Second
+	// functionalDBTimeout bounds each attempt of the database round-trip,
+	// which runs through SSH and `kubectl exec` and is therefore slower than
+	// a direct connection. Ninety seconds: on a starved runner the API server
+	// can need over a minute per attempt — the 2026-11-21 nightly burned two
+	// 60 s attempts against an etcd answering reads in ~1 s while the
+	// workers' node leases timed out, and the check failed on the deadline,
+	// not on MySQL.
+	functionalDBTimeout = 90 * time.Second
 )
 
 const (

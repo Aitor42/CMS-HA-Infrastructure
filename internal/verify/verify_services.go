@@ -100,18 +100,20 @@ func (v *Verifier) checkMariaDB(ctx context.Context) e2eOutcome {
 	// The API server is unreachable for a few seconds after a k3s restart, and
 	// on the small CI guests k3s is the first process to go when the runner is
 	// starved: kubectl then reports "The connection to the server
-	// 127.0.0.1:6443 was refused" and the whole verification fails for a blip
-	// the cluster heals on its own. Retry within a bounded budget (the phase 04
-	// check does the same for the same reason); a database that is really
-	// broken fails every attempt. The SQL drops its throwaway table first, so
-	// running it again is safe.
+	// 127.0.0.1:6443 was refused" — or simply takes over a minute per attempt,
+	// as in the 2026-11-21 nightly, where etcd read latencies sat at ~1 s and
+	// the workers' leases timed out during the verification window — and the
+	// whole verification fails for a blip the cluster heals on its own. Retry
+	// within a bounded budget (the phase 04 check does the same for the same
+	// reason); a database that is really broken fails every attempt. The SQL
+	// drops its throwaway table first, so running it again is safe.
 	var (
 		out      string
 		errOut   string
 		exitCode int
 		lastErr  string
 	)
-	retryErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, MaxInterval: 15 * time.Second, Timeout: 120 * time.Second}, func(attemptCtx context.Context) error {
+	retryErr := retry.DoContext(ctx, retry.Config{MaxAttempts: 10, Interval: 5 * time.Second, MaxInterval: 15 * time.Second, Timeout: 300 * time.Second}, func(attemptCtx context.Context) error {
 		attemptCtx, attemptCancel := context.WithTimeout(attemptCtx, functionalDBTimeout)
 		defer attemptCancel()
 		var runErr error
