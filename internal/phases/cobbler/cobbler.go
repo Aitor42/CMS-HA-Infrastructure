@@ -319,7 +319,10 @@ func (p *Phase) Run(ctx context.Context) error {
 // privileged commands are elevated transparently with sudo (see docs/SECURITY.md).
 func (p *Phase) waitForJumpstartSSH(ctx context.Context, jumpIP string) error {
 	logging.Info("Waiting for SSH on Jumpstart (%s) as %q...", jumpIP, p.cfg.SSHUser())
-	if err := p.pool.WaitForSSH(ctx, jumpIP, 5*time.Minute); err != nil {
+	// Eight minutes: the init-vms phase may have just recovered a stalled
+	// first boot with a reboot, and a slow boot still needs to rerun
+	// cloud-init before sshd listens.
+	if err := p.pool.WaitForSSH(ctx, jumpIP, 8*time.Minute); err != nil {
 		return fmt.Errorf("timed out waiting for SSH on %s: %w", jumpIP, err)
 	}
 	logging.Success("SSH accessible on %s", jumpIP)

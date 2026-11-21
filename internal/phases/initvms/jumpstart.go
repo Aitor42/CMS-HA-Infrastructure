@@ -243,15 +243,43 @@ func (p *Phase) deployJumpstart(ctx context.Context) error {
 		}
 	}
 
-	logging.Info("Waiting for Jumpstart VM to boot and SSH to become ready...")
-	if err := p.pool.WaitForSSH(ctx, p.cfg.Nodes.Jumpstart.IP, 3*time.Minute); err != nil {
-		logging.Warn("Jumpstart VM started, but SSH is not yet ready: %v", err)
-	} else {
-		logging.Success("Jumpstart VM is reachable via SSH at %s", p.cfg.Nodes.Jumpstart.IP)
-	}
+	p.waitBootSSH(ctx)
 
 	logging.Success("Jumpstart VM deployed and started")
 	return nil
+}
+
+// waitBootSSH waits for the first boot to expose SSH. The cloud image can
+// stall its first cloud-init pass: sshd starts behind cloud-init in the cloud
+// boot order, so the port stays closed (connection refused) even though the
+// network is already configured, which is exactly the daily CI failure of
+// 2026-11-21 after a run that had booted fine 18 s in. A fresh boot almost
+// always finishes the pass, so hard-reboot once and wait again before giving
+// up; the phase stays non-fatal because phase 01 owns the final gate.
+func (p *Phase) waitBootSSH(ctx context.Context) {
+	name := p.cfg.Nodes.Jumpstart.Name
+	ip := p.cfg.Nodes.Jumpstart.IP
+
+	logging.Info("Waiting for Jumpstart VM to boot and SSH to become ready...")
+	err := p.pool.WaitForSSH(ctx, ip, 3*time.Minute)
+	if err == nil {
+		logging.Success("Jumpstart VM is reachable via SSH at %s", ip)
+		return
+	}
+	logging.Warn("Jumpstart VM started, but SSH is not yet ready: %v", err)
+
+	logging.Info("Rebooting the Jumpstart VM once to clear a stalled first-boot cloud-init...")
+	if err := p.lv.Destroy(ctx, name); err != nil {
+		logging.Warn("Failed to stop the Jumpstart VM for recovery: %v", err)
+	}
+	if err := p.lv.Start(ctx, name); err != nil {
+		logging.Warn("Failed to restart the Jumpstart VM for recovery: %v", err)
+	}
+	if err := p.pool.WaitForSSH(ctx, ip, 3*time.Minute); err != nil {
+		logging.Warn("Jumpstart SSH is still not ready after the recovery reboot: %v", err)
+		return
+	}
+	logging.Success("Jumpstart VM is reachable via SSH at %s after the recovery reboot", ip)
 }
 
 // jumpstartImageMode resolves the install path: the CLI flag wins, then the

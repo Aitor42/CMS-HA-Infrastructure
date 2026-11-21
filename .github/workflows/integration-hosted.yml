@@ -612,9 +612,12 @@ jobs:
             echo "==== dmesg (kvm/oom) ===="
             sudo dmesg 2>/dev/null | grep -iE "kvm|oom|killed process" | tail -n 40 || true
             echo "==== nodes: SSH authentication probe ===="
+            # accept-new, not yes: on a provisioning failure cms_known_hosts
+            # has no entries yet, and strict checking would fail every probe
+            # with "Host key verification failed" instead of reaching the node.
             for ip in 192.168.10.1 192.168.10.15 192.168.10.20; do
               echo "-- ubuntu@$ip"
-              timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              timeout 20 ssh -v -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
                 -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" -o ConnectTimeout=6 \
                 -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" \
                 'echo NODE_OK; sudo -n -H true && echo SUDO_OK || echo SUDO_DENIED' 2>&1 \
@@ -645,7 +648,7 @@ jobs:
             echo "==== neighbours on virbr-int ===="
             ip neigh show dev virbr-int 2>/dev/null || true
             echo "==== router: netplan and networkd ===="
-            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
               -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" \
               -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.1 '
                 echo "-- /etc/netplan --"
@@ -666,7 +669,7 @@ jobs:
                 sudo journalctl -u systemd-networkd --no-pager -n 40 2>&1 || true
               ' 2>&1 || true
             echo "==== jumpstart: netboot flags, services and logs ===="
-            ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
               -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" \
               -i "$HOME/.ssh/id_ed25519_gar" ubuntu@192.168.10.10 '
                 echo "-- netboot flags --"
@@ -711,7 +714,7 @@ jobs:
             guest() {
               ip="$1"; cmd="$2"
               echo "-- ubuntu@$ip"
-              timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              timeout 90 ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
                 -o UserKnownHostsFile="$HOME/.ssh/cms_known_hosts" -o ConnectTimeout=8 \
                 -i "$HOME/.ssh/id_ed25519_gar" "ubuntu@$ip" "$cmd" 2>&1 \
                 | tail -200 || true
@@ -727,12 +730,16 @@ jobs:
             guest 192.168.20.101 'echo "[units]"; systemctl is-active apache2 prometheus-apache-exporter; echo "[mounts]"; mount | grep -i nfs; echo "[apache log]"; sudo tail -20 /var/log/apache2/wordpress_error.log 2>/dev/null; echo "[db nodeport]"; timeout 5 bash -c "cat < /dev/null > /dev/tcp/192.168.10.11/30306" && echo mariadb-nodeport-open || echo mariadb-nodeport-closed'
           } >> "$ARTIFACTS_DIR/diagnostics.log" 2>&1 || true
 
-          # Serial console and screen of the stalled installers. The serial
-          # port is a pty chardev, so `virsh console` refuses to run without a
-          # controlling TTY; reading the pty the domain holds gets the same
-          # output (the kernel logs there too, see the console=ttyS0 kernel
-          # option). The clients also carry a SPICE display, so a screenshot
-          # shows whatever the installer last drew on the VGA.
+          # Serial console and screen of the stalled installers. `virsh console`
+          # refuses to run without a controlling TTY, so it goes through
+          # `script`; --force reattaches even if another console holds the pty.
+          # Reading the pty path is not enough: after the guest finishes booting
+          # it stops writing to serial, and a hung cloud-init (the 2026-11-21
+          # daily-run failure mode: network up, sshd never listening) leaves the
+          # pty silent too. Poking a newline pulls either a login banner or the
+          # last cloud-init lines, which is what says where boot stopped. The
+          # clients also carry a SPICE display, so a screenshot shows whatever
+          # the installer last drew on the VGA.
           command -v convert >/dev/null 2>&1 \
             || sudo apt-get install -y -qq imagemagick >/dev/null 2>&1 || true
           {
@@ -742,16 +749,9 @@ jobs:
                 2>&1 | sed "s/^/screenshot $d: /" || true
               convert "$ARTIFACTS_DIR/console-$d.ppm" "$ARTIFACTS_DIR/console-$d.png" \
                 2>/dev/null || true
-              pty=$(virsh -c qemu:///system dumpxml "$d" 2>/dev/null \
-                | grep -oE "source path='[^']+'" | head -n1 | cut -d"'" -f2)
-              if [ -n "$pty" ]; then
-                sudo timeout 6 cat "$pty" 2>/dev/null | tr -d "\000" | tail -60 \
-                  > "$ARTIFACTS_DIR/console-$d.txt" || true
-              else
-                (sleep 2; printf "\n"; sleep 5) | timeout 15 script -qec \
-                  "virsh -c qemu:///system console $d --force" /dev/null \
-                  > "$ARTIFACTS_DIR/console-$d.txt" 2>&1 || true
-              fi
+              (sleep 2; printf "\n"; sleep 8) | timeout 15 script -qec \
+                "virsh -c qemu:///system console $d --force" /dev/null \
+                > "$ARTIFACTS_DIR/console-$d.txt" 2>&1 || true
               echo "-- $d serial console (tail) --"
               tr -d "\000" < "$ARTIFACTS_DIR/console-$d.txt" | tail -40 || true
             done
